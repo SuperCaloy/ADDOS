@@ -12,8 +12,8 @@ log = logging.getLogger(__name__)
 # ── Phase durations ────────────────────────────────────────────────────────────
 # Phase 1 — Quarantine + Rate Limit:
 #   15s for Low severity, 30s for High severity — faster response
-PHASE1_DURATION_LOW  = 1.0   # Lowered from 3s → 1s for SIMULATION_MODE instant demo
-PHASE1_DURATION_HIGH = 2.0   # Lowered from 5s → 2s for SIMULATION_MODE instant demo
+PHASE1_DURATION_LOW  = 30.0   # Lowered from 3s → 1s for SIMULATION_MODE instant demo
+PHASE1_DURATION_HIGH = 60.0   # Lowered from 5s → 2s for SIMULATION_MODE instant demo
 
 # Phase 2 — Time Ban: escalating bans
 # BUG 2 FIX: use short durations in SIMULATION_MODE so testers see full
