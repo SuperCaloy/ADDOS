@@ -16,7 +16,7 @@
     "pkt_byte_rate_ratio"
   ],
   "n_features": 14,
-  "threshold": 0.6904577759707491,
+  "threshold": 0.6004577759707491,
   "score_sign": "negated",
   "score_formula": "if_score = -model.score_samples(X)",
   "anomaly_rule": "is_anomaly = (if_score >= threshold)",
