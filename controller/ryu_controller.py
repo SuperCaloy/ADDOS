@@ -89,7 +89,7 @@ class FatTreeController(app_manager.RyuApp):
         FatTreeController._connected_count = len(self._datapaths)
         self.logger.info(
             '✔ Switch CONNECTED  dpid=%016x  (%d/%d switches)',
-            dp.id, len(self._datapaths), 20
+            dp.id, len(self._datapaths), 9
         )
 
         # Push switch count so topology.py can poll without Ryu REST app
@@ -98,19 +98,18 @@ class FatTreeController(app_manager.RyuApp):
             "connected": len(self._datapaths),
         })
 
-        # Flush stale priority=1 forwarding rules from previous session
-        flush_match = parser.OFPMatch()
-        dp.send_msg(parser.OFPFlowMod(
-            datapath=dp, command=ofp.OFPFC_DELETE,
-            out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
-            priority=1, match=flush_match,
-        ))
+        # Flush ALL stale rules (priority 0 and 1) including warmup FLOOD rules
+        for pri in (0, 1):
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, command=ofp.OFPFC_DELETE,
+                out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
+                priority=pri, match=parser.OFPMatch(),
+            ))
 
-        # Install table-miss: send unknown packets to controller
-        match = parser.OFPMatch()
+        # Table-miss at priority=1 so it always overrides any leftover priority=0 rules
         actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER)]
         inst    = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-        dp.send_msg(parser.OFPFlowMod(datapath=dp, priority=0, match=match, instructions=inst))
+        dp.send_msg(parser.OFPFlowMod(datapath=dp, priority=1, match=parser.OFPMatch(), instructions=inst))
 
     @set_ev_cls(ofp_event.EventOFPStateChange, DEAD_DISPATCHER)
     def switch_disconnect_handler(self, ev):

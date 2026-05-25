@@ -1,53 +1,114 @@
 import math
+import time
 import threading
 from collections import deque
-from backend.config import (
-    TEA_WINDOW_SIZE,
-    TEA_DIVERSITY_DROP_THRESHOLD,
-    TEA_PACKETRATE_RISE_THRESHOLD,
-    TEA_FLASH_CROWD_MIN_DIVERSITY,
-)
+from backend.config import TEA_WINDOW_SIZE
 
 import logging
 log = logging.getLogger(__name__)
 
+# === ADAPTIVE TEA CONSTANTS ===
+# Learning phase: how many intervals to observe before making decisions
+TEA_LEARN_INTERVALS   = 30       # ~30s at 1s poll rate — absorbs startup surge
+# How many std deviations from learned mean = anomaly
+TEA_ATTACK_SIGMA      = 2.5      # diversity drop this far below mean → suspicious
+TEA_CROWD_SIGMA       = 1.5      # pkt rate this far above mean → surge
+# Minimum absolute diversity to consider flash crowd (not just noise)
+TEA_MIN_CROWD_DIVERSITY = 1.0
+# EMA alpha for continuous baseline adaptation (after learning phase)
+TEA_EMA_ALPHA         = 0.05     # slow adaptation — resistant to attack drift
+
 
 def _shannon_entropy(values: list[float]) -> float:
-    """
-    Compute Shannon Entropy for a list of raw values.
-    Converts to probabilities first then applies H = -sum(p * log2(p)).
-    Returns 0.0 if the list is empty or all zeros.
-    """
+    # H = -sum(p * log2(p)) — returns 0 if empty or all zeros
     total = sum(values)
     if total == 0:
         return 0.0
-
     entropy = 0.0
     for v in values:
         if v <= 0:
             continue
         p = v / total
         entropy -= p * math.log2(p)
-
     return entropy
 
 
-class _SwitchEntropyState:
+class _AdaptiveBaseline:
     """
-    Holds the rolling entropy window for one switch (dpid).
-    Each slot in the window is one polling interval snapshot.
+    Online adaptive baseline for one entropy dimension.
+    Phase 1 (learning): collects N intervals, computes mean + std.
+    Phase 2 (adaptive): updates mean/std slowly via EMA — resists attack drift.
     """
 
+    def __init__(self, learn_intervals: int, ema_alpha: float):
+        self._learn_n   = learn_intervals
+        self._alpha     = ema_alpha
+        self._samples   = []        # raw samples during learning phase
+        self._mean      = None
+        self._variance  = None
+        self._learned   = False
+        self._start_time = time.monotonic()
+
+    @property
+    def is_learned(self) -> bool:
+        return self._learned
+
+    def push(self, value: float) -> None:
+        if not self._learned:
+            self._samples.append(value)
+            if len(self._samples) >= self._learn_n:
+                self._mean     = sum(self._samples) / len(self._samples)
+                variance_vals  = [(x - self._mean) ** 2 for x in self._samples]
+                self._variance = sum(variance_vals) / len(variance_vals)
+                self._learned  = True
+                log.info(
+                    "TEA baseline learned — mean=%.4f  std=%.4f  (n=%d samples)",
+                    self._mean, self._std, len(self._samples)
+                )
+        else:
+            # EMA update — slow adaptation, won't follow attack spikes quickly
+            self._mean     = self._alpha * value + (1 - self._alpha) * self._mean
+            err            = (value - self._mean) ** 2
+            self._variance = self._alpha * err + (1 - self._alpha) * self._variance
+
+    @property
+    def mean(self) -> float:
+        return self._mean if self._mean is not None else 0.0
+
+    @property
+    def _std(self) -> float:
+        return math.sqrt(max(self._variance, 1e-9)) if self._variance is not None else 1.0
+
+    def z_score(self, value: float) -> float:
+        # How many std devs is value from learned mean
+        if not self._learned:
+            return 0.0
+        return (value - self._mean) / self._std
+
+    def is_low(self, value: float, sigma: float) -> bool:
+        # True if value is significantly BELOW learned mean
+        return self._learned and self.z_score(value) <= -sigma
+
+    def is_high(self, value: float, sigma: float) -> bool:
+        # True if value is significantly ABOVE learned mean
+        return self._learned and self.z_score(value) >= sigma
+
+
+class _SwitchEntropyState:
+    # Rolling window + adaptive baselines for one switch
     def __init__(self, window_size: int):
-        # Each entry is a dict with entropy values for that interval
-        self.window: deque = deque(maxlen=window_size)
+        self.window    = deque(maxlen=window_size)
+        self.div_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS, TEA_EMA_ALPHA)
+        self.pkt_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS, TEA_EMA_ALPHA)
+        self.byt_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS, TEA_EMA_ALPHA)
 
     def push(self, snapshot: dict) -> None:
-        """Add a new interval snapshot to the rolling window."""
         self.window.append(snapshot)
+        self.div_base.push(snapshot["diversity_entropy"])
+        self.pkt_base.push(snapshot["packetrate_entropy"])
+        self.byt_base.push(snapshot["byterate_entropy"])
 
     def is_ready(self) -> bool:
-        """Need at least 2 intervals to compute a delta."""
         return len(self.window) >= 2
 
     def latest(self) -> dict:
@@ -56,74 +117,49 @@ class _SwitchEntropyState:
     def previous(self) -> dict:
         return self.window[-2]
 
+    @property
+    def is_learned(self) -> bool:
+        return self.div_base.is_learned and self.pkt_base.is_learned
+
 
 class EntropyAnalyzer:
     """
-    Temporal Entropy Analysis (TEA) module.
+    Adaptive Temporal Entropy Analysis (TEA).
 
-    Runs on every flow_stats polling interval per switch.
-    Tracks how entropy changes over time across three dimensions:
-      1. IP diversity  — how many unique source IPs are active
-      2. Packet rate   — distribution of pps across active flows
-      3. Byte rate     — distribution of bps across active flows
+    Phase 1 — Learning (first ~30 intervals):
+      Observes normal traffic entropy, builds mean + std per switch.
+      No decisions made during this phase — absorbs startup surge naturally.
 
-    A DDoS attack signature in entropy terms:
-      - IP diversity entropy DROPS   (few IPs dominating)
-      - Packet rate entropy RISES    (uniform high-rate flood packets)
+    Phase 2 — Adaptive detection:
+      Uses learned baseline + z-score thresholds instead of hardcoded values.
+      Baselines update slowly via EMA so they track gradual traffic changes
+      but resist being pulled by sustained attacks.
 
-    A flash crowd signature (legitimate spike):
-      - IP diversity entropy stays HIGH (many different users)
-      - Packet rate entropy also rises but diversity does not collapse
-
-    This distinction is what the panel asked for — TEA solves the
-    flash crowd false positive problem.
+    Attack signature:   diversity z-score << -2.5 (collapse) + pkt z-score << -2.5
+    Flash crowd signal: diversity z-score normal/high + pkt z-score >> +1.5
     """
 
     def __init__(self):
         self._lock   = threading.Lock()
-        # One state object per switch dpid
         self._states: dict[int, _SwitchEntropyState] = {}
 
-    # ------------------------------------------------------------------
-    # Main entry — call once per flow_stats reply per switch
-    # ------------------------------------------------------------------
-
     def update(self, dpid: int, flows: list[dict]) -> dict:
-        """
-        Feed a list of flow stat dicts for one switch into the analyzer.
-        Each flow dict must have at least:
-          - src_ip (str)
-          - packet_count_per_second (float)
-          - byte_count_per_second (float)
-
-        Returns an analysis result dict with keys:
-          - diversity_entropy   (float) current interval
-          - packetrate_entropy  (float) current interval
-          - diversity_delta     (float) change from previous interval
-          - packetrate_delta    (float) change from previous interval
-          - is_attack_pattern   (bool)  both signals agree → DDoS
-          - is_flash_crowd      (bool)  high diversity + high rate → legit surge
-          - confidence          (str)   "high" / "moderate" / "low"
-        """
         with self._lock:
             if dpid not in self._states:
                 self._states[dpid] = _SwitchEntropyState(TEA_WINDOW_SIZE)
-
             state = self._states[dpid]
 
-        # Build per-IP aggregates from the flow list
-        ip_pps:  dict[str, float] = {}
-        ip_bps:  dict[str, float] = {}
-
+        # Aggregate per-IP pps and bps
+        ip_pps: dict[str, float] = {}
+        ip_bps: dict[str, float] = {}
         for f in flows:
             src = f.get("src_ip", "")
             if not src or src == "0.0.0.0":
                 continue
-            ip_pps[src]  = ip_pps.get(src, 0.0)  + float(f.get("packet_count_per_second", 0))
-            ip_bps[src]  = ip_bps.get(src, 0.0)  + float(f.get("byte_count_per_second",  0))
+            ip_pps[src] = ip_pps.get(src, 0.0) + float(f.get("packet_count_per_second", 0))
+            ip_bps[src] = ip_bps.get(src, 0.0) + float(f.get("byte_count_per_second",  0))
 
-        # Compute entropy for this interval
-        diversity_entropy  = _shannon_entropy([1.0] * len(ip_pps))  # uniform weight per unique IP
+        diversity_entropy  = _shannon_entropy([1.0] * len(ip_pps))
         packetrate_entropy = _shannon_entropy(list(ip_pps.values()))
         byterate_entropy   = _shannon_entropy(list(ip_bps.values()))
 
@@ -136,39 +172,46 @@ class EntropyAnalyzer:
 
         with self._lock:
             state.push(snapshot)
+            is_learned = state.is_learned
+            div_base   = state.div_base
+            pkt_base   = state.pkt_base
 
             if not state.is_ready():
-                # Not enough history yet — return neutral result
-                return self._neutral(diversity_entropy, packetrate_entropy)
+                return self._neutral(diversity_entropy, packetrate_entropy, learned=False)
 
-            prev = state.previous()
             curr = state.latest()
+            prev = state.previous()
 
-        # Compute deltas — negative diversity means diversity is collapsing
         diversity_delta  = curr["diversity_entropy"]  - prev["diversity_entropy"]
         packetrate_delta = curr["packetrate_entropy"] - prev["packetrate_entropy"]
 
-        # --- Attack pattern check ---
-        # DDoS signature: BOTH entropy values drop together
-        #   - few IPs → diversity collapses
-        #   - one IP dominates → packet rate distribution becomes skewed → entropy drops
-        # This is different from flash crowd where BOTH stay high or rise
-        diversity_dropped   = diversity_delta    <= -TEA_DIVERSITY_DROP_THRESHOLD
-        packetrate_dropped  = packetrate_delta   <= -TEA_PACKETRATE_RISE_THRESHOLD
-        is_attack_pattern   = diversity_dropped and packetrate_dropped
+        # Still in learning phase — return neutral, no decisions
+        if not is_learned:
+            log.debug(
+                "TEA [dpid=%d] learning phase — interval %d/%d",
+                dpid, len(state.window), TEA_LEARN_INTERVALS
+            )
+            return self._neutral(diversity_entropy, packetrate_entropy, learned=False)
 
-        # --- Flash crowd check ---
-        # Flash crowd: diversity stays HIGH (many different users)
-        # even though overall traffic volume spikes
-        # Packet rate entropy stays high or rises because many IPs contribute
-        high_diversity    = curr["diversity_entropy"] >= TEA_FLASH_CROWD_MIN_DIVERSITY
-        packetrate_rising = packetrate_delta > 0
-        is_flash_crowd    = high_diversity and packetrate_rising and not diversity_dropped
+        # === Adaptive thresholds via z-score ===
+        div_z  = div_base.z_score(curr["diversity_entropy"])
+        pkt_z  = pkt_base.z_score(curr["packetrate_entropy"])
 
-        # --- Confidence level ---
+        # Attack: diversity collapses AND packet rate collapses (few IPs dominating)
+        diversity_collapsed  = div_base.is_low(curr["diversity_entropy"], TEA_ATTACK_SIGMA)
+        packetrate_collapsed = pkt_base.is_low(curr["packetrate_entropy"], TEA_ATTACK_SIGMA)
+        is_attack_pattern    = diversity_collapsed and packetrate_collapsed
+
+        # Flash crowd: diversity is normal/high + pkt rate is high + diversity not collapsed
+        diversity_normal  = not diversity_collapsed
+        packetrate_surge  = pkt_base.is_high(curr["packetrate_entropy"], TEA_CROWD_SIGMA)
+        high_diversity    = curr["diversity_entropy"] >= TEA_MIN_CROWD_DIVERSITY
+        is_flash_crowd    = diversity_normal and packetrate_surge and high_diversity
+
+        # Confidence
         if is_attack_pattern:
             confidence = "high"
-        elif diversity_dropped or packetrate_dropped:
+        elif diversity_collapsed or packetrate_collapsed:
             confidence = "moderate"
         else:
             confidence = "low"
@@ -178,88 +221,79 @@ class EntropyAnalyzer:
             "packetrate_entropy": round(curr["packetrate_entropy"], 4),
             "diversity_delta":    round(diversity_delta,  4),
             "packetrate_delta":   round(packetrate_delta, 4),
+            "diversity_zscore":   round(div_z,  4),
+            "packetrate_zscore":  round(pkt_z,  4),
+            "baseline_mean_div":  round(div_base.mean, 4),
+            "baseline_mean_pkt":  round(pkt_base.mean, 4),
             "unique_ips":         curr["unique_ips"],
             "is_attack_pattern":  is_attack_pattern,
             "is_flash_crowd":     is_flash_crowd,
+            "is_learned":         True,
             "confidence":         confidence,
         }
 
         if is_attack_pattern:
             log.info(
-                "TEA [dpid=%d] attack pattern — div_delta=%.3f  pkt_delta=%.3f  conf=%s",
-                dpid, diversity_delta, packetrate_delta, confidence
+                "TEA [dpid=%d] attack pattern — div_z=%.2f  pkt_z=%.2f  conf=%s",
+                dpid, div_z, pkt_z, confidence
             )
         elif is_flash_crowd:
             log.info(
-                "TEA [dpid=%d] flash crowd detected — diversity=%.3f (high, legit surge)",
-                dpid, curr["diversity_entropy"]
+                "TEA [dpid=%d] flash crowd — div=%.3f (normal)  pkt_z=+%.2f (surge)",
+                dpid, curr["diversity_entropy"], pkt_z
             )
 
         return result
 
-    # ------------------------------------------------------------------
-    # Gate check — used by zmq_receiver to decide if flow goes to worker
-    # ------------------------------------------------------------------
-
     def should_submit(self, tea_result: dict, is_flood_prefilter_flagged: bool) -> bool:
-        """
-        Decide whether this flow should be submitted to the ML worker queue.
-
-        Rules:
-          - Always submit if flood prefilter already flagged this IP
-          - Always submit if TEA says attack pattern (high or moderate conf)
-          - Skip if TEA says flash crowd AND no prefilter flag
-            (flash crowd = legitimate surge, let IF decide only if unsure)
-          - Skip if both entropy values are low (normal quiet traffic)
-        """
+        # Always submit flood-prefiltered IPs
         if is_flood_prefilter_flagged:
+            return True
+
+        # Still learning — submit everything so IF can warm up too
+        if not tea_result.get("is_learned", False):
             return True
 
         conf = tea_result.get("confidence", "low")
 
-        # Flash crowd with no other signal — likely legitimate, skip ML
-        # TEA identified high diversity + rising rate = real users, not attacker
+        # Flash crowd with no prefilter → legit surge, skip ML
         if tea_result.get("is_flash_crowd") and conf != "high":
-            log.debug("TEA gate: flash crowd — skipping ML, likely legit surge")
+            log.debug("TEA gate: flash crowd — skipping ML")
             return False
 
         # Attack pattern → always submit
         if tea_result.get("is_attack_pattern"):
             return True
 
-        # Moderate signal → still submit, let IF decide
+        # Moderate → submit, let IF decide
         if conf == "moderate":
             return True
 
-        # Low confidence → only submit if there is some baseline pps activity
         return False
 
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-
     def reset_switch(self, dpid: int) -> None:
-        """Clear entropy state for a switch — call on reconnect."""
+        # Clear state on reconnect — forces re-learning
         with self._lock:
             self._states.pop(dpid, None)
+        log.info("TEA [dpid=%d] state reset — re-learning baseline", dpid)
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-
-    def _neutral(self, div: float, pkt: float) -> dict:
-        """Return a neutral result when not enough history exists yet."""
+    def _neutral(self, div: float, pkt: float, learned: bool = False) -> dict:
         return {
             "diversity_entropy":  round(div, 4),
             "packetrate_entropy": round(pkt, 4),
             "diversity_delta":    0.0,
             "packetrate_delta":   0.0,
+            "diversity_zscore":   0.0,
+            "packetrate_zscore":  0.0,
+            "baseline_mean_div":  0.0,
+            "baseline_mean_pkt":  0.0,
             "unique_ips":         0,
             "is_attack_pattern":  False,
             "is_flash_crowd":     False,
+            "is_learned":         learned,
             "confidence":         "low",
         }
 
 
-# Module-level singleton — used by zmq_receiver
+# Module-level singleton
 entropy_analyzer = EntropyAnalyzer()
