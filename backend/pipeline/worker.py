@@ -35,6 +35,11 @@ def _process_item(src_ip: str, flow_stats: dict,
     if not src_ip or src_ip in ("0.0.0.0", ""):
         return
 
+    # Server is whitelisted — never score it (reply traffic causes false positives)
+    _WHITELIST = {"10.0.0.20"}
+    if src_ip in _WHITELIST:
+        return
+
     pkt_count = int(flow_stats.get("packet_count", 0)) if flow_stats else 0
     pps       = float(flow_stats.get("packet_count_per_second", 0.0)) if flow_stats else 0.0
 

@@ -346,7 +346,9 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "is_manual":       0,
         "force_insert":    True,   # never overwrite existing rows
     })
-    writer.log_traffic_summary(total=1, threats=1, true_neg=0, fp=0)
+    # Use actual pps so graph shows real attack traffic rate, not just 1
+    _threat_pps = max(int(float((flow_stats or {}).get("packet_count_per_second", 1.0))), 1)
+    writer.log_traffic_summary(total=_threat_pps, threats=_threat_pps, true_neg=0, fp=0)
 
     elapsed_ms = (time.monotonic() - t_start) * 1000
     with _lock:

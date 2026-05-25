@@ -95,15 +95,11 @@ async function fetchStats() {
     }
 
     if (range === 'Live') {
-      const lt = s.live_total     || 0;
-      const lm = s.live_malicious || 0;
-      const ln = s.live_normal    || 0;
-
-      if (prev.t !== 0) {
-        const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-        pushChartPoint(now, Math.max(lt - prev.t, 0), Math.max(lm - prev.m, 0), Math.max(ln - prev.n, 0));
-      }
-      prev = { t: lt, m: lm, n: ln };
+      const lm  = s.live_malicious || 0;
+      const ln  = s.live_normal    || 0;
+      const lt  = lm + ln;
+      const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      pushChartPoint(now, lt, lm, ln);
     }
 
   } catch (_) {}

@@ -56,21 +56,9 @@ FLOOD_UDP_LIMIT     = 60
 FLOOD_UDP_WINDOW_S  = 2.0
 
 # --- Temporal Entropy Analysis (TEA) ---
-# How many polling intervals to keep in the rolling window per switch
-TEA_WINDOW_SIZE     = 5
-
-# Minimum entropy drop in IP diversity to consider it suspicious
-# Normal flash crowd keeps high IP diversity so this stays low
-# DDoS from few IPs collapses diversity — delta goes negative and large
-TEA_DIVERSITY_DROP_THRESHOLD  = 0.4
-
-# Minimum entropy rise in packet rate to consider it suspicious
-# DDoS floods push packet rate entropy up sharply across all sources
-TEA_PACKETRATE_RISE_THRESHOLD = 0.5
-
-# If both diversity drop AND packet rate rise happen together → high confidence
-# If only one triggers → moderate confidence, still passed to IF but flagged
-TEA_FLASH_CROWD_MIN_DIVERSITY = 1.5  # flash crowd keeps diversity above this
+# Rolling window size per switch — adaptive thresholds learned from traffic
+TEA_WINDOW_SIZE = 5
+# All other TEA constants are adaptive — defined in entropy_analyzer.py
 
 # --- API ---
 FLASK_HOST = "0.0.0.0"
