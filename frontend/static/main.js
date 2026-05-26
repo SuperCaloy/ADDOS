@@ -1,6 +1,3 @@
-/* frontend/static/main.js
-   API_URL is injected by the Jinja2 template as window.API_URL
-*/
 const API     = window.API_URL;
 const POLL_MS = window.POLL_MS || 2000;
 const MAX_PTS = window.MAX_PTS || 30;
@@ -76,7 +73,7 @@ async function fetchStats() {
     };
 
     set('c-total',   ct.toLocaleString());
-    set('c-total-s', pctDelta(ct, prev.t));
+    set('c-total-s', prev.t > 0 ? pctDelta(ct, prev.t) : '+0.0%');
     set('c-mal',     cm.toLocaleString());
     set('c-mal-s',   `-${((cm / tot) * 100).toFixed(1)}%`);
     set('c-norm',    cn.toLocaleString());
@@ -97,10 +94,16 @@ async function fetchStats() {
     if (range === 'Live') {
       const lm  = s.live_malicious || 0;
       const ln  = s.live_normal    || 0;
-      const lt  = lm + ln;
+      // Use deltas — backend returns cumulative totals, chart needs per-interval counts
+      const deltaM = prev.m > 0 ? Math.max(lm - prev.m, 0) : 0;
+      const deltaN = prev.n > 0 ? Math.max(ln - prev.n, 0) : 0;
+      const deltaT = deltaM + deltaN;
       const now = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      pushChartPoint(now, lt, lm, ln);
+      pushChartPoint(now, deltaT, deltaM, deltaN);
     }
+
+    // Update prev after all calculations so next poll gets correct deltas and %
+    prev = { t: ct, m: cm, n: cn };
 
   } catch (_) {}
 }

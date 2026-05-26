@@ -351,6 +351,56 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
         log.exception("Failed to write attack history for %s", src_ip)
 
 
+def get_offense_count(src_ip: str) -> float:
+    # Returns weighted offense score using half-life decay (24h half-life).
+    # Each offense adds +2.0, then decays: score = 2.0 * (0.5 ^ (hours_elapsed / 24))
+    # All offenses for this IP are summed — recent ones weigh more than old ones.
+    try:
+        from backend.database.db import query
+        rows = query(
+            "SELECT unblocked_at FROM ip_attack_history WHERE src_ip = ?",
+            (src_ip,)
+        )
+        if not rows:
+            return 0.0
+
+        import time as _t
+        now = datetime.datetime.now()
+        score = 0.0
+
+        for row in rows:
+            try:
+                # Parse the timestamp of each offense
+                offense_dt   = datetime.datetime.strptime(row["unblocked_at"], "%Y-%m-%d %H:%M:%S")
+                hours_elapsed = (now - offense_dt).total_seconds() / 3600.0
+                # Half-life decay: +2.0 per offense, halves every 24h
+                score += 2.0 * (0.5 ** (hours_elapsed / 24.0))
+            except Exception:
+                continue
+
+        return round(score, 4)
+    except Exception as exc:
+        log.warning("writer: failed to get offense count for %s — %s", src_ip, exc)
+        return 0.0
+
+
+def get_ban_level(src_ip: str) -> int:
+    # Returns the highest ban_level ever recorded for this IP in DB.
+    # Used by behavioral to set starting ban level for returning offenders.
+    try:
+        from backend.database.db import query
+        rows = query(
+            "SELECT MAX(ban_level) as max_ban FROM ip_attack_history WHERE src_ip = ?",
+            (src_ip,)
+        )
+        if rows and rows[0]["max_ban"] is not None:
+            return int(rows[0]["max_ban"])
+        return 0
+    except Exception as exc:
+        log.warning("writer: failed to get ban level for %s — %s", src_ip, exc)
+        return 0
+
+
 def get_history_dates() -> list[str]:
     """Return distinct dates (YYYY-MM-DD) that have attack history records."""
     try:

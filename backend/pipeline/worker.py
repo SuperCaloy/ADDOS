@@ -118,6 +118,25 @@ def _process_item(src_ip: str, flow_stats: dict,
         )
         is_anomaly = (if_score >= _effective_threshold)
 
+        # IF feedback to TEA — teach baseline what is confirmed normal vs attack
+        try:
+            from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
+            _dpid = int((switch_stats or {}).get("dpid", 0))
+            if _dpid:
+                if is_anomaly:
+                    _tea.confirm_attack(_dpid)
+                else:
+                    _tea.confirm_normal(_dpid)
+        except Exception:
+            pass
+
+        _effective_threshold = (
+            IF_SCORE_THRESHOLD_OVERRIDE
+            if IF_SCORE_THRESHOLD_OVERRIDE is not None
+            else loader.if_threshold
+        )
+        is_anomaly = (if_score >= _effective_threshold)
+
         # Prefilter-flagged IPs with score above noise floor → treat as anomaly
         if is_flagged and if_score >= 0.58:
             is_anomaly = True

@@ -17,13 +17,14 @@ _lock = threading.Lock()
 # Legit hosts (even):   h2,h4,h6,h8,h10,h12,h14,h16
 _LEGIT_HOST_IPS: frozenset = frozenset([
     "10.0.0.2",  # h2
-    "10.0.1.2",  # h4
-    "10.1.0.2",  # h6
-    "10.1.1.2",  # h8
-    "10.2.0.2",  # h10
-    "10.2.1.2",  # h12
-    "10.3.0.2",  # h14
-    "10.3.1.2",  # h16
+    "10.0.0.4",  # h4
+    "10.0.0.6",  # h6
+    "10.0.0.8",  # h8
+    "10.0.0.10", # h10
+    "10.0.0.12", # h12
+    "10.0.0.14", # h14
+    "10.0.0.16", # h16
+    "10.0.0.18", # h18
 ])
 
 _stats = {
@@ -312,7 +313,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         if prior and prior[0].get("ban_level", 0) is not None:
             prev_ban   = int(prior[0].get("ban_level", 0) or 0)
             prev_off   = int(prior[0].get("offence_count", 0) or 0)
-            if prev_ban > 0 or prev_off > 0:
+            if prev_ban > 0:  # only re-offence if previously banned, not just quarantined
                 state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_off)
                 action_taken = state_machine._states[src_ip].action_taken if src_ip in state_machine._states else "Quarantined"
             else:

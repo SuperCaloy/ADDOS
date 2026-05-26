@@ -236,6 +236,8 @@ def _parse_and_route(raw: bytes) -> None:
         flow_stats["tea_div_entropy"]    = tea_result["diversity_entropy"]
         flow_stats["tea_pkt_entropy"]    = tea_result["packetrate_entropy"]
 
+        # Pass dpid through switch_stats so decision_engine can feed IF result back to TEA
+        switch_stats["dpid"] = dpid
         worker.submit(src_ip, flow_stats, switch_stats)
 
 
