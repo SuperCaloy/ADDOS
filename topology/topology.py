@@ -20,8 +20,9 @@ RESTORE_POLL_S   = 5.0
 N_EDGE           = 8
 N_HOSTS          = 20
 SERVER_IP        = "10.0.0.20"   # h20 — victim HTTP server
+SINKHOLE_IP      = "10.0.0.21"   # h21 — silent dummy host for sinkhole redirection
 ATTACK_PKT_COUNT = 5000
-WHITELIST_IPS    = {SERVER_IP}   # never ML-scored
+WHITELIST_IPS    = {SERVER_IP, SINKHOLE_IP}  # never ML-scored
 
 # odd = attacker, even = legit, h20 = server
 _ATTACKER_NUMS = {1, 3, 5, 7, 9, 11, 13, 15, 17, 19}
@@ -120,6 +121,17 @@ def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
             _hosts.append(host)
             _host_switch_map[f"h{host_num}"] = sw.name
             host_num += 1
+
+    # h21 — silent sinkhole dummy host
+    # Connected directly to core switch s0
+    # Receives redirected uncertain traffic — never sends anything
+    sinkhole = _net.addHost(
+        "h21",
+        ip=f"{SINKHOLE_IP}/24",
+        mac="00:00:00:00:00:15",
+    )
+    _net.addLink(sinkhole, core)
+    _host_switch_map["h21"] = core.name
 
     return _net, _hosts, edge_switches, distribution
 
@@ -601,8 +613,9 @@ def watch_pipeline(interval: float = 2.0, anomaly_only: bool = False, n: int = 2
 
 def _print_banner(distribution: list, edge_switches: list) -> None:
     info("\n" + "=" * 75 + "\n")
-    info("  A-DDoS Star Topology  |  1 core + 8 edge switches  |  20 hosts\n")
-    info(f"  Server: h20 ({SERVER_IP}) — whitelisted, never ML-scored\n")
+    info("  A-DDoS Star Topology  |  1 core + 8 edge switches  |  20 hosts + h21\n")
+    info(f"  Server:   h20 ({SERVER_IP}) — whitelisted, never ML-scored\n")
+    info(f"  Sinkhole: h21 ({SINKHOLE_IP}) — silent dummy, redirected uncertain traffic\n")
     info("=" * 75 + "\n")
     info(f"  {'SWITCH':<8} {'HOSTS':<40} COUNT\n")
     info("  " + "-" * 60 + "\n")
@@ -622,6 +635,8 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
         num = int(h.name[1:])
         if num == 20:
             role, atype = "SERVER", "— (whitelisted)"
+        elif num == 21:
+            role, atype = "SINKHOLE", "— (silent dummy)"
         elif num in _ATTACKER_NUMS:
             role  = "ATTACKER"
             atype = next((f"[{a['attack_type']}] {a['flags']}"

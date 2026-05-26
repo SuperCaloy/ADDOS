@@ -520,25 +520,38 @@ class FatTreeController(app_manager.RyuApp):
                     match=match, instructions=[]))
 
             elif action == "quarantine":
-                # Drop rule with short TTL — self-cleans if backend misses clear
+                # Drop rule — backend sends "clear" to remove, never auto-expires
                 dp.send_msg(parser.OFPFlowMod(
                     datapath=dp, priority=90,
-                    idle_timeout=8, hard_timeout=8,
+                    idle_timeout=0, hard_timeout=0,
                     match=match, instructions=[]))
 
             elif action == "rate_limit":
+                # Drop rule — backend sends "clear" to remove, never auto-expires
                 dp.send_msg(parser.OFPFlowMod(
                     datapath=dp, priority=80,
-                    idle_timeout=10, hard_timeout=10,
+                    idle_timeout=0, hard_timeout=0,
                     match=match, instructions=[]))
 
             elif action == "clear":
+                # Delete all drop rules for this IP
                 dp.send_msg(parser.OFPFlowMod(
                     datapath=dp,
                     command=ofp.OFPFC_DELETE,
                     out_port=ofp.OFPP_ANY,
                     out_group=ofp.OFPG_ANY,
                     match=match))
+                # Push explicit permit rule so released IP can forward immediately.
+                # Priority 5 — above table-miss (1) but below any future block (80+).
+                # TTL 10s — enough for MAC table to re-learn, then expires naturally.
+                permit_inst = [parser.OFPInstructionActions(
+                    ofp.OFPIT_APPLY_ACTIONS,
+                    [parser.OFPActionOutput(ofp.OFPP_FLOOD)]
+                )]
+                dp.send_msg(parser.OFPFlowMod(
+                    datapath=dp, priority=5,
+                    idle_timeout=10, hard_timeout=10,
+                    match=match, instructions=permit_inst))
 
     # ------------------------------------------------------------------
     # Helpers

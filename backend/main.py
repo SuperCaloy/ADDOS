@@ -31,9 +31,29 @@ def create_app() -> Flask:
     # --- Wire commander into state machine ---
     from backend.mitigation.zmq_commander import commander
     from backend.mitigation.state_machine import state_machine, start_tick_thread
+    from backend.mitigation.deception import deception
+    from backend.mitigation.resource_guard import resource_guard
+
     state_machine.set_commander(commander)
+
+    # Wire deception module — must happen before start_tick_thread
+    deception.set_commander(commander)
+    deception.set_callbacks(
+        escalate_fn = lambda src_ip, if_score, attack_vector, confidence: (
+            state_machine.on_detection(src_ip, if_score, attack_vector, confidence)
+        ),
+        release_fn  = lambda src_ip: log.info("Deception: released %s", src_ip),
+    )
+    state_machine.set_deception(deception)
+
     start_tick_thread()
     log.info("State machine started")
+
+    # Wire resource_guard — monitors CPU/memory, clears entries under strain
+    resource_guard.set_state_machine(state_machine)
+    resource_guard.set_deception(deception)
+    resource_guard.start()
+    log.info("Resource guard started")
 
     # --- Start pipeline worker + decision engine ---
     from backend.pipeline import decision_engine
