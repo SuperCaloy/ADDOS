@@ -4,6 +4,12 @@ import time
 import threading
 import logging
 from backend.config import ZMQ_TELEMETRY_ADDR, FLOOD_SYN_LIMIT, FLOOD_ICMP_LIMIT, FLOOD_UDP_LIMIT
+
+# Whitelisted IPs — never flood-filtered or submitted to ML pipeline.
+# h20 = victim server, h21 = sinkhole dummy.
+# Without this, baseline pings from 9 hosts to h20 at ~10ms interval
+# trigger the burst window (400 pkts in 0.5s) and flag h20 as attacker.
+_WHITELIST_IPS = {"10.0.0.20", "10.0.0.21"}
 from backend.pipeline import worker
 from backend.pipeline.flood_prefilter import flood_filter
 from backend.pipeline.entropy_analyzer import entropy_analyzer
@@ -104,6 +110,12 @@ def _parse_and_route(raw: bytes) -> None:
         proto  = msg.get("proto", "")
 
         if not src_ip:
+            return
+
+        # Skip whitelist IPs — server and sinkhole must never be flood-filtered.
+        # All legit hosts ping h20 simultaneously so its burst count easily
+        # exceeds the 400-pkt burst window and flags it as attacker.
+        if src_ip in _WHITELIST_IPS:
             return
 
         # Map Ryu proto strings to our prefilter keys

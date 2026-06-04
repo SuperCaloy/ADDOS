@@ -1,5 +1,5 @@
 const API     = window.API_URL;
-const POLL_MS = window.POLL_MS || 5000;
+const POLL_MS = window.POLL_MS || 2000;
 const MAX_PTS = window.MAX_PTS || 30;
 const MAX_LOG = window.MAX_LOG || 100;
 
