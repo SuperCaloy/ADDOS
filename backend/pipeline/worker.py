@@ -45,24 +45,24 @@ def _process_item(src_ip: str, flow_stats: dict,
     if pkt_count == 0:
         return
 
-    # --- Flood prefilter + switch state ---
-    is_flagged       = flood_filter.is_flagged_any(src_ip)
-    switch_delta_pps = float(flow_stats.get("switch_delta_pps", 0.0)) if flow_stats else 0.0
-    is_flood_switch  = switch_delta_pps >= 1.0
+    # --- Flood prefilter check — was this IP flagged by burst/limit detection ---
+    # is_flood_switch removed — it stamped switch-wide delta on every per-host flow
+    # causing innocent hosts on the same switch to be submitted and timeout-blocked.
+    # IF handles per-host anomaly correctly on its own. Only flood_filter flag matters.
+    is_flagged = flood_filter.is_flagged_any(src_ip)
 
-    # --- Skip young flows — pps is unreliable until flow matures ---
-    # Exemption: already-flagged IPs and flood mode need immediate action
+    # --- Skip young flows — pps unreliable until flow matures ---
+    # Exemption: flood-prefilter-flagged IPs need immediate action
     flow_dur = float(flow_stats.get("flow_duration_sec", 0)) if flow_stats else 0.0
-    if not is_flagged and not is_flood_switch:
+    if not is_flagged:
         if flow_dur < EXTRACTION_TRIGGER_S and pkt_count < EXTRACTION_TRIGGER_PKTS:
             tracker.invalidate_cache(src_ip)
             return
 
     # --- Dynamic low-rate gate using TEA baseline ---
-    # Instead of hardcoded pps < 0.1, use TEA's learned per-switch baseline mean.
-    # If pps is well below the learned normal mean, treat as normal without IF scoring.
-    # Falls back to pps < 0.05 only when TEA has not learned yet.
-    if not is_flood_switch and not is_flagged:
+    # Skip flows well below learned normal baseline — too slow to be an attack.
+    # Falls back to pps < 0.05 floor when TEA has not learned yet.
+    if not is_flagged:
         try:
             from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
             _dpid = int((switch_stats or {}).get("dpid", 0))
@@ -85,11 +85,16 @@ def _process_item(src_ip: str, flow_stats: dict,
                                  timed_out=False)
             return
 
-    # --- Drop stale queue items — fallback block ---
+    # --- Drop stale queue items ---
+    # Only timeout-block IPs already flagged by flood prefilter.
+    # Innocent hosts (not flagged) are silently dropped — IF never confirmed them.
     if time.monotonic() - enqueued_at > WORKER_ITEM_TIMEOUT_S:
-        log.warning("Worker timeout for %s — pushing fallback block", src_ip)
-        if _result_callback:
-            _result_callback(src_ip, None, None, None, None, timed_out=True)
+        if is_flagged:
+            log.warning("Worker timeout for %s (flagged) — pushing fallback block", src_ip)
+            if _result_callback:
+                _result_callback(src_ip, None, None, None, None, timed_out=True)
+        else:
+            log.debug("Worker timeout for %s (not flagged) — dropped silently", src_ip)
         return
 
     # --- Check inference cache — reuse fresh result if available ---
@@ -151,14 +156,10 @@ def _process_item(src_ip: str, flow_stats: dict,
         except Exception:
             pass
 
-        # --- Flood prefilter override — flagged IP + score above model threshold ---
+        # --- Flood prefilter override — flagged IP + IF score above threshold ---
+        # Flood prefilter already confirmed this IP sent a burst — trust IF score.
         if is_flagged and if_score >= _effective_threshold:
             is_anomaly = True
-
-        # --- Last resort flood bypass — extreme switch pps + score above threshold ---
-        if not is_anomaly and switch_delta_pps >= 1000.0 and if_score >= _effective_threshold:
-            is_anomaly = True
-            log.debug("Flood bypass: %s  sw_delta=%.1f  IF=%.4f", src_ip, switch_delta_pps, if_score)
 
         # --- Run Random Forest only if IF confirmed anomaly ---
         attack_class = "Uncertain"
@@ -182,20 +183,19 @@ def _process_item(src_ip: str, flow_stats: dict,
 
         # --- Log scan result ---
         pps_display  = float(flow_stats.get("packet_count_per_second", 0.0)) if flow_stats else 0.0
-        sw_pps       = float(flow_stats.get("switch_delta_pps", 0.0)) if flow_stats else 0.0
         conf_display = f"{confidence*100:.1f}%" if is_anomaly else "—"
 
         log.info(
-            "[SCAN] %-15s  pps=%7.1f  sw_delta=%7.1f  IF=%.4f(thr=%.4f)  "
+            "[SCAN] %-15s  pps=%7.1f  IF=%.4f(thr=%.4f)  "
             "anomaly=%-5s  RF=%-12s  conf=%s",
-            src_ip, pps_display, sw_pps, if_score, _effective_threshold,
+            src_ip, pps_display, if_score, _effective_threshold,
             str(is_anomaly), attack_class if is_anomaly else "—", conf_display
         )
 
         # --- Push result to decision engine ---
         try:
             from backend.pipeline.decision_engine import push_scan_result
-            push_scan_result(src_ip, pps_display, sw_pps,
+            push_scan_result(src_ip, pps_display, 0.0,
                              if_score, _effective_threshold, is_anomaly,
                              attack_class, confidence)
         except Exception:
