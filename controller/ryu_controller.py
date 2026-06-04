@@ -61,6 +61,10 @@ class FatTreeController(app_manager.RyuApp):
         # Banned IPs — also checked in throttled fast-path
         self._banned_ips: set = set()
 
+        # Track which dpid last saw each src_ip — used to scope block rules
+        # to only the switch the attacker is connected to, not all switches
+        self._ip_to_dpid: dict[str, int] = {}
+
         # Cooldown: suppress flood detection for N intervals after attack cleared
         self._cooldown_intervals: dict[int, int] = {}
         self._COOLDOWN_INTERVALS = 3
@@ -98,8 +102,10 @@ class FatTreeController(app_manager.RyuApp):
             "connected": len(self._datapaths),
         })
 
-        # Flush ALL stale rules (priority 0 and 1) including warmup FLOOD rules
-        for pri in (0, 1):
+        # Flush ALL stale rules on reconnect — clears warmup floods (0,1)
+        # AND any leftover block rules from previous attack session (80,90,100)
+        # Without this, block rules survive mn -c and drop baseline on restart
+        for pri in (0, 1, 80, 90, 100):
             dp.send_msg(parser.OFPFlowMod(
                 datapath=dp, command=ofp.OFPFC_DELETE,
                 out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
@@ -215,6 +221,10 @@ class FatTreeController(app_manager.RyuApp):
         src_ip = ip4.src
         dst_ip = ip4.dst
 
+        # Record which switch last saw this src_ip — used to scope block rules
+        # to only that switch instead of all switches (prevents cross-switch bleed)
+        self._ip_to_dpid[src_ip] = dpid
+
         tcp_pkt  = pkt.get_protocol(tcp.tcp)
         icmp_pkt = pkt.get_protocol(icmp.icmp)
         udp_pkt  = pkt.get_protocol(udp.udp)
@@ -263,7 +273,7 @@ class FatTreeController(app_manager.RyuApp):
             if msg.buffer_id != ofp.OFP_NO_BUFFER:
                 mod = parser.OFPFlowMod(
                     datapath=dp, priority=1,
-                    idle_timeout=300, hard_timeout=0,
+                    idle_timeout=60, hard_timeout=0,
                     buffer_id=msg.buffer_id,
                     match=match, instructions=inst)
                 dp.send_msg(mod)
@@ -271,7 +281,7 @@ class FatTreeController(app_manager.RyuApp):
             else:
                 mod = parser.OFPFlowMod(
                     datapath=dp, priority=1,
-                    idle_timeout=300, hard_timeout=0,
+                    idle_timeout=60, hard_timeout=0,
                     match=match, instructions=inst)
                 dp.send_msg(mod)
 
@@ -377,7 +387,7 @@ class FatTreeController(app_manager.RyuApp):
                 if stat.packet_count < 1:
                     continue
             else:
-                if stat.packet_count < 1 or pps < 0.05:
+                if stat.duration_sec == 0 and stat.duration_nsec < 10_000_000:
                     continue
 
             # Resolve protocol: flow match first, then per-IP cache
@@ -469,6 +479,23 @@ class FatTreeController(app_manager.RyuApp):
         src_ip = cmd.get("src_ip")
         ttl    = cmd.get("ttl")
 
+        # ── reset: clear ALL in-memory state — called by topology on startup ──
+        # Wipes banned_ips, mac table, ip->dpid map, counters, cooldowns
+        # Prevents stale Ryu state from blocking baseline after mn -c + restart
+        if action == "reset":
+            self._banned_ips.clear()
+            self._ip_to_dpid.clear()
+            self._mac_to_port.clear()
+            self._blocked_prev_pkts.clear()
+            self._switch_prev_total.clear()
+            self._pkt_in_count.clear()
+            self._cooldown_intervals.clear()
+            self._switch_proto.clear()
+            self._src_proto.clear()
+            self._pkt_in_rate.clear()
+            self.logger.info("*** Ryu state reset — all in-memory state cleared")
+            return
+
         # Update banned IP set for throttled fast-path
         if action in ("block", "rate_limit", "quarantine"):
             self._banned_ips.add(src_ip)
@@ -489,61 +516,78 @@ class FatTreeController(app_manager.RyuApp):
             for dpid_key in list(self._datapaths.keys()):
                 self._cooldown_intervals[dpid_key] = self._COOLDOWN_INTERVALS
 
-        for dpid, dp in list(self._datapaths.items()):
+        # ── Scope rule to attacker's switch only ──────────────────────────────
+        # _ip_to_dpid tracks which dpid last saw this src_ip from packet-in
+        # Only push block/clear rules to that switch — not all 9 switches
+        # Prevents cross-switch rule bleed where legit hosts on other switches
+        # get caught by a block rule meant for an attacker on a different switch
+        target_dpid = self._ip_to_dpid.get(src_ip)
+        if target_dpid is not None:
+            # Known switch for this IP — install on that switch only
+            target_dps = [(target_dpid, self._datapaths[target_dpid])]
+        else:
+            # IP not yet seen (e.g. clear after restart) — apply to all switches
+            # so stale rules are removed even if we lost the dpid mapping
+            target_dps = list(self._datapaths.items())
+
+        for dpid, dp in target_dps:
             parser = dp.ofproto_parser
             ofp    = dp.ofproto
 
-            # Base match: src IP only — used for both flush and drop rules
+            # Base match: src IP only — scoped to this attacker IP
             match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
 
-            if action in ("block", "quarantine", "rate_limit"):
-                # FIX: delete ALL rules for this src_ip regardless of priority.
-                # Previously only deleted priority=1, but packet_in installs rules
-                # with 5-field matches (in_port+proto+src+dst+eth_type) which OVS
-                # treats as more specific and keeps forwarding even after a drop
-                # rule at priority 80/90/100 is installed. Wildcard delete (no
-                # priority= arg) removes all of them first.
+            # ── Map action → drop priority ─────────────────────────────
+            _DROP_PRI = {"block": 100, "quarantine": 90, "rate_limit": 80}
+
+            if action in _DROP_PRI:
+                drop_pri = _DROP_PRI[action]
+
+                # Step 1: delete existing forwarding rule (priority=1) for this IP
+                # STRICT delete — only removes this IP's forwarding entry, not others
                 dp.send_msg(parser.OFPFlowMod(
                     datapath=dp,
-                    command=ofp.OFPFC_DELETE,
+                    command=ofp.OFPFC_DELETE_STRICT,
+                    priority=1,
                     out_port=ofp.OFPP_ANY,
                     out_group=ofp.OFPG_ANY,
                     match=match,
                 ))
 
-            if action == "block":
-                # ttl=None → permanent; ttl=N → auto-expires at switch after N seconds
-                hard_timeout = int(ttl) if ttl is not None else 0
+                # Step 2: delete any stale drop rule at this exact priority for this IP
+                # STRICT — only removes rule with exactly this priority+match combo
                 dp.send_msg(parser.OFPFlowMod(
-                    datapath=dp, priority=100,
+                    datapath=dp,
+                    command=ofp.OFPFC_DELETE_STRICT,
+                    priority=drop_pri,
+                    out_port=ofp.OFPP_ANY,
+                    out_group=ofp.OFPG_ANY,
+                    match=match,
+                ))
+
+                # Step 3: install drop rule for this IP at the block priority
+                # hard_timeout only set for timed blocks — 0 = permanent until cleared
+                hard_timeout = int(ttl) if (action == "block" and ttl is not None) else 0
+                dp.send_msg(parser.OFPFlowMod(
+                    datapath=dp, priority=drop_pri,
                     idle_timeout=0, hard_timeout=hard_timeout,
                     match=match, instructions=[]))
 
-            elif action == "quarantine":
-                # Drop rule — backend sends "clear" to remove, never auto-expires
-                dp.send_msg(parser.OFPFlowMod(
-                    datapath=dp, priority=90,
-                    idle_timeout=0, hard_timeout=0,
-                    match=match, instructions=[]))
-
-            elif action == "rate_limit":
-                # Drop rule — backend sends "clear" to remove, never auto-expires
-                dp.send_msg(parser.OFPFlowMod(
-                    datapath=dp, priority=80,
-                    idle_timeout=0, hard_timeout=0,
-                    match=match, instructions=[]))
-
             elif action == "clear":
-                # Delete all drop rules for this IP
-                dp.send_msg(parser.OFPFlowMod(
-                    datapath=dp,
-                    command=ofp.OFPFC_DELETE,
-                    out_port=ofp.OFPP_ANY,
-                    out_group=ofp.OFPG_ANY,
-                    match=match))
-                # Push explicit permit rule so released IP can forward immediately.
-                # Priority 5 — above table-miss (1) but below any future block (80+).
-                # TTL 10s — enough for MAC table to re-learn, then expires naturally.
+                # Delete drop rules at each block priority — STRICT so only this IP
+                for _pri in (100, 90, 80):
+                    dp.send_msg(parser.OFPFlowMod(
+                        datapath=dp,
+                        command=ofp.OFPFC_DELETE_STRICT,
+                        priority=_pri,
+                        out_port=ofp.OFPP_ANY,
+                        out_group=ofp.OFPG_ANY,
+                        match=match,
+                    ))
+
+                # Push explicit permit rule so released IP forwards immediately
+                # Priority 5 — above table-miss (1), below any future block (80+)
+                # TTL 10s — expires after MAC table re-learns normally
                 permit_inst = [parser.OFPInstructionActions(
                     ofp.OFPIT_APPLY_ACTIONS,
                     [parser.OFPActionOutput(ofp.OFPP_FLOOD)]

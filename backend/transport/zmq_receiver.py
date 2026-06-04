@@ -44,15 +44,15 @@ def get_switch_count() -> int:
 
 
 def _reset_flow_state() -> None:
-    """Reset all per-flow state on ZMQ reconnect."""
-    global _raw_total_pkts
+    # Clear per-flow delta tracking and switch buffers on reconnect.
+    # _raw_total_pkts is NOT reset — it accumulates for the full session.
+    # Resetting it caused get_stats() to fall back to ML event count (~1/flow)
+    # instead of real raw packet count, making the chart show ~2 instead of ~100+ pps.
     with _flow_lock:
         _flow_prev_pkts.clear()
-    with _raw_lock:
-        _raw_total_pkts = 0
     with _switch_flows_lock:
         _switch_flows.clear()
-    log.info("ZMQ receiver: flow state reset on reconnect")
+    log.info("ZMQ receiver: flow state reset on reconnect (raw_total preserved)")
 
 
 def _build_synthetic_flow_stats(proto: str, limit: int) -> dict:
@@ -189,16 +189,13 @@ def _parse_and_route(raw: bytes) -> None:
             _raw_total_pkts += delta_pkts
 
         # --- Gate check: should this flow go to the ML worker? ---
-        MIN_PPS          = 0.5
+        # Dynamic gate — no hardcoded MIN_PPS.
+        # Only skip truly dead flows (zero packets).
+        # TEA + flood prefilter handle anomaly gating dynamically.
+        # Hardcoded MIN_PPS caused slow legit hosts (h16/h18 at 0.33pps) to be dropped.
         switch_delta_pps = float(flow_stats.get("switch_delta_pps", 0.0))
-        is_flood_mode    = switch_delta_pps >= 1.0
 
-        crosses_threshold = (
-            pkt_count_cumulative >= 1
-            and (pps >= MIN_PPS or is_flood_mode)
-        )
-
-        if not crosses_threshold:
+        if pkt_count_cumulative < 1:
             return
 
         # Skip if this IP is already in Phase 2 or 3 — block rule is active
