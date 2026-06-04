@@ -28,17 +28,17 @@ _LEGIT_HOST_IPS: frozenset = frozenset([
 ])
 
 _stats = {
-    "total_packets":     0,
-    "malicious_dropped": 0,   # ML events classified as malicious (not physical drops)
-    "actual_pkts_dropped": 0, # F3 fix: real physical packets dropped at OVS level
-                               # accumulated from "dropped_delta" ZMQ messages sent
-                               # by ryu_controller when blocked flow entries are polled.
-                               # This is what the UI should show as "Malicious Dropped".
-    "normal_packets":    0,
-    "false_positives":   0,
-    "ml_processed":      0,
-    "total_latency_ms":  0.0,
-    "latency_samples":   0,
+    "total_packets":       0,
+    "malicious_dropped":   0,   # ML events classified as malicious
+    "actual_pkts_dropped": 0,   # real OVS physical drops from dropped_delta messages
+    "normal_packets":      0,
+    # Dedicated legit counter — incremented directly when IF says normal.
+    # Avoids subtraction (raw_total - dropped) which breaks when attackers dominate.
+    "normal_forwarded":    0,
+    "false_positives":     0,
+    "ml_processed":        0,
+    "total_latency_ms":    0.0,
+    "latency_samples":     0,
 }
 
 _sse_lock   = threading.Lock()
@@ -121,29 +121,24 @@ def get_stats() -> dict:
         s = _stats.copy()
     samples = max(s["latency_samples"], 1)
 
-    # Fix A: use _raw_total_pkts from zmq_receiver as total_packets.
-    # Previously total_packets only counted flows that reached on_result()
-    # (i.e. passed the MIN_PPS=2.0 gate) — baseline pings at 0.33 pps were
-    # never counted → UI showed 8 even though hundreds of packets had flowed.
-    # _raw_total_pkts accumulates delta_pkts from EVERY flow_stats message,
-    # including below-threshold flows, giving the true total packet count.
+    # raw_total — every packet seen by OVS stats poll (legit + attack + blocked)
     try:
         from backend.transport.zmq_receiver import get_raw_counts
         raw_total = max(get_raw_counts()["raw_total"], s["total_packets"])
     except Exception:
-        raw_total = s["total_packets"]  # fallback if receiver not started yet
+        raw_total = s["total_packets"]
 
-    # F3 fix: use actual_pkts_dropped (real OVS drops) as malicious_dropped.
+    # real_dropped — OVS physical drops preferred; fall back to ML-event count
     real_dropped = s["actual_pkts_dropped"] if s["actual_pkts_dropped"] > 0 else s["malicious_dropped"]
 
-    # Bug 2+3 fix: actual_pkts_dropped accumulates across ZMQ reconnects but
-    # raw_total resets to 0 on each reconnect (_reset_flow_state).  Clamp so
-    # dropped can never exceed total — prevents negative normal_packets and the
-    # "Malicious Dropped > Total Detected" UI anomaly.
-    real_dropped = min(real_dropped, raw_total)
+    # normal — use dedicated normal_forwarded counter directly
+    # Avoids subtraction (raw_total - real_dropped) which collapses to 0 or negative
+    # when actual_pkts_dropped grows at flood speed (thousands/sec) but raw_total
+    # only increments per flow_stats poll delta — mismatched units cause the bug
+    normal = s["normal_forwarded"]
 
-    # normal_packets = total observed − confirmed malicious drops
-    normal = max(raw_total - real_dropped, 0)
+    # total — floor at normal + dropped so cards always sum correctly
+    raw_total = max(raw_total, normal + real_dropped)
 
     return {
         "total_packets":     raw_total,
@@ -262,21 +257,19 @@ def on_result(src_ip: str, if_score, is_anomaly,
     })
 
     if not is_anomaly:
-        with _lock:
-            _stats["normal_packets"] += 1
-        # Use actual packet_count from flow_stats so the chart reflects real
-        # traffic volume, not just 1 per flow evaluation per interval.
+        # Use actual packet_count so chart reflects real traffic volume
         _pkt_count = int((flow_stats or {}).get("packet_count", 1))
         _pkt_count = max(_pkt_count, 1)
+        with _lock:
+            _stats["normal_packets"]  += 1
+            # Dedicated legit counter — used directly in get_stats()
+            # avoids subtraction (raw_total - dropped) which breaks when attackers dominate
+            _stats["normal_forwarded"] += _pkt_count
         writer.log_traffic_summary(total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0)
         return
 
     loader.require_loaded()
 
-    # IF score > threshold confirmed anomaly — quarantine regardless of RF confidence.
-    # RF "Uncertain" just means attack TYPE is unknown, not that it's safe.
-    # The IF already confirmed it's anomalous — proceed with mitigation.
-    # Low-confidence RF result is shown in UI as "Uncertain" attack vector.
     log.debug("Anomaly confirmed: %s  IF=%.4f  RF=%s  conf=%.1f%%",
               src_ip, if_score, attack_class, (confidence or 0)*100)
 

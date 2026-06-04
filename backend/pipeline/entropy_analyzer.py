@@ -439,7 +439,8 @@ class EntropyAnalyzer:
         if conf == "moderate":
             return True
 
-        return False
+        # Low confidence = TEA unsure → let IF decide + feed result back to TEA
+        return True
 
     def confirm_normal(self, dpid: int) -> None:
         """IF confirmed this interval is normal — unlock baseline updates."""

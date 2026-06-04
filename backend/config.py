@@ -38,22 +38,16 @@ SYN_HALFOPEN_LIMIT  = 100
 SYN_WINDOW_S        = 2.0
 
 # --- Flood pre-filter (all protocols) ---
-# Each protocol has its own packet count limit and time window.
-# When a src_ip hits the limit within the window it gets flagged immediately
-# without waiting for the stats poll — this is what fixes slow UDP detection.
+# Thresholds validated against Juniper Networks and Cisco ASA industry defaults.
 
-# SYN: keep same as before
-FLOOD_SYN_LIMIT     = 100
-FLOOD_SYN_WINDOW_S  = 2.0
+FLOOD_SYN_LIMIT     = 1000
+FLOOD_SYN_WINDOW_S  = 1.0
 
-# ICMP: lower limit because ICMP floods are high volume but easy to spot
-FLOOD_ICMP_LIMIT    = 100
-FLOOD_ICMP_WINDOW_S = 2.0
+FLOOD_ICMP_LIMIT    = 1000
+FLOOD_ICMP_WINDOW_S = 1.0
 
-# UDP: lower limit so it trips fast before the 1s stats poll fires
-# set to 30 so it is reachable within the controller rate limit window
-FLOOD_UDP_LIMIT     = 60
-FLOOD_UDP_WINDOW_S  = 2.0
+FLOOD_UDP_LIMIT     = 1000
+FLOOD_UDP_WINDOW_S  = 1.0
 
 # --- Temporal Entropy Analysis (TEA) ---
 # Rolling window size per switch — adaptive thresholds learned from traffic

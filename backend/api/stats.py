@@ -10,38 +10,29 @@ bp = Blueprint("stats", __name__)
 
 @bp.get("/api/stats")
 def stats():
+    # decision_engine.get_stats() is the single source of truth
+    # It applies: raw_total floor, OVS drop accounting, normal = total - dropped
     session = get_stats()
-    raw     = get_raw_counts()
 
-    raw_total = raw["raw_total"]
-    malicious = session.get("malicious_dropped", 0)
-
-    # Use whichever counter is larger — raw_total from ZMQ counts raw packet
-    # deltas but resets on reconnect and misses low-pps baseline flows.
-    # session total_packets counts every on_result() call reliably.
-    # Taking the max ensures the UI always shows the most accurate count.
-    effective_total = max(raw_total, session.get("total_packets", 0))
-
-    # C2 fix: Normal Traffic = Total − Malicious (Option A, approved).
-    normal = max(effective_total - malicious, 0)
-
-    fp_rate = session.get("fp_rate", 0.0)
+    total    = session["total_packets"]
+    malicious = session["malicious_dropped"]
+    normal   = session["normal_packets"]
 
     return jsonify({
         # Summary cards
-        "total_packets":     effective_total,
+        "total_packets":     total,
         "malicious_dropped": malicious,
         "normal_packets":    normal,
 
-        # Live chart deltas (same sources — cards and chart now always match)
-        "live_total":        effective_total,
+        # Live chart — same values, cards and chart always match
+        "live_total":        total,
         "live_malicious":    malicious,
         "live_normal":       normal,
 
         # Session metrics
-        "active_threats":    session.get("active_threats",  0),
-        "avg_latency_ms":    session.get("avg_latency_ms",  0),
-        "fp_rate":           fp_rate,
+        "active_threats":    session.get("active_threats", 0),
+        "avg_latency_ms":    session.get("avg_latency_ms", 0),
+        "fp_rate":           session.get("fp_rate", 0.0),
     })
 
 

@@ -267,6 +267,13 @@
   window.MAX_PTS  = {{ max_pts }};
   window.MAX_LOG  = {{ max_log }};
 </script>
+<!-- Load order matters: api → ui → chart → stats → quarantine → log → main -->
+<script src="/static/api.js"></script>
+<script src="/static/ui.js"></script>
+<script src="/static/chart.js"></script>
+<script src="/static/stats.js"></script>
+<script src="/static/quarantine.js"></script>
+<script src="/static/log.js"></script>
 <script src="/static/main.js"></script>
 <script src="/static/ip-drawer.js"></script>
 </body>
