@@ -439,7 +439,6 @@ class FatTreeController(app_manager.RyuApp):
                     "packet_count_per_nsecond": ppns,
                     "byte_count_per_second":    bps,
                     "byte_count_per_nsecond":   bpns,
-                    "switch_delta_pps":         switch_delta_pps,
                     "ip_proto":                 _flow_ip_proto,
                 },
                 "switch_stats": self._build_switch_stats(dpid),
