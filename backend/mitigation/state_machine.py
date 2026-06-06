@@ -198,26 +198,50 @@ class StateMachine:
                     return "Sinkhole"
 
                 else:
-                    # Confirmed or high-confidence attack → Phase 1
-                    state = IpState(
-                        src_ip        = src_ip,
-                        phase         = 1,
-                        attack_vector = attack_class,
-                        if_score      = if_score,
-                        confidence    = confidence,
-                        action_taken  = "Quarantined",
-                        priority      = _prio,
-                        offence_count = 1,
-                    )
-                    self._states[src_ip] = state
-                    # Both quarantine (90) + rate_limit (80) sent simultaneously
-                    for _action in resolve_phase1_actions(_prio):
-                        self._push_command(src_ip, _action)
-                    log.info("Phase 1 Quarantine+RateLimit: %s  conf=%.1f%%  "
-                             "vector=%s  priority=%s  duration=%.0fs",
-                             src_ip, confidence * 100, attack_class,
-                             _prio, state.phase1_duration())
-                    self._persist(state)
+                    if _prio == "High":
+                        # High priority — skip observation, immediate Time Ban
+                        ban_lvl  = min(1, MAX_BAN_LEVEL)
+                        ban_secs = get_ban_duration(ban_lvl)
+                        state = IpState(
+                            src_ip        = src_ip,
+                            phase         = 2,
+                            attack_vector = attack_class,
+                            if_score      = if_score,
+                            confidence    = confidence,
+                            action_taken  = "Time Ban",
+                            priority      = _prio,
+                            offence_count = 1,
+                            ban_level     = ban_lvl,
+                            permanent     = True,
+                            ttl_expires_at= time.monotonic() + ban_secs,
+                        )
+                        self._states[src_ip] = state
+                        _ban_action, _ban_ttl = resolve_ban_action(ban_secs)
+                        self._push_command(src_ip, _ban_action, ttl=_ban_ttl)
+                        log.info("High Priority → Immediate Time Ban: %s  conf=%.1f%%  "
+                                 "vector=%s  duration=%ds",
+                                 src_ip, confidence * 100, attack_class, ban_secs)
+                        self._persist(state)
+                    else:
+                        # Low priority — Phase 1 observation (quarantine)
+                        state = IpState(
+                            src_ip        = src_ip,
+                            phase         = 1,
+                            attack_vector = attack_class,
+                            if_score      = if_score,
+                            confidence    = confidence,
+                            action_taken  = "Quarantined",
+                            priority      = _prio,
+                            offence_count = 0,
+                        )
+                        self._states[src_ip] = state
+                        for _action in resolve_phase1_actions(_prio):
+                            self._push_command(src_ip, _action)
+                        log.info("Phase 1 Quarantine: %s  conf=%.1f%%  "
+                                 "vector=%s  duration=%.0fs",
+                                 src_ip, confidence * 100, attack_class,
+                                 state.phase1_duration())
+                        self._persist(state)
 
             else:
                 # Already tracked — update scores
@@ -331,6 +355,7 @@ class StateMachine:
         # Increment ban_level BEFORE lookup — each ban longer than the last
         state.ban_level      = min(state.ban_level + 1, MAX_BAN_LEVEL)
         ban_secs             = get_ban_duration(state.ban_level)
+        state.offence_count  = min(state.offence_count + 1, 5)  # offence on escalation
         state.phase          = 2
         state.phase_entered  = time.monotonic()
         state.action_taken   = "Time Ban"
@@ -370,6 +395,7 @@ class StateMachine:
         except Exception:
             pass
 
+        state.offence_count  = min(state.offence_count + 1, 5)  # offence on blackhole
         state.phase          = 3
         state.phase_entered  = time.monotonic()
         state.action_taken   = "Blackhole"

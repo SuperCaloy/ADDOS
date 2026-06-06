@@ -39,6 +39,17 @@ def record_offense(src_ip: str, attack_vector: str, if_score: float,
         log.warning("Behavioral: failed to record offense for %s — %s", src_ip, exc)
 
 
+def get_decay_score(src_ip: str) -> float:
+    # Reuses writer.get_offense_count — already implements half-life decay.
+    # Score = sum of (2.0 * 0.5^(hours_elapsed/24)) per offence.
+    # Fresh offence ~2.0, 24h ago ~1.0, 48h ago ~0.5
+    try:
+        return writer.get_offense_count(src_ip)
+    except Exception as exc:
+        log.warning("Behavioral: decay score failed for %s — %s", src_ip, exc)
+        return 0.0
+
+
 def get_offences(src_ip: str) -> int:
     # Query total offense count for this IP from ip_attack_history.
     # Returns 0 on no history or DB error.
@@ -81,19 +92,18 @@ def should_blackhole(src_ip: str, current_ban_level: int) -> bool:
 
 
 def assign_priority(if_score: float, confidence: float, src_ip: str = "") -> str:
-    # Returns "High" or "Low" based on IF score, RF confidence, and DB history.
-    # High if:  IF score >= 0.75
-    #           RF confidence >= 0.80
-    #           IF score >= 0.65 AND repeat offender (2+ offenses)
-    if if_score >= HIGH_PRIORITY_IF_THRESHOLD:
+    # High if: confirmed attack (IF>=0.75 AND conf>=0.80)
+    #          repeat offender (2+ offences)
+    #          persistent attacker (decay score >= 3.0)
+    if if_score >= HIGH_PRIORITY_IF_THRESHOLD and confidence >= 0.80:
         return "High"
 
-    if confidence >= 0.80:
-        return "High"
-
-    if src_ip and if_score >= REPEAT_HIGH_PRIORITY_IF:
+    if src_ip:
         if get_offences(src_ip) >= 2:
-            log.debug("Behavioral: %s elevated to High (repeat offender)", src_ip)
+            log.debug("Behavioral: %s → High (repeat offender)", src_ip)
+            return "High"
+        if get_decay_score(src_ip) >= 3.0:
+            log.debug("Behavioral: %s → High (persistent, decay=%.2f)", src_ip, get_decay_score(src_ip))
             return "High"
 
     return "Low"

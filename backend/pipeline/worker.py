@@ -35,7 +35,7 @@ def _process_item(src_ip: str, flow_stats: dict,
     # --- Skip invalid/whitelisted IPs ---
     if not src_ip or src_ip in ("0.0.0.0", ""):
         return
-    _WHITELIST = {"10.0.0.20"}
+    _WHITELIST = {"10.0.0.20","10.0.0.21"}
     if src_ip in _WHITELIST:
         return
 
