@@ -1,7 +1,7 @@
 import datetime
 import threading
 import logging
-from backend.database.db import execute, executemany
+from backend.database.db import execute, executemany, query
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +34,8 @@ def _is_duplicate(src_ip: str, if_score: float, action_taken: str,
 # Batch buffer for traffic_summary writes — flushed every 5 seconds
 # ---------------------------------------------------------------------------
 _summary_lock   = threading.Lock()
-_summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0}
+_summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
+                   "tp": 0, "tn": 0, "fn": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -261,34 +262,36 @@ def load_quarantine_states() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def log_traffic_summary(total: int, threats: int,
-                        true_neg: int, fp: int) -> None:
+                        true_neg: int, fp: int,
+                        tp: int = 0, tn: int = 0, fn: int = 0) -> None:
     with _summary_lock:
         _summary_buffer["total"]    += total
         _summary_buffer["threats"]  += threats
         _summary_buffer["true_neg"] += true_neg
         _summary_buffer["fp"]       += fp
+        _summary_buffer["tp"]       += tp
+        _summary_buffer["tn"]       += tn
+        _summary_buffer["fn"]       += fn
 
 
 def flush_summary() -> None:
     with _summary_lock:
-        # H4 / flush guard fix: old guard checked only total==0, so FP-only
-        # entries (total=0, fp=1) from record_false_positive were silently
-        # dropped and never written to the DB — making the PDF report always
-        # show 0.00% FP rate.  Now flush if ANY counter is non-zero.
         if not any(_summary_buffer.values()):
             return
         snapshot = _summary_buffer.copy()
-        _summary_buffer.update({"total": 0, "threats": 0, "true_neg": 0, "fp": 0})
+        _summary_buffer.update({"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
+                                 "tp": 0, "tn": 0, "fn": 0})
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         execute("""
             INSERT INTO traffic_summary
                 (timestamp, total_flows_observed, threats_mitigated,
-                 true_negatives_passed, false_positives)
-            VALUES (?, ?, ?, ?, ?)
+                 true_negatives_passed, false_positives, tp, tn, fn)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (ts, snapshot["total"], snapshot["threats"],
-              snapshot["true_neg"], snapshot["fp"]))
+              snapshot["true_neg"], snapshot["fp"],
+              snapshot["tp"], snapshot["tn"], snapshot["fn"]))
     except Exception:
         log.exception("Failed to flush traffic_summary")
 
@@ -411,3 +414,114 @@ def get_history_dates() -> list[str]:
     except Exception:
         log.exception("Failed to get history dates")
         return []
+
+
+# ML metrics
+def get_ml_metrics(start: str, end: str) -> dict:
+    """Compute Precision, Recall, F1, Accuracy, FPR, FNR, TPR, TNR from DB."""
+    try:
+        rows = query("""
+            SELECT SUM(tp) as tp, SUM(false_positives) as fp,
+                   SUM(tn) as tn, SUM(fn) as fn
+            FROM traffic_summary
+            WHERE timestamp >= ? AND timestamp <= ?
+        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        r  = rows[0] if rows else {}
+        tp = float(r.get("tp") or 0)
+        fp = float(r.get("fp") or 0)
+        tn = float(r.get("tn") or 0)
+        fn = float(r.get("fn") or 0)
+
+        precision  = tp / max(tp + fp, 1)
+        recall     = tp / max(tp + fn, 1)   # TPR
+        f1         = 2 * precision * recall / max(precision + recall, 1e-9)
+        accuracy   = (tp + tn) / max(tp + fp + tn + fn, 1)
+        fpr        = fp / max(fp + tn, 1)
+        fnr        = fn / max(fn + tp, 1)
+        tpr        = recall
+        tnr        = tn / max(tn + fp, 1)
+
+        return {
+            "tp": int(tp), "fp": int(fp), "tn": int(tn), "fn": int(fn),
+            "precision": round(precision * 100, 2),
+            "recall":    round(recall    * 100, 2),
+            "f1":        round(f1        * 100, 2),
+            "accuracy":  round(accuracy  * 100, 2),
+            "fpr":       round(fpr       * 100, 2),
+            "fnr":       round(fnr       * 100, 2),
+            "tpr":       round(tpr       * 100, 2),
+            "tnr":       round(tnr       * 100, 2),
+        }
+    except Exception:
+        log.exception("Failed to compute ML metrics")
+        return {}
+
+
+# system_metrics
+def log_system_metrics(cpu: float, mem_mb: float, pps: float) -> None:
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        execute("""
+            INSERT INTO system_metrics (timestamp, cpu_percent, mem_mb, pps_processed)
+            VALUES (?, ?, ?, ?)
+        """, (ts, round(cpu, 2), round(mem_mb, 2), round(pps, 2)))
+    except Exception:
+        log.exception("Failed to log system metrics")
+
+
+def get_system_metrics_avg(start: str, end: str) -> dict:
+    try:
+        rows = query("""
+            SELECT AVG(cpu_percent) as cpu, AVG(mem_mb) as mem,
+                   AVG(pps_processed) as pps
+            FROM system_metrics
+            WHERE timestamp >= ? AND timestamp <= ?
+        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        r = rows[0] if rows else {}
+        return {
+            "avg_cpu":  round(float(r.get("cpu") or 0), 2),
+            "avg_mem":  round(float(r.get("mem") or 0), 2),
+            "avg_pps":  round(float(r.get("pps") or 0), 2),
+        }
+    except Exception:
+        log.exception("Failed to get system metrics avg")
+        return {}
+
+
+def get_system_metrics_attack_vs_baseline(start: str, end: str) -> dict:
+    """Returns avg CPU/mem during attack periods vs baseline (no threats)."""
+    try:
+        # Attack period — timestamps that overlap with mitigation events
+        attack = query("""
+            SELECT AVG(s.cpu_percent) as cpu, AVG(s.mem_mb) as mem
+            FROM system_metrics s
+            WHERE s.timestamp >= ? AND s.timestamp <= ?
+              AND EXISTS (
+                SELECT 1 FROM mitigation_events m
+                WHERE m.timestamp >= datetime(s.timestamp, '-10 seconds')
+                  AND m.timestamp <= datetime(s.timestamp, '+10 seconds')
+              )
+        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+
+        baseline = query("""
+            SELECT AVG(s.cpu_percent) as cpu, AVG(s.mem_mb) as mem
+            FROM system_metrics s
+            WHERE s.timestamp >= ? AND s.timestamp <= ?
+              AND NOT EXISTS (
+                SELECT 1 FROM mitigation_events m
+                WHERE m.timestamp >= datetime(s.timestamp, '-10 seconds')
+                  AND m.timestamp <= datetime(s.timestamp, '+10 seconds')
+              )
+        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+
+        a = attack[0]   if attack   else {}
+        b = baseline[0] if baseline else {}
+        return {
+            "attack_cpu":   round(float(a.get("cpu") or 0), 2),
+            "attack_mem":   round(float(a.get("mem") or 0), 2),
+            "baseline_cpu": round(float(b.get("cpu") or 0), 2),
+            "baseline_mem": round(float(b.get("mem") or 0), 2),
+        }
+    except Exception:
+        log.exception("Failed to get attack vs baseline metrics")
+        return {}

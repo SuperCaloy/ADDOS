@@ -55,6 +55,10 @@ def create_app() -> Flask:
     resource_guard.start()
     log.info("Resource guard started")
 
+    # --- Start system monitor (CPU/mem/pps every 5s) ---
+    from backend.mitigation import monitor
+    monitor.start()
+
     # --- Start pipeline worker + decision engine ---
     from backend.pipeline import decision_engine
     decision_engine.start()
