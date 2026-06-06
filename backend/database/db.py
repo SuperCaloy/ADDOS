@@ -59,7 +59,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             total_flows_observed  INTEGER DEFAULT 0,
             threats_mitigated     INTEGER DEFAULT 0,
             true_negatives_passed INTEGER DEFAULT 0,
-            false_positives       INTEGER DEFAULT 0
+            false_positives       INTEGER DEFAULT 0,
+            tp                    INTEGER DEFAULT 0,
+            tn                    INTEGER DEFAULT 0,
+            fn                    INTEGER DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_ts    ON mitigation_events(timestamp);
@@ -162,6 +165,17 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_history_date
             ON ip_attack_history (date(unblocked_at));
 
+        CREATE TABLE IF NOT EXISTS system_metrics (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT    NOT NULL,
+            cpu_percent REAL    NOT NULL DEFAULT 0,
+            mem_mb      REAL    NOT NULL DEFAULT 0,
+            pps_processed REAL  NOT NULL DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sysmetrics_ts
+            ON system_metrics (timestamp);
+
         CREATE TABLE IF NOT EXISTS global_counters (
             id               INTEGER PRIMARY KEY CHECK (id = 1),
             total_packets    INTEGER NOT NULL DEFAULT 0,
@@ -198,6 +212,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError:
         pass
+
+    # New columns — tp/tn/fn for ML metrics
+    for col in ["tp", "tn", "fn"]:
+        try:
+            conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
 
 
 # ---------------------------------------------------------------------------

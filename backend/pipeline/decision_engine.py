@@ -25,6 +25,9 @@ _LEGIT_HOST_IPS: frozenset = frozenset([
     "10.0.0.5", # h5
 ])
 
+# Ground truth — attacker hosts h6-h19
+_ATTACKER_IPS: frozenset = frozenset([f"10.0.0.{i}" for i in range(6, 20)])
+
 _stats = {
     "total_packets":       0,
     "malicious_dropped":   0,   # ML events classified as malicious
@@ -245,15 +248,19 @@ def on_result(src_ip: str, if_score, is_anomaly,
     })
 
     if not is_anomaly:
-        # Use actual packet_count so chart reflects real traffic volume
         _pkt_count = int((flow_stats or {}).get("packet_count", 1))
         _pkt_count = max(_pkt_count, 1)
         with _lock:
             _stats["normal_packets"]  += 1
-            # Dedicated legit counter — used directly in get_stats()
-            # avoids subtraction (raw_total - dropped) which breaks when attackers dominate
             _stats["normal_forwarded"] += _pkt_count
-        writer.log_traffic_summary(total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0)
+
+        # TN = normal + legit | FN = normal + attacker (missed attack)
+        _is_attacker = src_ip in _ATTACKER_IPS
+        writer.log_traffic_summary(
+            total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0,
+            tn=(0 if _is_attacker else 1),
+            fn=(1 if _is_attacker else 0),
+        )
         return
 
     loader.require_loaded()
@@ -289,6 +296,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
             _conf_lock[src_ip] = (confidence, attack_class)
 
     predicted_class = "DDoS" if attack_class != "Uncertain" else "Anomaly"
+    priority        = _assign_priority(if_score, confidence)
 
     # Check if IP was previously banned and is re-offending
     existing = state_machine._states.get(src_ip)
@@ -319,8 +327,6 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     ip_state    = state_machine._states.get(src_ip)
     phase_label = ip_state.phase_label() if ip_state else None
-    # Read priority from state — set by on_detection/on_reoffence
-    priority    = ip_state.priority if ip_state else _assign_priority(if_score, confidence)
 
     # Always INSERT a new row — never upsert/overwrite.
     # This ensures re-offences and phase escalations each get their own
@@ -338,9 +344,13 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "is_manual":       0,
         "force_insert":    True,   # never overwrite existing rows
     })
-    # Use actual pps so graph shows real attack traffic rate, not just 1
     _threat_pps = max(int(float((flow_stats or {}).get("packet_count_per_second", 1.0))), 1)
-    writer.log_traffic_summary(total=_threat_pps, threats=_threat_pps, true_neg=0, fp=0)
+    # TP = anomaly + attacker | FP already tracked via is_known_legit
+    _is_tp = src_ip in _ATTACKER_IPS
+    writer.log_traffic_summary(
+        total=_threat_pps, threats=_threat_pps, true_neg=0, fp=0,
+        tp=(1 if _is_tp else 0),
+    )
 
     elapsed_ms = (time.monotonic() - t_start) * 1000
     with _lock:
