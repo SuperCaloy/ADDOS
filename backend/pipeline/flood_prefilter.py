@@ -48,13 +48,6 @@ class _ProtoWindow:
 
 
 class FloodPreFilter:
-    """
-    Per-source flood pre-filter for SYN, ICMP, UDP.
-    Trip conditions (any one is enough):
-      1. Limit     — count >= limit within full window
-      2. Burst     — 40% of limit within 0.1s or 0.5s sub-window
-      3. Correlate — same IP active on 2+ protocols simultaneously
-    """
 
     def __init__(self):
         self._lock = threading.Lock()

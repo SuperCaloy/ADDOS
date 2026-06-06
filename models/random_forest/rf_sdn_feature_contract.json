@@ -50,5 +50,6 @@
     "bytes_per_packet_raw",
     "mean_byte_raw",
     "pkt_size_bucket"
-  ]
+  ],
+  "note": "Retrained on FLOOD-only files. confidence_gate=0.50. ip_proto injected from flow at inference."
 }

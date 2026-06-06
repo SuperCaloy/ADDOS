@@ -397,24 +397,21 @@ class FatTreeController(app_manager.RyuApp):
             if not src_ip or src_ip == "0.0.0.0":
                 continue
 
-            switch_delta_pps = agg.get("switch_delta_pps", 0.0)
+            # is_flood_switch gate removed.
+            # It submitted ALL hosts on a flooded switch to the worker queue,
+            # causing innocent hosts on the same switch to be scored or
+            # timeout-blocked even though IF never confirmed them as attackers.
+            # IF scores every host independently per-poll -- it does not need
+            # a switch-wide flood gate to detect the real attacker.
+            # switch_delta_pps still computed in agg for display/logging only.
+            _cooldown_left = self._cooldown_intervals.get(dpid, 0)
 
-            # Suppress flood detection during cooldown period
-            _cooldown_left  = self._cooldown_intervals.get(dpid, 0)
-            is_flood_switch = False if _cooldown_left > 0 else switch_delta_pps >= 1.0
-
-            if is_flood_switch:
-                # Flood mode — only skip truly empty flows
-                if stat.packet_count < 1:
-                    continue
-            elif _is_first_poll:
-                # First poll after restart — all flows are fresh (duration_sec=0).
-                # Bypass the young-flow gate entirely so baseline traffic is not
-                # silently dropped on every topology restart. Normal gating resumes
-                # from the second poll cycle onward.
+            if _is_first_poll:
+                # First poll after restart -- bypass young-flow gate so baseline
+                # traffic is not silently dropped on topology restart.
                 pass
             else:
-                # Normal mode — skip flows younger than 10ms (not yet reliable)
+                # Normal mode -- skip flows younger than 10ms (not yet reliable)
                 if stat.duration_sec == 0 and stat.duration_nsec < 10_000_000:
                     continue
 

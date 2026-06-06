@@ -12,19 +12,17 @@ log = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 
-# Known legit host IPs in the K=4 fat-tree topology — 8/8 split.
-# Attacker hosts (odd): h1,h3,h5,h7,h9,h11,h13,h15
-# Legit hosts (even):   h2,h4,h6,h8,h10,h12,h14,h16
+# Confidence lock — keeps highest seen confidence+attack_class per IP
+# Only updates if new confidence > locked value
+_conf_lock: dict[str, tuple[float, str]] = {}
+_conf_lock_mutex = threading.Lock()
+
 _LEGIT_HOST_IPS: frozenset = frozenset([
+    "10.0.0.1",  # h1
     "10.0.0.2",  # h2
+    "10.0.0.3",  # h3
     "10.0.0.4",  # h4
-    "10.0.0.6",  # h6
-    "10.0.0.8",  # h8
-    "10.0.0.10", # h10
-    "10.0.0.12", # h12
-    "10.0.0.14", # h14
-    "10.0.0.16", # h16
-    "10.0.0.18", # h18
+    "10.0.0.5", # h5
 ])
 
 _stats = {
@@ -45,9 +43,6 @@ _sse_lock   = threading.Lock()
 _sse_buffer: collections.deque = collections.deque(maxlen=200)
 
 _sse_dedup: dict = {}
-# BUG 2 FIX: lowered from 30.0 to 5.0 — 30s dedup was hiding active attacks
-# from the dashboard during short test scenarios. 5s prevents SSE spam while
-# keeping the UI responsive to ongoing attacks.
 _SSE_DEDUP_TTL = 5.0
 
 # ── Pending restores — IPs awaiting baseline traffic restart after manual release
@@ -121,27 +116,20 @@ def get_stats() -> dict:
         s = _stats.copy()
     samples = max(s["latency_samples"], 1)
 
-    # raw_total — every packet seen by OVS stats poll (legit + attack + blocked)
-    try:
-        from backend.transport.zmq_receiver import get_raw_counts
-        raw_total = max(get_raw_counts()["raw_total"], s["total_packets"])
-    except Exception:
-        raw_total = s["total_packets"]
-
-    # real_dropped — OVS physical drops preferred; fall back to ML-event count
+    # real_dropped -- OVS physical drops preferred; fall back to ML-event count
     real_dropped = s["actual_pkts_dropped"] if s["actual_pkts_dropped"] > 0 else s["malicious_dropped"]
 
-    # normal — use dedicated normal_forwarded counter directly
-    # Avoids subtraction (raw_total - real_dropped) which collapses to 0 or negative
-    # when actual_pkts_dropped grows at flood speed (thousands/sec) but raw_total
-    # only increments per flow_stats poll delta — mismatched units cause the bug
+    # normal -- dedicated forwarded counter, incremented per normal flow result
     normal = s["normal_forwarded"]
 
-    # total — floor at normal + dropped so cards always sum correctly
-    raw_total = max(raw_total, normal + real_dropped)
+    # total -- malicious + normal only (industry standard: total analyzed by ML pipeline)
+    # Raw OVS packet counts are excluded -- they recount the same packets every poll
+    # and include ARP/broadcast/control traffic never classified by the ML pipeline.
+    # This ensures total always equals malicious + normal exactly.
+    total = real_dropped + normal
 
     return {
-        "total_packets":     raw_total,
+        "total_packets":     total,
         "malicious_dropped": real_dropped,
         "normal_packets":    normal,
         "active_threats":    len(state_machine.get_active_list()),
@@ -291,8 +279,16 @@ def on_result(src_ip: str, if_score, is_anomaly,
         writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1)
         log.warning("FALSE POSITIVE detected: %s is a known legit host!", src_ip)
 
+    # Confidence lock — only update attack_class/confidence if new > locked
+    with _conf_lock_mutex:
+        prev = _conf_lock.get(src_ip)
+        if prev is not None and confidence < prev[0]:
+            confidence   = prev[0]
+            attack_class = prev[1]
+        else:
+            _conf_lock[src_ip] = (confidence, attack_class)
+
     predicted_class = "DDoS" if attack_class != "Uncertain" else "Anomaly"
-    priority        = _assign_priority(if_score, confidence)
 
     # Check if IP was previously banned and is re-offending
     existing = state_machine._states.get(src_ip)
@@ -323,6 +319,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     ip_state    = state_machine._states.get(src_ip)
     phase_label = ip_state.phase_label() if ip_state else None
+    # Read priority from state — set by on_detection/on_reoffence
+    priority    = ip_state.priority if ip_state else _assign_priority(if_score, confidence)
 
     # Always INSERT a new row — never upsert/overwrite.
     # This ensures re-offences and phase escalations each get their own
