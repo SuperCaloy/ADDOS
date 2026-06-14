@@ -1,11 +1,21 @@
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from backend.pipeline.decision_engine import get_stats, get_scan_log
 from backend.pipeline.flow_tracker import tracker
 from backend.transport.zmq_receiver import get_raw_counts
 from backend.models import loader
 from backend.database.db import query
+import threading
 
 bp = Blueprint("stats", __name__)
+
+# Ground truth store — populated by topology when attacks start/stop
+_gt_lock:  threading.Lock = threading.Lock()
+_active_attacks: dict[str, str] = {}  # ip -> attack_type ("SYN"/"ICMP"/"UDP")
+
+
+def get_active_attacks() -> dict[str, str]:
+    with _gt_lock:
+        return dict(_active_attacks)
 
 
 @bp.get("/api/stats")
@@ -53,3 +63,31 @@ def model_info():
 @bp.get("/api/debug/flows")
 def debug_flows():
     return jsonify(get_scan_log())
+
+
+@bp.post("/api/attack_ground_truth/start")
+def gt_start():
+    body = request.get_json(silent=True) or {}
+    ip   = body.get("ip")
+    atype = body.get("attack_type")  # "SYN", "ICMP", "UDP"
+    if not ip or not atype:
+        return jsonify({"error": "ip and attack_type required"}), 400
+    with _gt_lock:
+        _active_attacks[ip] = atype
+    return jsonify({"ok": True})
+
+
+@bp.post("/api/attack_ground_truth/stop")
+def gt_stop():
+    body = request.get_json(silent=True) or {}
+    ip   = body.get("ip")
+    if not ip:
+        return jsonify({"error": "ip required"}), 400
+    with _gt_lock:
+        _active_attacks.pop(ip, None)
+    return jsonify({"ok": True})
+
+
+@bp.get("/api/attack_ground_truth")
+def gt_list():
+    return jsonify(get_active_attacks())

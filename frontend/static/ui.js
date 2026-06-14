@@ -220,24 +220,27 @@ async function _loadHistoryDates() {
   } catch (_) { _calDates = new Set(); }
 }
 
-function _initCals() {
-  const today    = new Date();
-  const lastWeek = new Date(today);
-  lastWeek.setDate(today.getDate() - 7);
-  _calState.start = { year: lastWeek.getFullYear(), month: lastWeek.getMonth(), selected: '' };
-  _calState.end   = { year: today.getFullYear(),    month: today.getMonth(),    selected: '' };
+function _initCals(startS, endS) {
+  const s = new Date(startS + 'T00:00:00');
+  const e = new Date(endS   + 'T00:00:00');
+  _calState.start = { year: s.getFullYear(), month: s.getMonth(), selected: startS };
+  _calState.end   = { year: e.getFullYear(), month: e.getMonth(), selected: endS   };
   _renderCal('start');
   _renderCal('end');
 }
 
 /* Open modal — reset fields, load history dates, init calendars */
 async function openModal() {
+  const today   = new Date();
+  const endS    = _isoDate(today);
+  const startDt = new Date(today);
+  startDt.setDate(startDt.getDate() - 7);
+  const startS  = _isoDate(startDt);
+
   document.getElementById('m-err').textContent = '';
-  document.getElementById('r-start').value     = '';
-  document.getElementById('r-end').value       = '';
-  _calState.start.selected = '';
-  _calState.end.selected   = '';
+  document.getElementById('r-start').value     = startS;
+  document.getElementById('r-end').value       = endS;
   document.getElementById('modal').classList.add('open');
   await _loadHistoryDates();
-  _initCals();
+  _initCals(startS, endS);
 }
