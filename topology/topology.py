@@ -36,24 +36,23 @@ _LEGIT_NUMS    = {1, 2, 3, 4, 5}
 # ICMP: mix of full flood, large payload, spoofed source, small payload
 # UDP: mix of full flood, rate-limited, random destination port
 _ATTACKER_VARIANTS = {
-    # SYN — max to high
-    6:  ("SYN",  "-S -p 80  --flood"),
-    7:  ("SYN",  "-S -p 443 --flood"),
-    8:  ("SYN",  "-S -p 8080 -i u100 --data 1400"),
-    9:  ("SYN",  "-S -p 8443 -i u500 --data 1400"),
-    # ICMP — max to high
-    10: ("ICMP", "--icmp --flood --data 1400"),
-    11: ("ICMP", "--icmp --flood"),
-    12: ("ICMP", "--icmp -i u100 --data 1400"),
-    13: ("ICMP", "--icmp -i u500 --data 512"),
-    # UDP — max to high
-    14: ("UDP",  "--udp -p 53  --flood --data 1400"),
-    15: ("UDP",  "--udp -p 80  --flood --data 1400"),
-    16: ("UDP",  "--udp -p 443 -i u100 --data 1400"),
-    17: ("UDP",  "--udp -p 123 -i u500 --data 1400"),
-    18: ("UDP",  "--udp -p 53  -i u1000 --data 512"),
-    # SYN variant — high
-    19: ("SYN",  "-S -p 80 -i u100"),
+    # SYN: no handshake = flows <1s, low bytes/pkt (~40-60B)
+    6:  ("SYN",  "-S -p 80   --flood"),           # max pps, port 80
+    7:  ("SYN",  "-S -p 443  --flood"),           # max pps, port 443
+    8:  ("SYN",  "-S -p 8080 -i u10 --data 64"), # ~100k pps, small payload
+    9:  ("SYN",  "-S -p 8443 -i u10 --data 128"),# ~100k pps, med payload
+    19: ("SYN",  "-S -p 22   -i u10"),            # ~100k pps, header only
+    # ICMP: flows 2-10s, bytes/pkt varies by --data
+    10: ("ICMP", "--icmp --flood --data 1400"),    # max pps, large payload
+    11: ("ICMP", "--icmp --flood --data 32"),      # max pps, small payload
+    12: ("ICMP", "--icmp -i u10  --data 512"),     # ~100k pps, med payload
+    13: ("ICMP", "--icmp -i u10  --data 256"),     # ~100k pps, small-med
+    # UDP: flows 3-15s, high bytes/pkt
+    14: ("UDP",  "--udp -p 53   --flood --data 1400"),  # max pps, DNS port
+    15: ("UDP",  "--udp -p 80   --flood --data 1400"),  # max pps, HTTP port
+    16: ("UDP",  "--udp -p 443  -i u10  --data 1024"),  # ~100k pps, HTTPS port
+    17: ("UDP",  "--udp -p 123  -i u10  --data 512"),   # ~100k pps, NTP port
+    18: ("UDP",  "--udp -p 1900 -i u10  --data 1400"),  # ~100k pps, SSDP port
 }
 
 # Staggered start delays per attacker (seconds) -- SYN wave first, ICMP mid, UDP last
@@ -64,43 +63,41 @@ _ATTACKER_START_DELAYS = {
     7:  3,
     8:  5,
     9:  7,
+    19: 9,
     # ICMP wave
-    10: 12,
-    11: 15,
-    12: 18,
-    13: 21,
+    10: 14,
+    11: 17,
+    12: 20,
+    13: 23,
     # UDP wave
-    14: 26,
-    15: 29,
-    16: 32,
-    17: 35,
-    # Mixed
+    14: 28,
+    15: 31,
+    16: 34,
+    17: 37,
     18: 40,
-    19: 43,
 }
 
 # Per-attacker cycle: (attack_min, attack_max, rest_min, rest_max) in seconds
 # Based on real botnet behavior (Mirai, Bashlite) -- each node has different capacity
 # Attack duration varies per cycle -- picked fresh each time from the range
 _ATTACKER_CYCLES = {
-    # SYN: short bursts (5-15s attack, 3-8s rest)
-    6:  (5,  15,  3,  8),
-    7:  (8,  15,  3,  8),
-    8:  (10, 20,  4,  8),
-    9:  (5,  12,  3,  6),
-    # ICMP: medium sustained (20-60s attack, 5-12s rest)
-    10: (30, 60,  5, 12),
-    11: (20, 50,  5, 10),
-    12: (25, 55,  6, 12),
-    13: (20, 45,  5, 10),
+    # SYN: short bursts -- real botnets send waves (20-60s attack, 5-15s rest)
+    6:  (20, 60,  5, 15),
+    7:  (25, 60,  5, 12),
+    8:  (20, 50,  5, 12),
+    9:  (20, 45,  5, 10),
+    19: (20, 50,  5, 12),
+    # ICMP: medium sustained (30-90s attack, 8-20s rest)
+    10: (30, 90,  8, 20),
+    11: (30, 80,  8, 18),
+    12: (25, 70,  8, 18),
+    13: (25, 60,  8, 15),
     # UDP: long sustained (60-120s attack, 10-25s rest)
     14: (60, 120, 10, 25),
     15: (60, 100, 10, 20),
-    16: (70, 120, 12, 25),
+    16: (60, 120, 12, 25),
     17: (60, 110, 10, 22),
-    # UDP slow + SYN variant
     18: (60, 120, 10, 25),
-    19: (5,  15,   3,  8),
 }
 
 # Global stop event for mixed campaign threads
@@ -108,42 +105,38 @@ _mixed_stop_event = threading.Event()
 # Track active campaign threads
 _campaign_threads: list = []
 
-# Per-host traffic profiles: state → (interval_range, duration_range)
-# Max pps hard cap = 100 pps per host across all states
-# downloading min interval 0.010s = 100 pps max
-# watching   min interval 0.012s = ~83 pps max
-# browsing   already well below 100 pps — unchanged
-# Each host has distinct pps range — no two hosts share the same rate
-# Max 50 pps per host in any state -- clear separation from rate-limited attacks (~1000 pps)
-# Minimum interval = 0.020s = 50 pps hard cap
-# h1-h5 legit hosts max 40pps
-# max 40pps = min interval 0.025s
+# h1-h2: ICMP only, h3-h4: TCP SYN, h5: UDP
+# Max 5pps per host (min interval 0.2s)
+# Each host has distinct rate range
 _HOST_BASELINE_PROFILES = {
-    1: {"idle": ((0.5,  1.5),  (10, 30)), "browsing": ((0.025, 0.06),  (5, 12)), "watching": ((0.025, 0.05), (20, 80)),  "downloading": ((0.025, 0.05), (8, 20))},
-    2: {"idle": ((0.6,  1.8),  (10, 30)), "browsing": ((0.030, 0.08),  (5, 12)), "watching": ((0.030, 0.06), (20, 80)),  "downloading": ((0.030, 0.06), (8, 20))},
-    3: {"idle": ((0.8,  2.0),  (12, 35)), "browsing": ((0.040, 0.10),  (5, 15)), "watching": ((0.040, 0.08), (25, 90)),  "downloading": ((0.040, 0.08), (8, 25))},
-    4: {"idle": ((1.0,  2.5),  (12, 35)), "browsing": ((0.050, 0.12),  (5, 15)), "watching": ((0.050, 0.10), (30, 100)), "downloading": ((0.050, 0.10), (10, 30))},
-    5: {"idle": ((1.2,  3.0),  (15, 40)), "browsing": ((0.060, 0.15),  (5, 15)), "watching": ((0.060, 0.12), (30, 110)), "downloading": ((0.060, 0.12), (10, 30))},
+    1: {"idle": ((4.5, 5.5), (10, 30)), "active": ((0.8,  1.2),  (5, 15))},   # ICMP heartbeat ~1pps
+    2: {"idle": ((4.0, 6.0), (10, 30)), "active": ((0.45, 0.55), (5, 15))},   # ICMP normal ping ~2pps
+    3: {"idle": ((3.5, 4.5), (10, 30)), "active": ((1.8,  2.2),  (5, 12))},   # ICMP web browse ~0.5pps
+    4: {"idle": ((4.0, 6.0), (10, 30)), "active": ((0.8,  1.2),  (5, 15))},   # ICMP ssh/api ~1pps
+    5: {"idle": ((6.0, 10.0),(10, 30)), "active": ((3.5,  4.5),  (5, 12))},   # ICMP dns/ntp ~0.25pps
 }
 
 _DEFAULT_DURATIONS = {
-    "idle": (10, 30), "browsing": (5, 15), "watching": (30, 120), "downloading": (10, 30),
+    "idle": (10, 30), "active": (3, 12),
 }
 
+# Protocol per host — h1-h2 ICMP, h3-h4 TCP, h5 UDP
+_HOST_PROTOCOL = {1: "icmp", 2: "icmp", 3: "tcp", 4: "tcp", 5: "udp"}
 # Per-host ICMP variant — each legit host uses a distinct ping signature
 # Varies by: payload size (-s), TTL (-t), IPv6 (ping6), flood type
 # No two hosts share the same command template
 _HOST_ICMP_VARIANT = {
-    1: lambda ip, interval: f"ping -i {interval} -s 64  {ip}",
-    2: lambda ip, interval: f"ping -i {interval} -s 128 {ip}",
-    3: lambda ip, interval: f"ping -i {interval} -s 256 {ip}",
-    4: lambda ip, interval: f"ping -i {interval} -s 32  {ip}",
-    5: lambda ip, interval: f"ping -i {interval} -s 512 {ip}",
+    1: lambda ip, interval: f"ping -i {interval} -s 56  {ip}",
+    2: lambda ip, interval: f"ping -i {interval} -s 56  {ip}",
+    3: lambda ip, interval: f"ping -i {interval} -s 64  {ip}",
+    4: lambda ip, interval: f"ping -i {interval} -s 56  {ip}",
+    5: lambda ip, interval: f"ping -i {interval} -s 56  {ip}",
 }
 
 # Runtime state — populated at startup
 _host_switch_map:    dict[str, str]              = {}
 _attack_assignments: list[dict]                  = []
+_active_attackers:   set[str]                    = set()  # IPs currently in attack phase
 _baseline_threads:   dict[str, threading.Thread] = {}
 _baseline_stop:      dict[str, threading.Event]  = {}
 _restore_log = _logging.getLogger("restore_poller")
@@ -244,34 +237,21 @@ def _nsrun(host, cmd: str, wait: bool = False) -> None:
         subprocess.Popen(full, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-# Per-host TCP/UDP ports for mixed baseline — each host has distinct ports
-_HOST_TCP_PORT = {1: 80, 2: 443, 3: 8080, 4: 22, 5: 3306}
-_HOST_UDP_PORT = {1: 53, 2: 123, 3: 5353, 4: 67, 5: 161}
+# Per-host TCP/UDP ports
+_HOST_TCP_PORT = {3: 80, 4: 22}
+_HOST_UDP_PORT = {5: 53}
 
-# Traffic type rotation per state
-# browsing/downloading cycle: ICMP -> TCP -> UDP
-# watching: ICMP -> UDP
-# idle: ICMP only
-_TRAFFIC_ROTATION = {
-    "browsing":     ["icmp", "tcp", "udp"],
-    "watching":     ["icmp", "udp"],
-    "downloading":  ["icmp", "tcp", "udp"],
-    "idle":         ["icmp"],   # slow ping kept alive — no silence
-}
-
-
-# Fixed starting state per host — staggered so there is always a mix active
-# 2-3 hosts start in each state, guarantees diversity from the first second
+# Fixed starting state — staggered
 _HOST_START_STATE = {
-    1: "browsing",
-    2: "watching",
-    3: "downloading",
+    1: "active",
+    2: "idle",
+    3: "active",
     4: "idle",
-    5: "browsing",
+    5: "active",
 }
 
-# Deterministic cycle order — each host advances through this after each duration
-_STATE_CYCLE = ["browsing", "watching", "downloading", "idle"]
+# Simple 2-state cycle: active -> idle -> active
+_STATE_CYCLE = ["active", "idle"]
 
 
 def _kill_baseline_procs(host) -> None:
@@ -294,12 +274,12 @@ def _start_traffic(host, num: int, traffic_type: str, interval: float) -> None:
 
 
 def _baseline_loop(host, stop_event: threading.Event) -> None:
-    num      = int(host.name[1:])
-    profile  = _HOST_BASELINE_PROFILES.get(num)
+    num          = int(host.name[1:])
+    profile      = _HOST_BASELINE_PROFILES.get(num)
+    protocol     = _HOST_PROTOCOL.get(num, "icmp")
 
-    start_state = _HOST_START_STATE.get(num, "browsing")
-    cycle_idx   = _STATE_CYCLE.index(start_state) if start_state in _STATE_CYCLE else 0
-    traffic_idx = 0  # rotates through traffic types per state
+    start_state  = _HOST_START_STATE.get(num, "active")
+    cycle_idx    = _STATE_CYCLE.index(start_state) if start_state in _STATE_CYCLE else 0
 
     while not stop_event.is_set():
         state_name = _STATE_CYCLE[cycle_idx % len(_STATE_CYCLE)]
@@ -308,23 +288,19 @@ def _baseline_loop(host, stop_event: threading.Event) -> None:
         if profile and state_name in profile:
             interval_range, duration_range = profile[state_name]
         else:
-            interval_range = (0.5, 2.0)
+            interval_range = (1.0, 3.0)
             duration_range = _DEFAULT_DURATIONS.get(state_name, (10, 30))
 
-        # idle uses very slow ping (1-3s interval) — traffic never fully stops
-        if state_name == "idle":
-            interval = round(random.uniform(1.0, 3.0), 4)
-        else:
-            interval = round(random.uniform(*interval_range), 4)
+        interval = round(random.uniform(*interval_range), 4)
         duration = random.randint(*duration_range)
 
-        # Pick next traffic type in rotation for this state
-        rotation     = _TRAFFIC_ROTATION.get(state_name, ["icmp"])
-        traffic_type = rotation[traffic_idx % len(rotation)]
-        traffic_idx += 1
-
         _kill_baseline_procs(host)
-        _start_traffic(host, num, traffic_type, interval)
+
+        # idle = very slow ICMP only (keep-alive), active = host protocol
+        if state_name == "idle":
+            _start_traffic(host, num, "icmp", round(random.uniform(2.0, 5.0), 4))
+        else:
+            _start_traffic(host, num, protocol, interval)
 
         for _ in range(duration):
             if stop_event.is_set():
@@ -388,15 +364,41 @@ def _hping_cmd(attacker_num: int, target: str, count: int = None) -> str:
     return f"hping3 {flags} {count_flag}{target}"
 
 
+def _notify_attack_start(ip: str, attack_type: str) -> None:
+    try:
+        req = urllib.request.Request(
+            f"{BACKEND_API}/api/attack_ground_truth/start",
+            data=_json.dumps({"ip": ip, "attack_type": attack_type}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=2):
+            pass
+    except Exception:
+        pass
+
+
+def _notify_attack_stop(ip: str) -> None:
+    _active_attackers.discard(ip)
+    try:
+        req = urllib.request.Request(
+            f"{BACKEND_API}/api/attack_ground_truth/stop",
+            data=_json.dumps({"ip": ip}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=2):
+            pass
+    except Exception:
+        pass
+
+
+
 def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
-    # Each attacker runs independently -- staggered start, random attack/rest cycles
-    # Simulates real botnet node: different capacity, unpredictable timing
     h           = net.get(f"h{num}")
     delay       = _ATTACKER_START_DELAYS.get(num, 0)
     atk_min, atk_max, rst_min, rst_max = _ATTACKER_CYCLES.get(num, (15, 30, 5, 10))
     atype, _    = _ATTACKER_VARIANTS.get(num, ("SYN", ""))
+    ip          = h.IP()
 
-    # Wait staggered start delay -- check stop_event every second
     for _ in range(delay):
         if stop_event.is_set():
             return
@@ -405,30 +407,30 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
     while not stop_event.is_set():
         atk_dur = random.randint(atk_min, atk_max)
         _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
+        _notify_attack_start(ip, atype)
+        _active_attackers.add(ip)
 
-        # Attack phase -- check stop every second
         for _ in range(atk_dur):
             if stop_event.is_set():
-                break
+                _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
+                _notify_attack_stop(ip)
+                return
             time.sleep(1)
 
-        # Stop hping3 for rest phase
-        _nsrun(h, "pkill -f hping3 2>/dev/null; true")
-
+        _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
+        _notify_attack_stop(ip)
         if stop_event.is_set():
-            break
+            return
 
-        # Pick random rest duration for this cycle
         rst_dur = random.randint(rst_min, rst_max)
-        pass  # silent rest
-
         for _ in range(rst_dur):
             if stop_event.is_set():
-                break
+                return
             time.sleep(1)
 
-    # Final cleanup
-    _nsrun(h, "pkill -f hping3 2>/dev/null; true")
+    _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
+    _notify_attack_stop(ip)
+    _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
 
 
 def launch_attack(sustained: bool = True) -> None:
@@ -546,23 +548,28 @@ def start_mixed_campaign() -> None:
 
 
 def stop_all_attacks() -> None:
-    # Signal all campaign threads to stop immediately
     global _mixed_stop_event, _campaign_threads
+
+    # 1. Signal threads to stop
     _mixed_stop_event.set()
 
-    # Kill hping3 on all attackers in parallel -- non-blocking
-    info("*** Stopping all attacks (parallel kill)...\n")
+    # 2. Join threads FIRST so no thread restarts hping3 after we kill it
+    info("*** Waiting for campaign threads to exit...\n")
+    for t in _campaign_threads:
+        t.join(timeout=5)
+    _campaign_threads.clear()
+
+    # 3. Kill hping3 — wait=True so kill finishes before continuing
+    info("*** Killing hping3 on all attackers...\n")
     for h in net.hosts:
         if int(h.name[1:]) in _ATTACKER_NUMS:
-            _nsrun(h, "pkill -f hping3 2>/dev/null; true")
+            _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
 
-    # Wait briefly for parallel kills to land
-    time.sleep(0.5)
-
-    # Join campaign threads with short timeout
-    for t in _campaign_threads:
-        t.join(timeout=2)
-    _campaign_threads.clear()
+    # 4. Force-kill stragglers
+    time.sleep(0.3)
+    for h in net.hosts:
+        if int(h.name[1:]) in _ATTACKER_NUMS:
+            _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
 
     info("*** Flushing OVS block rules...\n")
     for sw in net.switches:
@@ -630,15 +637,11 @@ def stop_all_attacks() -> None:
 # Max 300 pps per host -- safely below flood prefilter limits
 # Diverse rates so hosts don't all look identical to IF
 _FLASH_CROWD_PROFILES = {
-    2:  ("0.0033", "~300 pps"),  # fastest -- capped at 300
-    4:  ("0.004",  "~250 pps"),
-    6:  ("0.006",  "~167 pps"),
-    8:  ("0.010",  "~100 pps"),
-    10: ("0.015",  "~67 pps"),
-    12: ("0.025",  "~40 pps"),
-    14: ("0.050",  "~20 pps"),
-    16: ("0.100",  "~10 pps"),
-    18: ("0.200",  "~5 pps"),
+    1: ("0.033", "~30 pps"),
+    2: ("0.030", "~33 pps"),
+    3: ("0.028", "~36 pps"),
+    4: ("0.025", "~40 pps"),
+    5: ("0.022", "~45 pps"),
 }
 
 
@@ -648,8 +651,8 @@ def _flash_crowd_worker(legit: list, duration: int) -> None:
 
     # Kill any existing ping/hping3 and wait for processes to die
     for h in legit:
-        _nsrun(h, "pkill -f 'ping -i' 2>/dev/null; pkill -f hping3 2>/dev/null; true")
-    time.sleep(1)
+        _nsrun(h, "pkill -9 -f 'ping -i' 2>/dev/null; pkill -f hping3 2>/dev/null; true", wait=True)
+    time.sleep(0.5)
 
     # Start flash crowd ping per host at elevated rate
     for h in legit:
@@ -661,12 +664,16 @@ def _flash_crowd_worker(legit: list, duration: int) -> None:
     # Wait for duration -- background thread so CLI stays responsive
     time.sleep(duration)
 
-    # Stop flash crowd ping
+    # Stop flash crowd ping — wait=True ensures ping is dead before baseline restores
     for h in legit:
-        _nsrun(h, "pkill -f 'ping -i' 2>/dev/null; true")
+        _nsrun(h, "pkill -9 -f 'ping -i' 2>/dev/null; true", wait=True)
 
     info("*** Flash crowd ended -- restoring baseline...\n")
     start_baseline_traffic()
+    # Force new CLI prompt line
+    import sys
+    sys.stdout.write("mininet> ")
+    sys.stdout.flush()
 
 
 def flash_crowd(duration: int = 30) -> None:
@@ -781,22 +788,25 @@ def check_traffic() -> None:
         ip          = h.IP()
         sw          = _host_switch_map.get(h.name, "?")
 
-        if is_server:
-            role, attack_type = "SERVER", "—"
+        if num == 21:
+            role, attack_type = "SINKHOLE", "-"
+            status = "✓ sinkhole active"
+        elif is_server:
+            role, attack_type = "SERVER", "-"
             srv_up = h.cmd("pgrep -f 'http.server' 2>/dev/null").strip()
             status = "✓ HTTP running" if srv_up else "⚠ server down"
         elif is_attacker:
             role        = "ATTACKER"
             attack_type = next((f"[{a['attack_type']}] {a['flags']}"
                                 for a in _attack_assignments if a["attacker"] == h.name), "?")
-            hping_up = h.cmd("pgrep -x hping3 2>/dev/null").strip()
-            mit      = quarantine.get(ip)
-            if hping_up and mit:   status = f"★ ATTACKING → [{mit}]"
-            elif hping_up:         status = "★ ATTACKING"
-            elif mit:              status = f"⚡ MITIGATED [{mit}]"
-            else:                  status = "— standby"
+            mit          = quarantine.get(ip)
+            is_attacking = ip in _active_attackers
+            if is_attacking and mit: status = f"★ ATTACKING -> [{mit}]"
+            elif is_attacking:       status = "★ ATTACKING"
+            elif mit:                status = f"⚡ MITIGATED [{mit}]"
+            else:                    status = "standby"
         else:
-            role, attack_type = "legit", "—"
+            role, attack_type = "legit", "-"
             mit     = quarantine.get(ip)
             t_alive = _baseline_threads.get(h.name)
             running = t_alive is not None and t_alive.is_alive()

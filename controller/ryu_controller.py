@@ -18,6 +18,9 @@ TELEMETRY_ADDR = "tcp://127.0.0.1:5555"
 COMMAND_ADDR   = "tcp://127.0.0.1:5556"
 STATS_INTERVAL = 1.0
 
+# Skip flows originating from server/sinkhole (reply traffic)
+_SKIP_SRC = {"10.0.0.20", "10.0.0.21"}
+
 
 class FatTreeController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -395,6 +398,12 @@ class FatTreeController(app_manager.RyuApp):
 
             src_ip = match.get("ipv4_src")
             if not src_ip or src_ip == "0.0.0.0":
+                continue
+            if src_ip in _SKIP_SRC:  # skip server/sinkhole reply traffic
+                continue
+            if stat.packet_count == 0:
+                # no traffic yet -- avoids eps-division blowup in
+                # duration_pkt_ratio (IF feature), always-anomaly bug
                 continue
 
             # is_flood_switch gate removed.

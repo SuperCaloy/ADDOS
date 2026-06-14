@@ -62,7 +62,37 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             false_positives       INTEGER DEFAULT 0,
             tp                    INTEGER DEFAULT 0,
             tn                    INTEGER DEFAULT 0,
-            fn                    INTEGER DEFAULT 0
+            fn                    INTEGER DEFAULT 0,
+            -- IF-level metrics
+            if_tp                 INTEGER DEFAULT 0,
+            if_fp                 INTEGER DEFAULT 0,
+            if_tn                 INTEGER DEFAULT 0,
+            if_fn                 INTEGER DEFAULT 0,
+            -- RF overall metrics
+            rf_tp                 INTEGER DEFAULT 0,
+            rf_fp                 INTEGER DEFAULT 0,
+            rf_tn                 INTEGER DEFAULT 0,
+            rf_fn                 INTEGER DEFAULT 0,
+            -- RF per-class
+            rf_tp_syn             INTEGER DEFAULT 0,
+            rf_fp_syn             INTEGER DEFAULT 0,
+            rf_tn_syn             INTEGER DEFAULT 0,
+            rf_fn_syn             INTEGER DEFAULT 0,
+            rf_tp_icmp            INTEGER DEFAULT 0,
+            rf_fp_icmp            INTEGER DEFAULT 0,
+            rf_tn_icmp            INTEGER DEFAULT 0,
+            rf_fn_icmp            INTEGER DEFAULT 0,
+            rf_tp_udp             INTEGER DEFAULT 0,
+            rf_fp_udp             INTEGER DEFAULT 0,
+            rf_tn_udp             INTEGER DEFAULT 0,
+            rf_fn_udp             INTEGER DEFAULT 0,
+            -- RF misclassification (off-diagonal confusion matrix)
+            rf_syn_as_icmp        INTEGER DEFAULT 0,
+            rf_syn_as_udp         INTEGER DEFAULT 0,
+            rf_icmp_as_syn        INTEGER DEFAULT 0,
+            rf_icmp_as_udp        INTEGER DEFAULT 0,
+            rf_udp_as_syn         INTEGER DEFAULT 0,
+            rf_udp_as_icmp        INTEGER DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_ts    ON mitigation_events(timestamp);
@@ -166,11 +196,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             ON ip_attack_history (date(unblocked_at));
 
         CREATE TABLE IF NOT EXISTS system_metrics (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp   TEXT    NOT NULL,
-            cpu_percent REAL    NOT NULL DEFAULT 0,
-            mem_mb      REAL    NOT NULL DEFAULT 0,
-            pps_processed REAL  NOT NULL DEFAULT 0
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp       TEXT    NOT NULL,
+            cpu_percent     REAL    NOT NULL DEFAULT 0,
+            mem_mb          REAL    NOT NULL DEFAULT 0,
+            pps_processed   REAL    NOT NULL DEFAULT 0,
+            is_attack       INTEGER NOT NULL DEFAULT 0,
+            ctrl_cpu_percent REAL   NOT NULL DEFAULT 0,
+            ctrl_mem_mb     REAL    NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_sysmetrics_ts
@@ -213,8 +246,31 @@ def _migrate(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
 
-    # New columns — tp/tn/fn for ML metrics
-    for col in ["tp", "tn", "fn"]:
+    # controller metrics columns
+    for col, typ in [("ctrl_cpu_percent", "REAL NOT NULL DEFAULT 0"),
+                     ("ctrl_mem_mb",      "REAL NOT NULL DEFAULT 0")]:
+        try:
+            conn.execute(f"ALTER TABLE system_metrics ADD COLUMN {col} {typ}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # IF/RF split columns
+    new_cols = [        "if_tp", "if_fp", "if_tn", "if_fn",
+        "rf_tp", "rf_fp", "rf_tn", "rf_fn",
+        "rf_tp_syn", "rf_fp_syn", "rf_tn_syn", "rf_fn_syn",
+        "rf_tp_icmp","rf_fp_icmp","rf_tn_icmp","rf_fn_icmp",
+        "rf_tp_udp", "rf_fp_udp", "rf_tn_udp", "rf_fn_udp",
+        "rf_syn_as_icmp", "rf_syn_as_udp",
+        "rf_icmp_as_syn", "rf_icmp_as_udp",
+        "rf_udp_as_syn",  "rf_udp_as_icmp",
+    ]
+    for col in new_cols:
+        try:
+            conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
         try:
             conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
             conn.commit()

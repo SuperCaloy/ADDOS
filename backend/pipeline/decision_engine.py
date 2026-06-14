@@ -254,12 +254,14 @@ def on_result(src_ip: str, if_score, is_anomaly,
             _stats["normal_packets"]  += 1
             _stats["normal_forwarded"] += _pkt_count
 
-        # TN = normal + legit | FN = normal + attacker (missed attack)
+        # IF: normal → TN if legit, FN if attacker
         _is_attacker = src_ip in _ATTACKER_IPS
         writer.log_traffic_summary(
             total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0,
             tn=(0 if _is_attacker else 1),
             fn=(1 if _is_attacker else 0),
+            if_tn=(0 if _is_attacker else 1),
+            if_fn=(1 if _is_attacker else 0),
         )
         return
 
@@ -345,11 +347,69 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "force_insert":    True,   # never overwrite existing rows
     })
     _threat_pps = max(int(float((flow_stats or {}).get("packet_count_per_second", 1.0))), 1)
-    # TP = anomaly + attacker | FP already tracked via is_known_legit
-    _is_tp = src_ip in _ATTACKER_IPS
+    _is_tp      = src_ip in _ATTACKER_IPS
+    _is_legit   = src_ip in _LEGIT_HOST_IPS
+
+    # IF metrics
+    _if_tp = 1 if _is_tp    else 0
+    _if_fp = 1 if _is_legit else 0
+
+    # RF ground truth — use live topology-reported attack type
+    from backend.api.stats import get_active_attacks as _get_gt
+    _gt = _get_gt()
+    _expected_class = _gt.get(src_ip)  # "SYN", "ICMP", "UDP" or None
+
+    # Map RF attack_class to short type
+    _class_map = {"SYN Flood": "SYN", "ICMP Flood": "ICMP", "UDP Flood": "UDP"}
+    _predicted  = _class_map.get(attack_class)
+
+    _rf_tp = _rf_fp = _rf_tn = _rf_fn = 0
+    _rf_tp_syn = _rf_fp_syn = _rf_tn_syn = _rf_fn_syn = 0
+    _rf_tp_icmp= _rf_fp_icmp= _rf_tn_icmp= _rf_fn_icmp= 0
+    _rf_tp_udp = _rf_fp_udp = _rf_tn_udp = _rf_fn_udp = 0
+    _rf_syn_as_icmp = _rf_syn_as_udp = 0
+    _rf_icmp_as_syn = _rf_icmp_as_udp = 0
+    _rf_udp_as_syn  = _rf_udp_as_icmp = 0
+
+    if _expected_class and _predicted:
+        if _predicted == _expected_class:
+            _rf_tp = 1
+            if _expected_class == "SYN":
+                _rf_tp_syn = 1; _rf_tn_icmp = 1; _rf_tn_udp = 1
+            elif _expected_class == "ICMP":
+                _rf_tp_icmp = 1; _rf_tn_syn = 1; _rf_tn_udp = 1
+            elif _expected_class == "UDP":
+                _rf_tp_udp = 1; _rf_tn_syn = 1; _rf_tn_icmp = 1
+        else:
+            # Misclassification — track off-diagonal cell
+            _rf_fp = 1; _rf_fn = 1
+            _mis = (_expected_class, _predicted)
+            if   _mis == ("SYN",  "ICMP"): _rf_syn_as_icmp  = 1
+            elif _mis == ("SYN",  "UDP"):  _rf_syn_as_udp   = 1
+            elif _mis == ("ICMP", "SYN"):  _rf_icmp_as_syn  = 1
+            elif _mis == ("ICMP", "UDP"):  _rf_icmp_as_udp  = 1
+            elif _mis == ("UDP",  "SYN"):  _rf_udp_as_syn   = 1
+            elif _mis == ("UDP",  "ICMP"): _rf_udp_as_icmp  = 1
+    elif _expected_class and not _predicted:
+        _rf_fn = 1
+        if _expected_class == "SYN":   _rf_fn_syn  = 1
+        elif _expected_class == "ICMP": _rf_fn_icmp = 1
+        elif _expected_class == "UDP":  _rf_fn_udp  = 1
+
     writer.log_traffic_summary(
         total=_threat_pps, threats=_threat_pps, true_neg=0, fp=0,
         tp=(1 if _is_tp else 0),
+        if_tp=_if_tp, if_fp=_if_fp,
+        rf_tp=_rf_tp, rf_fp=_rf_fp, rf_tn=_rf_tn, rf_fn=_rf_fn,
+        rf_tp_syn=_rf_tp_syn, rf_fp_syn=_rf_fp_syn,
+        rf_tn_syn=_rf_tn_syn, rf_fn_syn=_rf_fn_syn,
+        rf_tp_icmp=_rf_tp_icmp, rf_fp_icmp=_rf_fp_icmp,
+        rf_tn_icmp=_rf_tn_icmp, rf_fn_icmp=_rf_fn_icmp,
+        rf_tp_udp=_rf_tp_udp, rf_fp_udp=_rf_fp_udp,
+        rf_tn_udp=_rf_tn_udp, rf_fn_udp=_rf_fn_udp,
+        rf_syn_as_icmp=_rf_syn_as_icmp, rf_syn_as_udp=_rf_syn_as_udp,
+        rf_icmp_as_syn=_rf_icmp_as_syn, rf_icmp_as_udp=_rf_icmp_as_udp,
+        rf_udp_as_syn=_rf_udp_as_syn,   rf_udp_as_icmp=_rf_udp_as_icmp,
     )
 
     elapsed_ms = (time.monotonic() - t_start) * 1000

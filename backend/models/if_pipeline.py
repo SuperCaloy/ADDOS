@@ -32,7 +32,7 @@ def _get_medians() -> np.ndarray:
 
 
 def extract_if_features(flow_stats: dict) -> np.ndarray:
-    """Build shape-(1,14) feature matrix from raw Ryu OFPFlowStatsRequest fields."""
+    """Build shape-(1,16) feature matrix from raw Ryu OFPFlowStatsRequest fields."""
     loader.require_loaded()
 
     n = len(loader.if_features)
@@ -40,6 +40,7 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
         _init_median_tracker(n)
 
     s = flow_stats
+    eps = 1e-9
 
     # --- Raw fields ---
     fds  = float(s.get("flow_duration_sec",  0))
@@ -56,37 +57,50 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     _total_s = max(_total_s, 1e-9)
     pps_raw  = pkt_raw / _total_s        # packet_count_per_second
     bps_raw  = byt_raw / _total_s        # byte_count_per_second
-    ppns_raw = pps_raw / 1e9             # packet_count_per_nsecond
-    bpns_raw = bps_raw / 1e9             # byte_count_per_nsecond
 
-    # log1p-transformed (matches training preprocess step)
-    pkt_log  = np.log1p(max(pkt_raw,  0))
-    byt_log  = np.log1p(max(byt_raw,  0))
-    pps_log  = np.log1p(max(pps_raw,  0))
-    ppns_log = np.log1p(max(ppns_raw, 0))
-    bps_log  = np.log1p(max(bps_raw,  0))
-    bpns_log = np.log1p(max(bpns_raw, 0))
-
-    # Engineered features
-    # flow_duration_total_ns
+    # --- Engineered (raw-based) ---
+    # flow_duration_total_ns (log1p)
     fdt_raw = fds * 1e9 + fdns
     fdt     = np.log1p(max(fdt_raw, 0))
 
     # bytes_per_packet
-    bpp = np.log1p(max(byt_raw / (pkt_raw + 1e-9), 0))
+    bpp = np.log1p(max(byt_raw / (pkt_raw + eps), 0))
 
     # pkt_byte_rate_ratio
-    pbr = np.log1p(max(pps_raw / (bps_raw + 1e-9), 0))
+    pbr = np.log1p(max(pps_raw / (bps_raw + eps), 0))
 
-    # 14 features matching scaler fitted feature order exactly:
-    # flow_duration_sec, flow_duration_nsec, idle_timeout, hard_timeout, flags,
-    # packet_count, byte_count, packet_count_per_second, packet_count_per_nsecond,
-    # byte_count_per_second, byte_count_per_nsecond,
-    # flow_duration_total_ns, bytes_per_packet, pkt_byte_rate_ratio
+    # flow_per_packet — flood = many packets, one flow
+    flow_per_packet = 1.0 / (pkt_raw + 1)
+
+    # duration_pkt_ratio — uses log1p'd fdt
+    # guard: pkt_raw=0 with fdt>0 -> /eps blowup, treat as 0 (no flood signal)
+    if pkt_raw > 0:
+        duration_pkt_ratio = np.log1p(max(fdt / (pkt_raw + eps), 0))
+    else:
+        duration_pkt_ratio = 0.0
+
+    # pkt_rate_per_duration — uses log1p'd fdt
+    pkt_rate_per_duration = np.log1p(max(pkt_raw / (fdt + eps), 0))
+
+    # avg_bytes_per_pkt — raw, unlogged
+    avg_bytes_per_pkt = byt_raw / (pkt_raw + eps)
+
+    # rate_to_count_ratio — burst rate vs sustained count
+    rate_to_count_ratio = np.log1p(max(pps_raw / (pkt_raw + eps), 0))
+
+    # --- log1p final transform for raw count/rate columns ---
+    pkt_log = np.log1p(max(pkt_raw, 0))
+    byt_log = np.log1p(max(byt_raw, 0))
+    pps_log = np.log1p(max(pps_raw, 0))
+    bps_log = np.log1p(max(bps_raw, 0))
+
+    # 16 features matching feature_contract.json order exactly
     vec = np.array([
-        fds, fdns, ito, hto, flg,
-        pkt_log, byt_log, pps_log, ppns_log, bps_log, bpns_log,
+        fds, ito, hto, flg,
+        pkt_log, byt_log, pps_log, bps_log,
         fdt, bpp, pbr,
+        flow_per_packet, duration_pkt_ratio, pkt_rate_per_duration,
+        avg_bytes_per_pkt, rate_to_count_ratio,
     ], dtype=np.float64)
 
     # Replace inf/-inf with NaN then fill with running median
@@ -100,7 +114,7 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     # Scaler was fitted with feature names — pass DataFrame to silence warning
     df = pd.DataFrame(vec.reshape(1, -1), columns=loader.if_features)
     vec_scaled = loader.if_scaler.transform(df)
-    return vec_scaled   # shape (1, 14)
+    return vec_scaled   # shape (1, 16)
 
 
 def run_if_inference(vec_scaled: np.ndarray) -> tuple[float, bool]:

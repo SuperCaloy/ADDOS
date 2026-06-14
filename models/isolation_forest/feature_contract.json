@@ -1,26 +1,29 @@
 {
   "feature_names": [
     "flow_duration_sec",
-    "flow_duration_nsec",
     "idle_timeout",
     "hard_timeout",
     "flags",
     "packet_count",
     "byte_count",
     "packet_count_per_second",
-    "packet_count_per_nsecond",
     "byte_count_per_second",
-    "byte_count_per_nsecond",
     "flow_duration_total_ns",
     "bytes_per_packet",
-    "pkt_byte_rate_ratio"
+    "pkt_byte_rate_ratio",
+    "flow_per_packet",
+    "duration_pkt_ratio",
+    "pkt_rate_per_duration",
+    "avg_bytes_per_pkt",
+    "rate_to_count_ratio"
   ],
-  "n_features": 14,
-  "threshold": 0.6844577759707491,
+  "n_features": 16,
+  "threshold": 0.564732844625596,
   "score_sign": "negated",
   "score_formula": "if_score = -model.score_samples(X)",
   "anomaly_rule": "is_anomaly = (if_score >= threshold)",
-  "contamination": 0.01,
-  "trained_on": "NORMAL only (label=1)",
-  "label_convention": "1=Normal, 0=Attack"
+  "contamination": "auto",
+  "trained_on": "NORMAL only (label=1 in SNT convention / internal 0)",
+  "scaler_note": "RobustScaler fit on normal-only rows",
+  "label_convention": "SNT: 1=Normal, 0=Attack | Internal: 0=Normal, 1=Attack"
 }

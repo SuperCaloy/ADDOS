@@ -88,7 +88,6 @@ def generate_report():
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _section_header(text: str, styles) -> list:
-    """Clean section header — teal underline, no dark background."""
     style = ParagraphStyle("sec", parent=styles["Normal"],
                            fontSize=12, fontName="Helvetica-Bold",
                            textColor=C_DARK,
@@ -177,7 +176,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     actions: dict[str, int] = {}
     for r in deduped:
         v = r["attack_vector"] or "Uncertain"
-        a = r["action_taken"]  or "—"
+        a = r["action_taken"]  or "-"
         vectors[v] = vectors.get(v, 0) + 1
         actions[a] = actions.get(a, 0) + 1
 
@@ -255,38 +254,111 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     # ── Section 2: Performance Benchmark ─────────────────────────────────────
     story += _section_header("2.  Performance Benchmark", styles)
 
-    ml  = writer.get_ml_metrics(start_str, end_str)
-    sys = writer.get_system_metrics_attack_vs_baseline(start_str, end_str)
-    lat = query("""
+    if_m = writer.get_if_metrics(start_str, end_str)
+    rf_m = writer.get_rf_metrics(start_str, end_str)
+    sys  = writer.get_system_metrics_attack_vs_baseline(start_str, end_str)
+    lat  = query("""
         SELECT AVG(duration_sec) as avg_dur
         FROM ip_attack_history
         WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
     """, (start_str, end_str))
     avg_dur = float((lat[0].get("avg_dur") or 0)) if lat else 0.0
 
-    bench_data = [
-        ["Metric", "Value", "Description"],
-        ["DETECTION ACCURACY", "", ""],
-        ["Precision",                f"{ml.get('precision', 0):.2f}%",  "Proportion of flagged threats genuinely malicious"],
-        ["Recall (TPR)",             f"{ml.get('recall', 0):.2f}%",     "Proportion of actual DDoS attacks correctly identified"],
-        ["False Positive Rate (FPR)",f"{ml.get('fpr', 0):.2f}%",        "Proportion of normal traffic incorrectly flagged"],
-        ["False Negative Rate (FNR)",f"{ml.get('fnr', 0):.2f}%",        "Proportion of actual attacks that bypassed the system"],
-        ["F1-Score",                 f"{ml.get('f1', 0):.2f}%",         "Harmonic mean of Precision and Recall"],
-        ["Accuracy",                 f"{ml.get('accuracy', 0):.2f}%",   "Overall proportion of correctly classified traffic"],
-        ["True Positive Rate (TPR)", f"{ml.get('tpr', 0):.2f}%",        "Proportion of attacks correctly flagged"],
-        ["True Negative Rate (TNR)", f"{ml.get('tnr', 0):.2f}%",        "Proportion of normal traffic that passed correctly"],
-        ["RESPONSE LATENCY", "", ""],
-        ["Avg Session Duration",     f"{avg_dur:.1f}s",                  "Average time from first detection to release"],
-        ["CONTROLLER RESOURCE OVERHEAD", "", ""],
-        ["CPU Utilization (Baseline)",      f"{sys.get('baseline_cpu', 0):.2f}%",   "CPU usage during normal traffic"],
-        ["CPU Utilization (Active Attack)", f"{sys.get('attack_cpu', 0):.2f}%",     "CPU usage during active DDoS simulation"],
-        ["Memory (Baseline)",               f"{sys.get('baseline_mem', 0):.1f} MB", "Memory during normal traffic"],
-        ["Memory (Active Attack)",          f"{sys.get('attack_mem', 0):.1f} MB",   "Memory during active DDoS simulation"],
-    ]
+    def _bench_table(data):
+        tbl = Table(data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
+        style = [
+            ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+            ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
+            ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+            ("BACKGROUND",    (0, 0), (-1, 0),  C_BLUE),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+            ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
+            ("TOPPADDING",    (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN",         (1, 1), (1, -1),  "CENTER"),
+            ("FONTNAME",      (1, 1), (1, -1),  "Helvetica-Bold"),
+            ("TEXTCOLOR",     (1, 1), (1, -1),  C_BLUE),
+        ]
+        tbl.setStyle(TableStyle(style))
+        return tbl
 
-    _cat_rows = [1, 10, 12]
-    bench_tbl = Table(bench_data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
-    _bench_style = [
+    # ── 2a: Isolation Forest ──────────────────────────────────────────────────
+    story.append(Paragraph("2a.  Isolation Forest-Anomaly Detection",
+        ParagraphStyle("sub", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                       textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
+
+    if_data = [
+        ["Metric", "Value", "Description"],
+        ["Precision",                f"{if_m.get('precision',0):.2f}%",  "Flagged anomalies that were true attacks"],
+        ["Recall (TPR)",             f"{if_m.get('recall',0):.2f}%",     "Attacks correctly flagged as anomalies"],
+        ["F1-Score",                 f"{if_m.get('f1',0):.2f}%",         "Harmonic mean of Precision and Recall"],
+        ["Accuracy",                 f"{if_m.get('accuracy',0):.2f}%",   "Overall correct anomaly decisions"],
+        ["False Positive Rate (FPR)",f"{if_m.get('fpr',0):.2f}%",        "Normal traffic incorrectly flagged"],
+        ["False Negative Rate (FNR)",f"{if_m.get('fnr',0):.2f}%",        "Attacks that bypassed anomaly detection"],
+        ["True Positive Rate (TPR)", f"{if_m.get('tpr',0):.2f}%",        "Proportion of attacks correctly flagged"],
+        ["True Negative Rate (TNR)", f"{if_m.get('tnr',0):.2f}%",        "Normal traffic correctly passed"],
+    ]
+    story.append(_bench_table(if_data))
+    story.append(Spacer(1, 0.3*cm))
+
+    # IF 2x2 Confusion Matrix
+    _tp = if_m.get('tp', 0); _fp = if_m.get('fp', 0)
+    _tn = if_m.get('tn', 0); _fn = if_m.get('fn', 0)
+    _lbl_if = ParagraphStyle("cml", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
+
+    def _if_cell(label, val, color):
+        return Paragraph(f"{label}\n{val}", ParagraphStyle("ifc", parent=styles["Normal"],
+            fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=color))
+
+    if_cm_data = [
+        ["", Paragraph("Predicted: Attack", _lbl_if), Paragraph("Predicted: Normal", _lbl_if)],
+        [Paragraph("Actual: Attack", _lbl_if), _if_cell("TP", _tp, C_GREEN), _if_cell("FN", _fn, C_RED)],
+        [Paragraph("Actual: Normal", _lbl_if), _if_cell("FP", _fp, C_RED),  _if_cell("TN", _tn, C_GREEN)],
+    ]
+    if_cm_tbl = Table(if_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm])
+    if_cm_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
+        ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
+        ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
+        ("ALIGN",   (0,0),(-1,-1), "CENTER"),
+    ]))
+    if_cm_wrap = Table([[if_cm_tbl]], colWidths=[17.5*cm])
+    if_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+    story.append(if_cm_wrap)
+    story.append(Spacer(1, 0.4*cm))
+
+    # ── 2b: Random Forest ─────────────────────────────────────────────────────
+    story.append(Paragraph("2b.  Random Forest-Attack Classification",
+        ParagraphStyle("sub2", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                       textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
+
+    rf_o    = rf_m.get("overall",   {})
+    rf_conf = rf_m.get("confusion", {})
+
+    rf_data = [
+        ["Metric", "Value", "Description"],
+        ["Precision",                f"{rf_o.get('precision',0):.2f}%",  "Correctly classified attacks out of all flagged"],
+        ["Recall (TPR)",             f"{rf_o.get('recall',0):.2f}%",     "Attacks correctly classified by type"],
+        ["F1-Score",                 f"{rf_o.get('f1',0):.2f}%",         "Harmonic mean of Precision and Recall"],
+        ["Accuracy",                 f"{rf_o.get('accuracy',0):.2f}%",   "Overall correct attack type classifications"],
+        ["False Positive Rate (FPR)",f"{rf_o.get('fpr',0):.2f}%",        "Wrong attack type flagged"],
+        ["False Negative Rate (FNR)",f"{rf_o.get('fnr',0):.2f}%",        "Attacks misclassified or missed"],
+        ["True Positive Rate (TPR)", f"{rf_o.get('tpr',0):.2f}%",        "Proportion of attacks correctly classified"],
+        ["True Negative Rate (TNR)", f"{rf_o.get('tnr',0):.2f}%",        "Non-matching classes correctly excluded"],
+    ]
+    rf_tbl = Table(rf_data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
+    rf_tbl.setStyle(TableStyle([
         ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
         ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
         ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
@@ -300,17 +372,91 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ("ALIGN",         (1, 1), (1, -1),  "CENTER"),
         ("FONTNAME",      (1, 1), (1, -1),  "Helvetica-Bold"),
         ("TEXTCOLOR",     (1, 1), (1, -1),  C_BLUE),
+    ]))
+    story.append(rf_tbl)
+    story.append(Spacer(1, 0.3*cm))
+
+    # RF 3x3 Confusion Matrix
+    _lbl = ParagraphStyle("rfl", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
+
+    def _cm_cell(val, is_diag):
+        c = C_GREEN if is_diag else C_RED
+        return Paragraph(str(val), ParagraphStyle("rfc", parent=styles["Normal"],
+            fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=c))
+
+    rf_cm_data = [
+        ["", Paragraph("Predicted: SYN", _lbl), Paragraph("Predicted: ICMP", _lbl), Paragraph("Predicted: UDP", _lbl)],
+        [Paragraph("Act: SYN",  _lbl),
+         _cm_cell(rf_conf.get("syn_as_syn",   0), True),
+         _cm_cell(rf_conf.get("syn_as_icmp",  0), False),
+         _cm_cell(rf_conf.get("syn_as_udp",   0), False)],
+        [Paragraph("Act: ICMP", _lbl),
+         _cm_cell(rf_conf.get("icmp_as_syn",  0), False),
+         _cm_cell(rf_conf.get("icmp_as_icmp", 0), True),
+         _cm_cell(rf_conf.get("icmp_as_udp",  0), False)],
+        [Paragraph("Act: UDP",  _lbl),
+         _cm_cell(rf_conf.get("udp_as_syn",   0), False),
+         _cm_cell(rf_conf.get("udp_as_icmp",  0), False),
+         _cm_cell(rf_conf.get("udp_as_udp",   0), True)],
     ]
-    for _cr in _cat_rows:
-        _bench_style += [
-            ("BACKGROUND", (0, _cr), (-1, _cr), colors.HexColor("#f0f9ff")),
-            ("FONTNAME",   (0, _cr), (-1, _cr), "Helvetica-Bold"),
-            ("TEXTCOLOR",  (0, _cr), (-1, _cr), C_TEAL),
-            ("FONTSIZE",   (0, _cr), (-1, _cr), 8),
-            ("SPAN",       (0, _cr), (-1, _cr)),
-        ]
-    bench_tbl.setStyle(TableStyle(_bench_style))
-    story.append(bench_tbl)
+    rf_cm_tbl = Table(rf_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm, 4.5*cm])
+    rf_cm_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (3,3),(3,3), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (3,1),(3,1), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (3,2),(3,2), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (1,3),(1,3), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (2,3),(2,3), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
+        ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
+        ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
+        ("ALIGN",   (0,0),(-1,-1), "CENTER"),
+    ]))
+    rf_cm_wrap = Table([[rf_cm_tbl]], colWidths=[17.5*cm])
+    rf_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+    story.append(rf_cm_wrap)
+    story.append(Spacer(1, 0.4*cm))
+
+    # ── 2c: System Resource Overhead ─────────────────────────────────────────
+    story.append(Paragraph("2c.  Controller Resource Overhead",
+        ParagraphStyle("sub3", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                       textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
+
+    res_data = [
+        ["Metric", "Value", "Description"],
+        ["Avg Session Duration",                    f"{avg_dur:.1f}s",
+         "Avg time from detection to release"],
+        # Backend
+        ["Backend CPU (Baseline)",                  f"{sys.get('baseline_cpu',0):.2f}%",
+         "Detection backend CPU — normal traffic"],
+        ["Backend CPU (Active Attack)",             f"{sys.get('attack_cpu',0):.2f}%",
+         "Detection backend CPU — DDoS simulation"],
+        ["Backend Memory (Baseline)",               f"{sys.get('baseline_mem',0):.1f} MB",
+         "Detection backend memory — normal traffic"],
+        ["Backend Memory (Active Attack)",          f"{sys.get('attack_mem',0):.1f} MB",
+         "Detection backend memory — DDoS simulation"],
+        # Controller
+        ["Controller CPU (Baseline)",               f"{sys.get('baseline_ctrl_cpu',0):.2f}%",
+         "Ryu controller CPU — normal traffic"],
+        ["Controller CPU (Active Attack)",          f"{sys.get('attack_ctrl_cpu',0):.2f}%",
+         "Ryu controller CPU — DDoS simulation"],
+        ["Controller Memory (Baseline)",            f"{sys.get('baseline_ctrl_mem',0):.1f} MB",
+         "Ryu controller memory — normal traffic"],
+        ["Controller Memory (Active Attack)",       f"{sys.get('attack_ctrl_mem',0):.1f} MB",
+         "Ryu controller memory — DDoS simulation"],
+        # Combined
+        ["Combined Memory Overhead (Attack)",
+         f"{sys.get('attack_mem',0) + sys.get('attack_ctrl_mem',0):.1f} MB",
+         "Backend + Controller during attack"],
+    ]
+    story.append(_bench_table(res_data))
     story.append(Spacer(1, 0.6*cm))
 
     # ── Section 3: Offences Summary ───────────────────────────────────────────
@@ -373,11 +519,11 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
                    "Confidence", "Priority", "Action"]
     log_data = [log_headers]
     for r in deduped:
-        conf_pct = f"{r['confidence']*100:.1f}%" if r["confidence"] else "—"
+        conf_pct = f"{r['confidence']*100:.1f}%" if r["confidence"] else "-"
         log_data.append([
             r["timestamp"], r["src_ip"], r["predicted_class"],
-            r["attack_vector"] or "—", conf_pct,
-            r["priority"] or "—", r["action_taken"] or "—",
+            r["attack_vector"] or "-", conf_pct,
+            r["priority"] or "-", r["action_taken"] or "-",
         ])
 
     log_tbl = Table(log_data,
@@ -419,15 +565,15 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
             dur_str = f"{dur//60}m {dur%60}s" if dur >= 60 else f"{dur}s"
             hist_data.append([
                 r["src_ip"],
-                r["attack_vector"] or "—",
+                r["attack_vector"] or "-",
                 f"{r['if_score']:.4f}",
-                f"{r['confidence']*100:.1f}%" if r["confidence"] else "—",
-                r["priority"] or "—",
+                f"{r['confidence']*100:.1f}%" if r["confidence"] else "-",
+                r["priority"] or "-",
                 f"Phase {r['phase_reached']}",
                 str(r["offence_count"] or 1),
                 dur_str,
                 r["unblocked_at"],
-                r["unblock_reason"] or "—",
+                r["unblock_reason"] or "-",
             ])
         hist_tbl = Table(hist_data,
                          colWidths=[2.5*cm, 2*cm, 1.8*cm, 1.4*cm,
