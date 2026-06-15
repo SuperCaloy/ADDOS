@@ -6,19 +6,31 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    HRFlowable, PageBreak, KeepTogether
 )
 from backend.database.db import query
 from backend.database import writer
 
 bp = Blueprint("report", __name__)
 
+# ── Colors ────────────────────────────────────────────────────────────────────
+C_DARK    = colors.HexColor("#1a1a2e")
+C_ACCENT  = colors.HexColor("#16213e")
+C_BLUE    = colors.HexColor("#0f3460")
+C_TEAL    = colors.HexColor("#00b4d8")
+C_GREEN   = colors.HexColor("#06d6a0")
+C_RED     = colors.HexColor("#ef476f")
+C_GRAY    = colors.HexColor("#6b7280")
+C_LGRAY   = colors.HexColor("#f3f4f6")
+C_WHITE   = colors.white
+C_ROW_A   = colors.HexColor("#f9fafb")
+C_ROW_B   = colors.white
+C_BORDER  = colors.HexColor("#e5e7eb")
+
 
 @bp.get("/api/history_dates")
 def history_dates():
-    """Return list of YYYY-MM-DD dates that have attack history records.
-    Used by the calendar widget to disable dates with no data and future dates.
-    """
     dates = writer.get_history_dates()
     return jsonify({"dates": dates})
 
@@ -27,18 +39,15 @@ def _validate_dates(body: dict) -> tuple[str, str, str | None]:
     today     = datetime.date.today()
     start_str = body.get("start_date", "")
     end_str   = body.get("end_date", "")
-
     try:
         start_dt = datetime.date.fromisoformat(start_str)
         end_dt   = datetime.date.fromisoformat(end_str)
     except ValueError:
         return None, None, "Invalid date format. Use YYYY-MM-DD."
-
     if end_dt < start_dt:
         return None, None, "End date must be >= start date."
     if end_dt > today:
         return None, None, "End date cannot be in the future."
-
     return start_str, end_str, None
 
 
@@ -66,82 +75,113 @@ def generate_report():
     """, (start_sql, end_sql, start_sql, end_sql))
 
     if not rows:
-        return jsonify({
-            "error": "No data found for the selected date range. "
-                     "Please choose a different range."
-        }), 404
+        return jsonify({"error": "No data found for the selected date range."}), 404
 
     pdf_bytes = _build_pdf(start_str, end_str, rows)
     buf = io.BytesIO(pdf_bytes)
     buf.seek(0)
-
     filename = f"ddos_report_{start_str}_to_{end_str}.pdf"
-    return send_file(
-        buf,
-        mimetype="application/pdf",
-        as_attachment=True,
-        download_name=filename,
-    )
+    return send_file(buf, mimetype="application/pdf",
+                     as_attachment=True, download_name=filename)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _section_header(text: str, styles) -> list:
+    style = ParagraphStyle("sec", parent=styles["Normal"],
+                           fontSize=12, fontName="Helvetica-Bold",
+                           textColor=C_DARK,
+                           spaceBefore=14, spaceAfter=2,
+                           leftPadding=0)
+    return [
+        Paragraph(text, style),
+        HRFlowable(width="100%", thickness=1.5, color=C_TEAL, spaceAfter=4),
+        Spacer(1, 0.15*cm),
+    ]
+
+
+def _metric_table(data: list, col_widths: list) -> Table:
+    tbl = Table(data, colWidths=col_widths)
+    tbl.setStyle(TableStyle([
+        ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
+        ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+        ("BACKGROUND",    (0, 0), (-1, 0),  C_BLUE),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+        ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN",         (1, 1), (-1, -1), "CENTER"),
+    ]))
+    return tbl
 
 
 def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
-    buf    = io.BytesIO()
-    doc    = SimpleDocTemplate(buf, pagesize=A4,
-                               leftMargin=2*cm, rightMargin=2*cm,
-                               topMargin=2*cm, bottomMargin=2*cm)
+    buf  = io.BytesIO()
+    doc  = SimpleDocTemplate(buf, pagesize=A4,
+                             leftMargin=2*cm, rightMargin=2*cm,
+                             topMargin=2*cm, bottomMargin=2*cm)
     styles = getSampleStyleSheet()
     story  = []
 
-    title_style = ParagraphStyle("title", parent=styles["Title"],
-                                 fontSize=16, spaceAfter=6)
-    h1_style    = ParagraphStyle("h1", parent=styles["Heading1"],
-                                 fontSize=13, spaceBefore=14, spaceAfter=4)
-    # L16 fix: removed dead `body_style = styles["Normal"]` — assigned but
-    # never referenced anywhere in this function.
+    normal_sm = ParagraphStyle("nsm", parent=styles["Normal"], fontSize=8.5)
+    bold_sm   = ParagraphStyle("bsm", parent=styles["Normal"],
+                               fontSize=8.5, fontName="Helvetica-Bold")
 
-    story.append(Paragraph(
-        f"A-DDoS — DDoS Mitigation Report", title_style
-    ))
-    story.append(Paragraph(
-        f"Report Period: {start_str}  →  {end_str}",
-        ParagraphStyle("subtitle", parent=styles["Normal"],
-                       fontSize=10, textColor=colors.HexColor("#6b7280"),
-                       spaceAfter=6),
-    ))
-    story.append(HRFlowable(width="100%", thickness=1,
-                            color=colors.HexColor("#cccccc")))
+    # ── Cover ─────────────────────────────────────────────────────────────────
+    story.append(Spacer(1, 1*cm))
+    story.append(Paragraph("A-DDoS Mitigation System",
+        ParagraphStyle("cover_sub", parent=styles["Normal"],
+                       fontSize=11, textColor=C_GRAY, alignment=1)))
+    story.append(Spacer(1, 0.3*cm))
+    story.append(Paragraph("DDoS Incident Report",
+        ParagraphStyle("cover_title", parent=styles["Title"],
+                       fontSize=22, textColor=C_DARK, alignment=1, spaceAfter=4)))
+    story.append(HRFlowable(width="100%", thickness=2, color=C_TEAL))
+    story.append(Spacer(1, 0.3*cm))
+
+    gen_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    meta_data = [
+        ["Report Period", f"{start_str} - {end_str}"],
+        ["Generated At",  gen_ts],
+        ["Classification", "ML: Isolation Forest + Random Forest"],
+    ]
+    meta_tbl = Table(meta_data, colWidths=[5*cm, 11*cm])
+    meta_tbl.setStyle(TableStyle([
+        ("FONTNAME",  (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTNAME",  (1, 0), (1, -1), "Helvetica"),
+        ("FONTSIZE",  (0, 0), (-1, -1), 9),
+        ("TEXTCOLOR", (0, 0), (0, -1), C_GRAY),
+        ("TOPPADDING",    (0,0),(-1,-1), 3),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 3),
+    ]))
+    story.append(meta_tbl)
+    story.append(Spacer(1, 0.5*cm))
+    story.append(HRFlowable(width="100%", thickness=0.5, color=C_BORDER))
     story.append(Spacer(1, 0.4*cm))
 
-    story.append(Paragraph("1. Executive Summary", h1_style))
-
-    # Deduplicate rows so summary counts match the chronological log exactly.
-    # Raw rows contain repeated detections per IP/phase — keep first (src_ip, action_taken).
-    seen_for_summary: set = set()
-    deduped_rows = []
+    # ── Deduplicate ───────────────────────────────────────────────────────────
+    seen: set = set()
+    deduped = []
     for r in rows:
         key = (r["src_ip"], r["action_taken"])
-        if key not in seen_for_summary:
-            seen_for_summary.add(key)
-            deduped_rows.append(r)
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
 
-    total_threats = len(deduped_rows)
-
+    total_threats = len(deduped)
     vectors: dict[str, int] = {}
-    for r in deduped_rows:
-        v = r["attack_vector"] or "Uncertain"
-        vectors[v] = vectors.get(v, 0) + 1
-
     actions: dict[str, int] = {}
-    for r in deduped_rows:
-        a = r["action_taken"] or "—"
+    for r in deduped:
+        v = r["attack_vector"] or "Uncertain"
+        a = r["action_taken"]  or "-"
+        vectors[v] = vectors.get(v, 0) + 1
         actions[a] = actions.get(a, 0) + 1
 
-    manual_release = sum(
-        1 for r in deduped_rows if r["is_manual"] and "Release" in str(r["action_taken"])
-    )
-    manual_block = sum(
-        1 for r in deduped_rows if r["is_manual"] and "Block" in str(r["action_taken"])
-    )
+    manual_release = sum(1 for r in deduped if r["is_manual"] and "Release" in str(r["action_taken"]))
+    manual_block   = sum(1 for r in deduped if r["is_manual"] and "Block"   in str(r["action_taken"]))
 
     summary_rows = query("""
         SELECT SUM(total_flows_observed) AS total_flows,
@@ -150,130 +190,403 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         FROM traffic_summary
         WHERE timestamp >= ? AND timestamp <= ?
     """, (f"{start_str} 00:00:00", f"{end_str} 23:59:59"))
-
     sr        = summary_rows[0] if summary_rows else {}
     tot_flows = sr.get("total_flows") or 0
     true_neg  = sr.get("true_neg")    or 0
     fp_count  = sr.get("fp")          or 0
-    # FP rate denominator: ml_processed flows (tot_flows) not raw total.
-    # H4 fix in writer.py ensures fp_count is non-zero when operators release IPs.
     fp_rate   = (fp_count / max(tot_flows, 1)) * 100
 
-    summary_data = [
-        ["Date Range",              f"{start_str}  →  {end_str}"],
+    # ── Section 1: Executive Summary ─────────────────────────────────────────
+    story += _section_header("1.  Executive Summary", styles)
+
+    high_count = sum(1 for r in deduped if (r.get("priority") or "").lower() == "high")
+    low_count  = total_threats - high_count
+
+    sum_left = [
+        ["Metric", "Value"],
+        ["Report Period",           f"{start_str} - {end_str}"],
         ["Total Threats Mitigated", str(total_threats)],
-        ["",                        ""],
-        ["ICMP Flood",              str(vectors.get("ICMP Flood", 0))],
-        ["SYN Flood",               str(vectors.get("SYN Flood",  0))],
-        ["UDP Flood",               str(vectors.get("UDP Flood",  0))],
-        ["Uncertain",               str(vectors.get("Uncertain",  0))],
-        ["",                        ""],
-        ["Quarantined",             str(actions.get("Quarantined",  0))],
-        ["Rate Limited",            str(actions.get("Rate Limited", 0))],
-        ["Blocked",                 str(actions.get("Blocked",      0))],
-        ["",                        ""],
-        ["Manual Release",          str(manual_release)],
-        ["Manual Block",            str(manual_block)],
-        ["",                        ""],
+        ["High Priority",           str(high_count)],
+        ["Low Priority",            str(low_count)],
+        ["Manual Releases",         str(manual_release)],
+        ["Manual Blocks",           str(manual_block)],
         ["Total Flows Observed",    str(tot_flows)],
         ["True Negatives Passed",   str(true_neg)],
         ["False Positives",         str(fp_count)],
-        ["FP Rate (period)",        f"{fp_rate:.2f}%"],
+        ["FP Rate",                 f"{fp_rate:.2f}%"],
+    ]
+    sum_right = [
+        ["Attack Vector", "Count"],
+        ["ICMP Flood",  str(vectors.get("ICMP Flood", 0))],
+        ["SYN Flood",   str(vectors.get("SYN Flood",  0))],
+        ["UDP Flood",   str(vectors.get("UDP Flood",  0))],
+        ["Uncertain",   str(vectors.get("Uncertain",  0))],
+        ["", ""],
+        ["Action",      "Count"],
+        ["Quarantined", str(actions.get("Quarantined", 0))],
+        ["Time Ban",    str(actions.get("Time Ban",    0))],
+        ["Blackhole",   str(actions.get("Blackhole",   0))],
+        ["Released",    str(actions.get("Released",    0))],
     ]
 
-    tbl = Table(summary_data, colWidths=[8*cm, 8*cm])
-    tbl.setStyle(TableStyle([
-        ("FONTNAME",       (0, 0), (-1, -1), "Helvetica"),
-        ("FONTSIZE",       (0, 0), (-1, -1), 10),
-        ("FONTNAME",       (0, 0), (0, -1),  "Helvetica-Bold"),
-        ("TEXTCOLOR",      (0, 0), (0, -1),  colors.HexColor("#374151")),
-        ("TEXTCOLOR",      (1, 0), (1, -1),  colors.HexColor("#111827")),
-        ("ROWBACKGROUNDS", (0, 0), (-1, -1),
-         [colors.HexColor("#f9fafb"), colors.white]),
-        ("LINEBELOW",      (0, -1), (-1, -1), 0.5, colors.HexColor("#e5e7eb")),
-        ("TOPPADDING",     (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING",  (0, 0), (-1, -1), 4),
-    ]))
-    story.append(tbl)
+    def _kv_table(data):
+        t = Table(data, colWidths=[5.5*cm, 3.5*cm])
+        t.setStyle(TableStyle([
+            ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+            ("BACKGROUND",    (0, 0), (-1, 0),  C_ACCENT),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+            ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
+            ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+            ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("FONTNAME",      (0, 1), (0, -1),  "Helvetica-Bold"),
+            ("TEXTCOLOR",     (0, 1), (0, -1),  C_GRAY),
+        ]))
+        return t
+
+    side_by_side = Table([[_kv_table(sum_left), Spacer(0.5*cm, 1), _kv_table(sum_right)]],
+                         colWidths=[9*cm, 0.5*cm, 8*cm])
+    story.append(side_by_side)
     story.append(Spacer(1, 0.6*cm))
 
-    story.append(Paragraph("2. Chronological Mitigation Log", h1_style))
+    # ── Section 2: Performance Benchmark ─────────────────────────────────────
+    story += _section_header("2.  Performance Benchmark", styles)
 
-    # deduped_rows already computed above for summary — reuse directly.
-    log_headers = ["Timestamp", "Source IP", "Class",
-                   "Vector", "Confidence", "Priority", "Action"]
-    log_data    = [log_headers]
-    for r in deduped_rows:
-        conf_pct = f"{r['confidence']*100:.1f}%" if r["confidence"] else "—"
+    if_m = writer.get_if_metrics(start_str, end_str)
+    rf_m = writer.get_rf_metrics(start_str, end_str)
+    sys  = writer.get_system_metrics_attack_vs_baseline(start_str, end_str)
+    lat  = query("""
+        SELECT AVG(duration_sec) as avg_dur
+        FROM ip_attack_history
+        WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
+    """, (start_str, end_str))
+    avg_dur = float((lat[0].get("avg_dur") or 0)) if lat else 0.0
+
+    def _bench_table(data):
+        tbl = Table(data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
+        style = [
+            ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+            ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
+            ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+            ("BACKGROUND",    (0, 0), (-1, 0),  C_BLUE),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+            ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
+            ("TOPPADDING",    (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN",         (1, 1), (1, -1),  "CENTER"),
+            ("FONTNAME",      (1, 1), (1, -1),  "Helvetica-Bold"),
+            ("TEXTCOLOR",     (1, 1), (1, -1),  C_BLUE),
+        ]
+        tbl.setStyle(TableStyle(style))
+        return tbl
+
+    # ── 2a: Isolation Forest ──────────────────────────────────────────────────
+    story.append(Paragraph("2a.  Isolation Forest-Anomaly Detection",
+        ParagraphStyle("sub", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                       textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
+
+    if_data = [
+        ["Metric", "Value", "Description"],
+        ["Precision",                f"{if_m.get('precision',0):.2f}%",  "Flagged anomalies that were true attacks"],
+        ["Recall (TPR)",             f"{if_m.get('recall',0):.2f}%",     "Attacks correctly flagged as anomalies"],
+        ["F1-Score",                 f"{if_m.get('f1',0):.2f}%",         "Harmonic mean of Precision and Recall"],
+        ["Accuracy",                 f"{if_m.get('accuracy',0):.2f}%",   "Overall correct anomaly decisions"],
+        ["False Positive Rate (FPR)",f"{if_m.get('fpr',0):.2f}%",        "Normal traffic incorrectly flagged"],
+        ["False Negative Rate (FNR)",f"{if_m.get('fnr',0):.2f}%",        "Attacks that bypassed anomaly detection"],
+        ["True Positive Rate (TPR)", f"{if_m.get('tpr',0):.2f}%",        "Proportion of attacks correctly flagged"],
+        ["True Negative Rate (TNR)", f"{if_m.get('tnr',0):.2f}%",        "Normal traffic correctly passed"],
+    ]
+    story.append(_bench_table(if_data))
+    story.append(Spacer(1, 0.3*cm))
+
+    # IF 2x2 Confusion Matrix
+    _tp = if_m.get('tp', 0); _fp = if_m.get('fp', 0)
+    _tn = if_m.get('tn', 0); _fn = if_m.get('fn', 0)
+    _lbl_if = ParagraphStyle("cml", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
+
+    def _if_cell(label, val, color):
+        return Paragraph(f"{label}\n{val}", ParagraphStyle("ifc", parent=styles["Normal"],
+            fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=color))
+
+    if_cm_data = [
+        ["", Paragraph("Predicted: Attack", _lbl_if), Paragraph("Predicted: Normal", _lbl_if)],
+        [Paragraph("Actual: Attack", _lbl_if), _if_cell("TP", _tp, C_GREEN), _if_cell("FN", _fn, C_RED)],
+        [Paragraph("Actual: Normal", _lbl_if), _if_cell("FP", _fp, C_RED),  _if_cell("TN", _tn, C_GREEN)],
+    ]
+    if_cm_tbl = Table(if_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm])
+    if_cm_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
+        ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
+        ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
+        ("ALIGN",   (0,0),(-1,-1), "CENTER"),
+    ]))
+    if_cm_wrap = Table([[if_cm_tbl]], colWidths=[17.5*cm])
+    if_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+    story.append(if_cm_wrap)
+    story.append(Spacer(1, 0.4*cm))
+
+    # ── 2b: Random Forest ─────────────────────────────────────────────────────
+    story.append(Paragraph("2b.  Random Forest-Attack Classification",
+        ParagraphStyle("sub2", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                       textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
+
+    rf_o    = rf_m.get("overall",   {})
+    rf_conf = rf_m.get("confusion", {})
+
+    rf_data = [
+        ["Metric", "Value", "Description"],
+        ["Precision",                f"{rf_o.get('precision',0):.2f}%",  "Correctly classified attacks out of all flagged"],
+        ["Recall (TPR)",             f"{rf_o.get('recall',0):.2f}%",     "Attacks correctly classified by type"],
+        ["F1-Score",                 f"{rf_o.get('f1',0):.2f}%",         "Harmonic mean of Precision and Recall"],
+        ["Accuracy",                 f"{rf_o.get('accuracy',0):.2f}%",   "Overall correct attack type classifications"],
+        ["False Positive Rate (FPR)",f"{rf_o.get('fpr',0):.2f}%",        "Wrong attack type flagged"],
+        ["False Negative Rate (FNR)",f"{rf_o.get('fnr',0):.2f}%",        "Attacks misclassified or missed"],
+        ["True Positive Rate (TPR)", f"{rf_o.get('tpr',0):.2f}%",        "Proportion of attacks correctly classified"],
+        ["True Negative Rate (TNR)", f"{rf_o.get('tnr',0):.2f}%",        "Non-matching classes correctly excluded"],
+    ]
+    rf_tbl = Table(rf_data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
+    rf_tbl.setStyle(TableStyle([
+        ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+        ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
+        ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+        ("BACKGROUND",    (0, 0), (-1, 0),  C_BLUE),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+        ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
+        ("TOPPADDING",    (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN",         (1, 1), (1, -1),  "CENTER"),
+        ("FONTNAME",      (1, 1), (1, -1),  "Helvetica-Bold"),
+        ("TEXTCOLOR",     (1, 1), (1, -1),  C_BLUE),
+    ]))
+    story.append(rf_tbl)
+    story.append(Spacer(1, 0.3*cm))
+
+    # RF 3x3 Confusion Matrix
+    _lbl = ParagraphStyle("rfl", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
+
+    def _cm_cell(val, is_diag):
+        c = C_GREEN if is_diag else C_RED
+        return Paragraph(str(val), ParagraphStyle("rfc", parent=styles["Normal"],
+            fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=c))
+
+    rf_cm_data = [
+        ["", Paragraph("Predicted: SYN", _lbl), Paragraph("Predicted: ICMP", _lbl), Paragraph("Predicted: UDP", _lbl)],
+        [Paragraph("Act: SYN",  _lbl),
+         _cm_cell(rf_conf.get("syn_as_syn",   0), True),
+         _cm_cell(rf_conf.get("syn_as_icmp",  0), False),
+         _cm_cell(rf_conf.get("syn_as_udp",   0), False)],
+        [Paragraph("Act: ICMP", _lbl),
+         _cm_cell(rf_conf.get("icmp_as_syn",  0), False),
+         _cm_cell(rf_conf.get("icmp_as_icmp", 0), True),
+         _cm_cell(rf_conf.get("icmp_as_udp",  0), False)],
+        [Paragraph("Act: UDP",  _lbl),
+         _cm_cell(rf_conf.get("udp_as_syn",   0), False),
+         _cm_cell(rf_conf.get("udp_as_icmp",  0), False),
+         _cm_cell(rf_conf.get("udp_as_udp",   0), True)],
+    ]
+    rf_cm_tbl = Table(rf_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm, 4.5*cm])
+    rf_cm_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (3,3),(3,3), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (3,1),(3,1), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (3,2),(3,2), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (1,3),(1,3), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (2,3),(2,3), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
+        ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
+        ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
+        ("ALIGN",   (0,0),(-1,-1), "CENTER"),
+    ]))
+    rf_cm_wrap = Table([[rf_cm_tbl]], colWidths=[17.5*cm])
+    rf_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+    story.append(rf_cm_wrap)
+    story.append(Spacer(1, 0.4*cm))
+
+    # ── 2c: System Resource Overhead ─────────────────────────────────────────
+    story.append(Paragraph("2c.  Controller Resource Overhead",
+        ParagraphStyle("sub3", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                       textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
+
+    res_data = [
+        ["Metric", "Value", "Description"],
+        ["Avg Session Duration",                    f"{avg_dur:.1f}s",
+         "Avg time from detection to release"],
+        # Backend
+        ["Backend CPU (Baseline)",                  f"{sys.get('baseline_cpu',0):.2f}%",
+         "Detection backend CPU — normal traffic"],
+        ["Backend CPU (Active Attack)",             f"{sys.get('attack_cpu',0):.2f}%",
+         "Detection backend CPU — DDoS simulation"],
+        ["Backend Memory (Baseline)",               f"{sys.get('baseline_mem',0):.1f} MB",
+         "Detection backend memory — normal traffic"],
+        ["Backend Memory (Active Attack)",          f"{sys.get('attack_mem',0):.1f} MB",
+         "Detection backend memory — DDoS simulation"],
+        # Controller
+        ["Controller CPU (Baseline)",               f"{sys.get('baseline_ctrl_cpu',0):.2f}%",
+         "Ryu controller CPU — normal traffic"],
+        ["Controller CPU (Active Attack)",          f"{sys.get('attack_ctrl_cpu',0):.2f}%",
+         "Ryu controller CPU — DDoS simulation"],
+        ["Controller Memory (Baseline)",            f"{sys.get('baseline_ctrl_mem',0):.1f} MB",
+         "Ryu controller memory — normal traffic"],
+        ["Controller Memory (Active Attack)",       f"{sys.get('attack_ctrl_mem',0):.1f} MB",
+         "Ryu controller memory — DDoS simulation"],
+        # Combined
+        ["Combined Memory Overhead (Attack)",
+         f"{sys.get('attack_mem',0) + sys.get('attack_ctrl_mem',0):.1f} MB",
+         "Backend + Controller during attack"],
+    ]
+    story.append(_bench_table(res_data))
+    story.append(Spacer(1, 0.6*cm))
+
+    # ── Section 3: Offences Summary ───────────────────────────────────────────
+    story += _section_header("3.  Offences Summary", styles)
+
+    off_rows = query("""
+        SELECT src_ip,
+               COUNT(*)            AS sessions,
+               MAX(offence_count)  AS max_offences,
+               MAX(ban_level)      AS max_ban,
+               MAX(phase_reached)  AS max_phase,
+               MIN(first_seen)     AS first_seen,
+               MAX(unblocked_at)   AS last_seen,
+               attack_vector
+        FROM ip_attack_history
+        WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
+        GROUP BY src_ip
+        ORDER BY max_offences DESC, sessions DESC
+    """, (start_str, end_str))
+
+    if off_rows:
+        off_headers = ["Source IP", "Sessions", "Max Offences", "First Seen", "Last Seen"]
+        off_data = [off_headers]
+        for r in off_rows:
+            off_data.append([
+                r["src_ip"],
+                str(r["sessions"]),
+                str(r["max_offences"] or 1),
+                r["first_seen"],
+                r["last_seen"],
+            ])
+        off_tbl = Table(off_data,
+                        colWidths=[3.5*cm, 2.5*cm, 3*cm, 4.5*cm, 4*cm],
+                        repeatRows=1)
+        off_tbl.setStyle(TableStyle([
+            ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+            ("BACKGROUND",    (0, 0), (-1, 0),  C_BLUE),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+            ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
+            ("TOPPADDING",    (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN",         (1, 1), (4, -1),  "CENTER"),
+            ("FONTNAME",      (0, 1), (0, -1),  "Helvetica-Bold"),
+        ]))
+        story.append(off_tbl)
+    else:
+        story.append(Paragraph("No offence history for this period.", normal_sm))
+
+    story.append(Spacer(1, 0.6*cm))
+
+    # ── Section 4: Chronological Mitigation Log ───────────────────────────────
+    story.append(PageBreak())
+    story += _section_header("4.  Chronological Mitigation Log", styles)
+
+    log_headers = ["Timestamp", "Source IP", "Class", "Vector",
+                   "Confidence", "Priority", "Action"]
+    log_data = [log_headers]
+    for r in deduped:
+        conf_pct = f"{r['confidence']*100:.1f}%" if r["confidence"] else "-"
         log_data.append([
-            r["timestamp"],
-            r["src_ip"],
-            r["predicted_class"],
-            r["attack_vector"] or "—",
-            conf_pct,
-            r["priority"] or "—",
-            r["action_taken"] or "—",
+            r["timestamp"], r["src_ip"], r["predicted_class"],
+            r["attack_vector"] or "-", conf_pct,
+            r["priority"] or "-", r["action_taken"] or "-",
         ])
 
-    col_widths = [3.8*cm, 3.2*cm, 2*cm, 2.5*cm, 2*cm, 1.8*cm, 2.2*cm]
-    log_tbl = Table(log_data, colWidths=col_widths, repeatRows=1)
+    log_tbl = Table(log_data,
+                    colWidths=[3.8*cm, 3*cm, 2*cm, 2.5*cm, 2*cm, 1.8*cm, 2.4*cm],
+                    repeatRows=1)
     log_tbl.setStyle(TableStyle([
         ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
         ("FONTSIZE",      (0, 0), (-1, -1), 8),
         ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
-        ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor("#1a1a21")),
-        ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.white),
-        ("ROWBACKGROUNDS",(0, 1), (-1, -1),
-         [colors.HexColor("#f9fafb"), colors.white]),
-        ("GRID",          (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
+        ("BACKGROUND",    (0, 0), (-1, 0),  C_DARK),
+        ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+        ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
         ("TOPPADDING",    (0, 0), (-1, -1), 3),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
         ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
     ]))
     story.append(log_tbl)
+    story.append(Spacer(1, 0.6*cm))
 
-    # ── Section 3: IP Attack History ──────────────────────────────────────────
+    # ── Section 5: IP Attack History ─────────────────────────────────────────
     history_rows = query("""
         SELECT src_ip, attack_vector, if_score, confidence, priority,
-               phase_reached, first_seen, unblocked_at, duration_sec, unblock_reason
+               phase_reached, first_seen, unblocked_at, duration_sec,
+               unblock_reason, ban_level, offence_count
         FROM ip_attack_history
         WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
         ORDER BY unblocked_at DESC
     """, (start_str, end_str))
 
     if history_rows:
-        story.append(Spacer(1, 0.6*cm))
-        story.append(Paragraph("3. IP Attack History (Completed Sessions)", h1_style))
-
+        story += _section_header("5.  IP Attack History (Completed Sessions)", styles)
         hist_headers = ["Source IP", "Vector", "IF Score", "Conf",
-                        "Phase", "Duration", "Unblocked At", "Reason"]
+                        "Priority", "Phase", "Offences", "Duration",
+                        "Unblocked At", "Reason"]
         hist_data = [hist_headers]
         for r in history_rows:
-            dur = r["duration_sec"] or 0
+            dur     = r["duration_sec"] or 0
             dur_str = f"{dur//60}m {dur%60}s" if dur >= 60 else f"{dur}s"
-            conf_pct = f"{r['confidence']*100:.1f}%" if r["confidence"] else "—"
             hist_data.append([
                 r["src_ip"],
-                r["attack_vector"] or "—",
+                r["attack_vector"] or "-",
                 f"{r['if_score']:.4f}",
-                conf_pct,
+                f"{r['confidence']*100:.1f}%" if r["confidence"] else "-",
+                r["priority"] or "-",
                 f"Phase {r['phase_reached']}",
+                str(r["offence_count"] or 1),
                 dur_str,
                 r["unblocked_at"],
-                r["unblock_reason"] or "—",
+                r["unblock_reason"] or "-",
             ])
-
-        hist_col_widths = [3*cm, 2.5*cm, 1.8*cm, 1.5*cm, 1.5*cm, 1.5*cm, 3.5*cm, 2.2*cm]
-        hist_tbl = Table(hist_data, colWidths=hist_col_widths, repeatRows=1)
+        hist_tbl = Table(hist_data,
+                         colWidths=[2.5*cm, 2*cm, 1.8*cm, 1.4*cm,
+                                    1.6*cm, 1.5*cm, 1.6*cm, 1.5*cm, 3*cm, 2.1*cm],
+                         repeatRows=1)
         hist_tbl.setStyle(TableStyle([
             ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
-            ("FONTSIZE",      (0, 0), (-1, -1), 7.5),
+            ("FONTSIZE",      (0, 0), (-1, -1), 7),
             ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
-            ("BACKGROUND",    (0, 0), (-1, 0),  colors.HexColor("#1a1a21")),
-            ("TEXTCOLOR",     (0, 0), (-1, 0),  colors.white),
-            ("ROWBACKGROUNDS",(0, 1), (-1, -1),
-             [colors.HexColor("#f9fafb"), colors.white]),
-            ("GRID",          (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
+            ("BACKGROUND",    (0, 0), (-1, 0),  C_BLUE),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+            ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
             ("TOPPADDING",    (0, 0), (-1, -1), 3),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
             ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),

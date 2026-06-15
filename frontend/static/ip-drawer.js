@@ -1,141 +1,230 @@
 /* frontend/static/ip-drawer.js
    IP Threat Analysis Drawer — modular, self-contained.
-   Depends on: window.API (set by main.js), showToast (main.js), _qRows (main.js)
+   Depends on: window.API_URL (set by dashboard.html), showToast, _qRows
    Exposes:    window.openIpDrawer(ip), window.closeIpDrawer()
+
+   Live mode:  polls /api/ip_detail/<ip>/live every 2s while drawer open + IP active.
+               Auto-stops on 404 (IP released), switches to DB data.
+   DB mode:    single fetch from /api/ip_detail/<ip>, shows HISTORICAL badge.
 */
+
+// ── Feature tooltips — only real model inputs (IF + RF contracts) ─────────────
+const _FEAT_TOOLTIPS = {
+  "Flow Rate (pps)":    "IF: packet_count_per_second | RF: pkt_per_interval\nPackets/sec from this source. Normal: 1-100 pps. Attack: 1,000-100,000+ pps.",
+  "Byte Rate":          "IF: byte_count_per_second | RF: byte_per_interval\nBandwidth from this source. ICMP stays moderate (84B x pps). UDP spikes high.",
+  "Duration (s)":       "IF: flow_duration_sec + flow_duration_total_ns\nFlow age. SYN floods are very short (no handshake). ICMP/UDP floods are long.",
+  "Bytes / Packet":     "IF: bytes_per_packet (engineered) | RF: bytes_per_packet_raw + mean_byte_raw\nAvg packet size. ICMP ~84B fixed. SYN ~60B fixed. UDP large/variable.",
+  "Packet Count":       "IF: packet_count (log1p scaled)\nTotal packets seen. IF uses log-transformed count to detect volume anomalies.",
+  "Byte Count":         "IF: byte_count (log1p scaled)\nTotal bytes seen. Combined with packet count to derive rates and bytes/packet ratio.",
+};
+
+// ── Attack context — compact signal table per attack class ────────────────────
+const _ATTACK_CONTEXT = {
+  "ICMP Flood": {
+    color: 'var(--red,#ff3d5a)',
+    desc: 'Continuous echo requests exhaust CPU processing replies.',
+    rows: [
+      ['Flow Rate (pps)', 'Very high', '1,000-100,000+ pps'],
+      ['Byte Rate',       'Moderate',  '84B x pps'],
+      ['Duration (s)',    'Long',      'Sustained until blocked'],
+      ['Bytes / Packet',  'Fixed ~84B','ICMP echo fixed size'],
+    ],
+    normal: 'Normal: <5 pps, <500 B/s',
+  },
+  "SYN Flood": {
+    color: 'var(--red,#ff3d5a)',
+    desc: 'SYN without ACK fills connection table with half-open entries.',
+    rows: [
+      ['Flow Rate (pps)', 'Very high', '1,000-50,000+ pps'],
+      ['Duration (s)',    'Very short','<1s per flow, no handshake'],
+      ['Bytes / Packet',  'Fixed ~60B','IP + TCP SYN only'],
+      ['Byte Rate',       'Low',       'Small packets despite high pps'],
+    ],
+    normal: 'Normal TCP: 1-50 pps, 1-60s duration, 200-1500B/pkt',
+  },
+  "UDP Flood": {
+    color: 'var(--amber,#ffb02e)',
+    desc: 'High-volume UDP datagrams, no handshake, large variable payloads.',
+    rows: [
+      ['Byte Rate',       'Very high', 'MB/s range'],
+      ['Bytes / Packet',  'Large',     '200-1400B variable'],
+      ['Flow Rate (pps)', 'High',      'Lower than SYN/ICMP'],
+      ['Duration (s)',    'Moderate',  'Longer than SYN (no expiry)'],
+    ],
+    normal: 'Normal UDP: <50 pps, <5 KB/s',
+  },
+  "Anomalous": {
+    color: 'var(--sub2,#8890b0)',
+    desc: 'IF flagged out-of-distribution. RF could not match a known flood class.',
+    rows: [
+      ['Flow Rate (pps)', 'Elevated',  'Above normal distribution'],
+      ['Duration (s)',    'Abnormal',  'Too short or too long'],
+    ],
+    normal: 'Check IF score vs threshold. RF conf < 50% = unclassified.',
+  },
+  "Uncertain": {
+    color: 'var(--sub,#5c6080)',
+    desc: 'RF confidence below 50% gate. Check IF score to confirm anomaly.',
+    rows: [],
+    normal: 'IF score above threshold = anomalous but unclassified.',
+  },
+};
 
 // ── Build drawer DOM ──────────────────────────────────────────────────────────
 (function _initDrawerDOM() {
-  // Backdrop overlay
   const overlay = document.createElement('div');
   overlay.id = 'ip-drawer-overlay';
   overlay.onclick = () => closeIpDrawer();
   overlay.style.cssText = [
-    'display:none',
-    'position:fixed',
-    'top:0','left:0','right:0','bottom:0',
-    'z-index:9990',
-    'background:rgba(0,0,0,0.55)',
-    'backdrop-filter:blur(3px)',
-    '-webkit-backdrop-filter:blur(3px)',
+    'display:none','position:fixed','top:0','left:0','right:0','bottom:0',
+    'z-index:9990','background:rgba(0,0,0,0.45)',
+    'backdrop-filter:blur(4px)','-webkit-backdrop-filter:blur(4px)',
   ].join(';');
   document.body.appendChild(overlay);
 
-  // Drawer panel — centered modal
   const drawer = document.createElement('div');
   drawer.id = 'ip-drawer';
   drawer.setAttribute('aria-hidden', 'true');
   drawer.style.cssText = [
-    'position:fixed',
-    'top:50%','left:50%',
+    'position:fixed','top:50%','left:50%',
     'transform:translate(-50%,-48%) scale(0.97)',
-    'width:680px',
-    'max-height:85vh',
-    'z-index:9991',
-    'display:flex',
-    'flex-direction:column',
-    'overflow:hidden',
+    'width:700px','max-height:88vh','z-index:9991',
+    'display:flex','flex-direction:column','overflow:hidden',
     'transition:opacity 0.2s ease, transform 0.2s ease',
-    'opacity:0',
-    'pointer-events:none',
-    'background:var(--card,#111320)',
-    'border:1px solid var(--border2,#252840)',
+    'opacity:0','pointer-events:none',
+    /* Theme-aware: uses CSS vars, falls back to dark */
+    'background:var(--card,#fff)',
+    'border:1px solid var(--border2,#e2e4ed)',
     'border-radius:16px',
-    'box-shadow:0 24px 64px rgba(0,0,0,0.7)',
+    'box-shadow:0 24px 80px rgba(0,0,0,0.18)',
   ].join(';');
 
   drawer.innerHTML = `
     <!-- Header -->
     <div id="idd-head" style="display:flex;align-items:flex-start;justify-content:space-between;
-         padding:22px 22px 16px;border-bottom:1px solid var(--border,#1e2235);flex-shrink:0">
-      <div>
-        <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#5c6080);
-             font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;margin-bottom:5px">
-          THREAT ANALYSIS
+         padding:20px 22px 14px;border-bottom:1px solid var(--border,#eef0f6);flex-shrink:0">
+      <div style="display:flex;flex-direction:column;gap:5px">
+        <div style="font-size:10px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
+             font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase">Threat Analysis</div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div id="idd-ip" style="font-family:var(--mono,'Space Mono',monospace);font-size:21px;
+               font-weight:700;color:var(--text,#1a1d2e);letter-spacing:-.3px">--</div>
+          <div id="idd-status-badge"></div>
         </div>
-        <div id="idd-ip" style="font-family:var(--mono,'Space Mono',monospace);font-size:22px;
-             font-weight:700;color:var(--text,#e8eaf6);letter-spacing:-.3px">—</div>
       </div>
       <button id="idd-close-btn"
-        style="background:none;border:1px solid var(--border2,#252840);color:var(--sub2,#8890b0);
-               border-radius:8px;width:34px;height:34px;cursor:pointer;font-size:15px;
+        style="background:none;border:1px solid var(--border2,#e2e4ed);color:var(--sub,#9499b7);
+               border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:14px;
                display:flex;align-items:center;justify-content:center;flex-shrink:0;
-               margin-top:2px;font-family:monospace;line-height:1;padding:0"
+               margin-top:2px;font-family:monospace;line-height:1;padding:0;transition:all .15s"
         onmouseover="this.style.borderColor='var(--red,#ff3d5a)';this.style.color='var(--red,#ff3d5a)'"
-        onmouseout="this.style.borderColor='var(--border2,#252840)';this.style.color='var(--sub2,#8890b0)'"
-        onclick="closeIpDrawer()" title="Close (Esc)">✕</button>
+        onmouseout="this.style.borderColor='var(--border2,#e2e4ed)';this.style.color='var(--sub,#9499b7)'"
+        onclick="closeIpDrawer()" title="Close (Esc)">x</button>
     </div>
 
-    <!-- Loading state -->
+    <!-- Loading -->
     <div id="idd-loading" style="display:none;flex:1;align-items:center;justify-content:center;
-         gap:12px;color:var(--sub,#5c6080);font-size:13px;
-         font-family:var(--mono,'Space Mono',monospace);padding:22px">
-      <div id="idd-spinner" style="width:18px;height:18px;border:2px solid var(--border2,#252840);
+         gap:12px;color:var(--sub,#9499b7);font-size:12px;
+         font-family:var(--mono,'Space Mono',monospace);padding:32px">
+      <div id="idd-spinner" style="width:16px;height:16px;border:2px solid var(--border2,#e2e4ed);
            border-top-color:var(--blue,#3d6cff);border-radius:50%;
            animation:idd-spin .7s linear infinite;flex-shrink:0"></div>
-      <span>Fetching feature data…</span>
+      <span>Fetching data...</span>
     </div>
 
-    <!-- Error state -->
+    <!-- Error -->
     <div id="idd-error" style="display:none;flex:1;flex-direction:column;align-items:center;
-         justify-content:center;padding:32px;gap:14px;text-align:center">
-      <div style="font-size:28px;color:var(--red,#ff3d5a);font-family:var(--mono,'Space Mono',monospace);font-weight:700">!</div>
+         justify-content:center;padding:32px;gap:12px;text-align:center">
+      <div style="font-size:24px;color:var(--red,#ff3d5a);font-weight:700">!</div>
       <div id="idd-error-msg"
-           style="font-family:var(--mono,'Space Mono',monospace);font-size:12px;
+           style="font-family:var(--mono,'Space Mono',monospace);font-size:11px;
                   color:var(--red,#ff3d5a);line-height:1.8;white-space:pre-wrap;text-align:left;
-                  background:rgba(255,61,90,.07);border:1px solid rgba(255,61,90,.25);
-                  border-radius:10px;padding:16px 20px;max-width:360px">
+                  background:rgba(255,61,90,.06);border:1px solid rgba(255,61,90,.2);
+                  border-radius:10px;padding:14px 18px;max-width:340px">
         No data available for this IP.
-      </div>
-      <div style="font-size:11px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace)">
-        Flow data may have expired or IP was released.
       </div>
     </div>
 
     <!-- Content -->
-    <div id="idd-content" style="display:none;flex:1;overflow-y:auto;padding:20px 22px 40px;max-height:calc(85vh - 80px)">
+    <div id="idd-content" style="display:none;flex:1;overflow-y:auto;padding:18px 22px 36px">
 
       <!-- Verdict banner -->
-      <div id="idd-verdict"
-           style="border-radius:10px;padding:12px 16px;margin-bottom:20px;font-size:12px;
-                  font-family:var(--mono,'Space Mono',monospace);font-weight:700;
-                  display:flex;align-items:center;gap:10px;letter-spacing:.02em"></div>
+      <div id="idd-verdict" style="border-radius:9px;padding:11px 15px;margin-bottom:16px;
+           font-size:12px;font-family:var(--mono,'Space Mono',monospace);font-weight:700;
+           display:flex;align-items:center;gap:8px;letter-spacing:.02em"></div>
 
-      <!-- Traffic Features -->
-      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#5c6080);
+      <!-- State pills -->
+      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#9499b7);
            font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
-           margin-bottom:10px">Traffic Features (Last Window)</div>
-      <div id="idd-features" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;
-           margin-bottom:20px"></div>
+           margin-bottom:9px">State</div>
+      <div id="idd-history" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px;
+           padding-bottom:14px;border-bottom:1px solid var(--border,#eef0f6)"></div>
 
-      <!-- ML Evaluation -->
-      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#5c6080);
-           font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
-           margin-bottom:10px">Machine Learning Evaluation</div>
-      <div id="idd-ml" style="display:flex;flex-direction:column;gap:14px;margin-bottom:20px"></div>
-
-      <!-- Mitigation Pipeline -->
-      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#5c6080);
-           font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
-           margin-bottom:12px">Mitigation Pipeline</div>
-      <div id="idd-pipeline" style="display:flex;align-items:flex-start;gap:0;margin-bottom:16px">
+      <!-- IF model signal cards -->
+      <div id="idd-if-header" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+              padding:2px 8px;border-radius:4px;
+              background:rgba(61,108,255,.1);color:var(--blue,#3d6cff);
+              border:1px solid rgba(61,108,255,.25);
+              font-family:var(--mono,'Space Mono',monospace)">IF Model Signals</span>
+        <span id="idd-if-subtitle" style="font-size:10px;color:var(--sub,#9499b7);
+              font-family:var(--mono,'Space Mono',monospace)"></span>
       </div>
+      <div id="idd-if-features" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:16px"></div>
 
-      <!-- History/state extras -->
-      <div id="idd-history"
-           style="padding-top:14px;border-top:1px solid var(--border,#1e2235);
-                  display:flex;flex-wrap:wrap;gap:8px"></div>
+      <!-- RF model signal cards -->
+      <div id="idd-rf-header" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+              padding:2px 8px;border-radius:4px;
+              background:rgba(255,176,46,.1);color:var(--amber,#ffb02e);
+              border:1px solid rgba(255,176,46,.25);
+              font-family:var(--mono,'Space Mono',monospace)">RF Model Signals</span>
+        <span id="idd-rf-subtitle" style="font-size:10px;color:var(--sub,#9499b7);
+              font-family:var(--mono,'Space Mono',monospace)"></span>
+      </div>
+      <div id="idd-rf-features" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:16px"></div>
+
+      <!-- ML evaluation bars -->
+      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#9499b7);
+           font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
+           margin-bottom:9px">ML Evaluation</div>
+      <div id="idd-ml" style="display:flex;flex-direction:column;gap:12px;margin-bottom:16px"></div>
+
+      <!-- Mitigation pipeline -->
+      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#9499b7);
+           font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
+           margin-bottom:9px">Mitigation Pipeline</div>
+      <div id="idd-pipeline" style="margin-bottom:14px"></div>
+
     </div>`;
 
   document.body.appendChild(drawer);
 
-  // Spinner keyframes
+  /* Shared tooltip singleton */
+  const tip = document.createElement('div');
+  tip.id = 'idd-tooltip';
+  tip.style.cssText = [
+    'position:fixed','z-index:9999','pointer-events:none',
+    'background:var(--card,#fff)','border:1px solid var(--border2,#e2e4ed)',
+    'border-radius:8px','padding:9px 13px','max-width:240px',
+    'font-size:11px','line-height:1.55','color:var(--sub2,#6b7190)',
+    'font-family:var(--mono,monospace)','display:none',
+    'box-shadow:0 6px 20px rgba(0,0,0,0.12)','white-space:pre-line',
+  ].join(';');
+  document.body.appendChild(tip);
+
+  /* Inject keyframes + utility classes */
   if (!document.getElementById('idd-style')) {
     const st = document.createElement('style');
     st.id = 'idd-style';
     st.textContent = `
       @keyframes idd-spin { to { transform:rotate(360deg) } }
-      #ip-drawer-overlay { cursor: pointer; }
+      @keyframes idd-pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+      #ip-drawer-overlay { cursor:pointer }
+      .idd-fc { cursor:help; transition:border-color .14s, box-shadow .14s }
+      .idd-fc:hover { border-color:var(--blue,#3d6cff) !important;
+                      box-shadow:0 0 0 2px rgba(61,108,255,.12) !important }
+      #ip-drawer { scrollbar-width:thin; scrollbar-color:var(--border2,#e2e4ed) transparent }
     `;
     document.head.appendChild(st);
   }
@@ -143,27 +232,31 @@
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let _drawerCurrentIp = null;
+let _drawerLiveTimer = null;
+let _drawerIsLive    = false;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 function openIpDrawer(ip) {
-  if (!ip || ip === '—') return;
+  if (!ip || ip === '--') return;
   _drawerCurrentIp = ip;
-
   document.getElementById('idd-ip').textContent = ip;
+  document.getElementById('idd-status-badge').innerHTML = '';
   _iddShow('loading');
 
   const overlay = document.getElementById('ip-drawer-overlay');
   const drawer  = document.getElementById('ip-drawer');
-  overlay.style.display = 'block';
+  overlay.style.display      = 'block';
   drawer.style.pointerEvents = 'all';
-  drawer.style.opacity   = '1';
-  drawer.style.transform = 'translate(-50%,-50%) scale(1)';
+  drawer.style.opacity       = '1';
+  drawer.style.transform     = 'translate(-50%,-50%) scale(1)';
   drawer.setAttribute('aria-hidden', 'false');
 
   _fetchIpDetail(ip);
 }
 
 function closeIpDrawer() {
+  _stopLivePolling();
+  _drawerCurrentIp = null;
   const overlay = document.getElementById('ip-drawer-overlay');
   const drawer  = document.getElementById('ip-drawer');
   if (overlay) overlay.style.display = 'none';
@@ -173,75 +266,134 @@ function closeIpDrawer() {
     drawer.style.pointerEvents = 'none';
     drawer.setAttribute('aria-hidden', 'true');
   }
-  _drawerCurrentIp = null;
+  const tip = document.getElementById('idd-tooltip');
+  if (tip) tip.style.display = 'none';
 }
 
-// Close on Escape
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _drawerCurrentIp) closeIpDrawer();
 });
 
-// Expose globally so delegation in main.js can call them
 window.openIpDrawer  = openIpDrawer;
 window.closeIpDrawer = closeIpDrawer;
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
-function _iddShow(which) {
-  // which: 'loading' | 'error' | 'content'
-  const map = { loading: 'flex', error: 'flex', content: 'block' };
-  ['loading','error','content'].forEach(s => {
-    const el = document.getElementById(`idd-${s}`);
-    if (el) el.style.display = (s === which) ? map[s] : 'none';
-  });
+// ── Live polling ──────────────────────────────────────────────────────────────
+
+function _startLivePolling(ip) {
+  _stopLivePolling();
+  _drawerIsLive = true;
+  _drawerLiveTimer = setInterval(async () => {
+    if (_drawerCurrentIp !== ip) { _stopLivePolling(); return; }
+    try {
+      const r = await fetch(window.API_URL + `/api/ip_detail/${encodeURIComponent(ip)}/live`);
+      if (r.status === 404) {
+        /* IP released — switch to historical */
+        _stopLivePolling();
+        _setBadge(false);
+        if (typeof showToast === 'function') showToast(`${ip} released`);
+        const full = await fetch(window.API_URL + `/api/ip_detail/${encodeURIComponent(ip)}`);
+        if (full.ok) _renderIpDetail(await full.json());
+        return;
+      }
+      if (!r.ok) return;
+      const data = await r.json();
+      if (_drawerCurrentIp !== ip) return;
+      _updateLiveSection(data);
+    } catch (_) {}
+  }, 2000);
 }
+
+function _stopLivePolling() {
+  if (_drawerLiveTimer) { clearInterval(_drawerLiveTimer); _drawerLiveTimer = null; }
+  _drawerIsLive = false;
+}
+
+// ── Fetch & render ────────────────────────────────────────────────────────────
 
 async function _fetchIpDetail(ip) {
   try {
-    const data = await fetch(window.API + `/api/ip_detail/${encodeURIComponent(ip)}`);
-    if (!data.ok) throw data;
-    const json = await data.json();
+    const r = await fetch(window.API_URL + `/api/ip_detail/${encodeURIComponent(ip)}`);
+    if (!r.ok) throw r;
+    const data = await r.json();
     if (_drawerCurrentIp !== ip) return;
-    _renderIpDetail(json);
+    _renderIpDetail(data);
+    if (data.is_live) _startLivePolling(ip);
   } catch (err) {
     if (_drawerCurrentIp !== ip) return;
 
-    // Try to build a fallback from quarantine row data already in the DOM
+    /* DOM fallback from quarantine table rows */
     const qRow = typeof _qRows !== 'undefined' ? _qRows.get(ip) : null;
     if (qRow) {
-      const cells  = qRow.querySelectorAll('td');
-      const vector = cells[2] ? cells[2].textContent.trim() : '—';
-      const score  = parseFloat(cells[3] ? cells[3].textContent : '0') || 0;
-      const conf   = parseFloat(cells[4] ? cells[4].textContent : '0') || 0;
+      const cells = qRow.querySelectorAll('td');
       const fallback = {
-        src_ip:   ip,
-        features: { pkt_count:0, syn_ratio:0, pps:0, byte_rate:0,
-                    active_flows:0, sw_delta:0, inter_arrival:0,
-                    unique_ports:0, duration_sec:0 },
-        ml:    { if_score:score, is_anomaly:true, attack_class:vector, confidence:conf },
-        state: { phase:'—', priority:'—', action_taken:'Quarantined' },
-        thresholds: { if_threshold: null, rf_conf_gate: null },
+        src_ip: ip, is_live: false,
+        features: { pkt_count:0, pps:0, byte_rate:0, duration_sec:0,
+                    byte_count:0 },
+        ml:    { if_score: parseFloat(cells[3]?.textContent)||0,
+                 is_anomaly: true,
+                 attack_class: cells[2]?.textContent.trim()||'--',
+                 confidence: parseFloat(cells[4]?.textContent)||0 },
+        state: { phase:'--', priority:'--', action_taken:'Quarantined',
+                 offence_count:0, ban_level:0, first_seen:null },
+        thresholds: { if_threshold:null, rf_conf_gate:null },
+        phase_history: [],
       };
-      if (typeof showToast === 'function') showToast(`Showing cached data for ${ip}`);
+      if (typeof showToast === 'function') showToast(`Cached data for ${ip}`);
       _renderIpDetail(fallback);
       return;
     }
 
-    // Show visible error
     const status = err && err.status;
-    let msg;
-    if (status === 404) {
-      msg = `404 — No live data found for\n${ip}\n\nFlow data expired or IP was released.`;
-    } else if (status) {
-      msg = `HTTP ${status} error\nURL: ${window.API}/api/ip_detail/${ip}`;
-    } else {
-      msg = `Network error — cannot reach backend.\nURL: ${window.API}/api/ip_detail/${ip}\n\nIs the Flask backend running on port 5000?`;
-    }
-    document.getElementById('idd-error-msg').textContent = msg;
+    document.getElementById('idd-error-msg').textContent = status === 404
+      ? `404 - No data found for ${ip}\nFlow data expired or IP was released.`
+      : status
+        ? `HTTP ${status} - /api/ip_detail/${ip}`
+        : `Network error - is Flask running?`;
     _iddShow('error');
     if (typeof showToast === 'function')
-      showToast(`Drawer: ${status ? 'HTTP ' + status : 'network error'} for ${ip}`, true);
+      showToast(`Drawer: ${status ? 'HTTP '+status : 'network error'} for ${ip}`, true);
   }
 }
+
+// ── Badge helpers ─────────────────────────────────────────────────────────────
+
+function _setBadge(isLive) {
+  const el = document.getElementById('idd-status-badge');
+  if (!el) return;
+  if (isLive) {
+    el.innerHTML = `
+      <span style="display:inline-flex;align-items:center;gap:5px;
+           background:rgba(0,214,143,.1);border:1px solid rgba(0,214,143,.28);
+           border-radius:5px;padding:3px 8px;font-size:10px;font-weight:700;
+           font-family:var(--mono,monospace);color:var(--green,#00d68f);letter-spacing:.08em">
+        <span style="width:5px;height:5px;border-radius:50%;background:var(--green,#00d68f);
+             animation:idd-pulse 1.4s ease-in-out infinite;display:inline-block"></span>
+        LIVE
+      </span>`;
+  } else {
+    el.innerHTML = `
+      <span style="display:inline-flex;align-items:center;
+           background:rgba(148,153,183,.08);border:1px solid rgba(148,153,183,.22);
+           border-radius:5px;padding:3px 8px;font-size:10px;font-weight:700;
+           font-family:var(--mono,monospace);color:var(--sub,#9499b7);letter-spacing:.08em">
+        HISTORICAL
+      </span>`;
+  }
+}
+
+// ── Live section partial update ───────────────────────────────────────────────
+
+function _updateLiveSection(data) {
+  /* Only refresh parts that change — pipeline/history are static per session */
+  const f  = data.features || {};
+  const ml = data.ml       || {};
+  const st = data.state    || {};
+  _renderFeatureSignals(f, ml.attack_class);
+  _renderMlBars(ml, data.thresholds || {});
+  _renderHistoryPills(st);
+}
+
+// ── Full render ───────────────────────────────────────────────────────────────
 
 function _renderIpDetail(d) {
   const f  = d.features   || {};
@@ -249,161 +401,408 @@ function _renderIpDetail(d) {
   const st = d.state      || {};
   const th = d.thresholds || {};
 
-  // ── Verdict banner ────────────────────────────────────────────
+  _setBadge(!!d.is_live);
+
+  /* Verdict banner */
   const isAnomaly = ml.is_anomaly;
+  const acColor   = isAnomaly ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)';
   const verdict   = document.getElementById('idd-verdict');
-  verdict.style.cssText += isAnomaly
-    ? ';background:rgba(255,61,90,.08);border:1px solid rgba(255,61,90,.25);color:var(--red,#ff3d5a)'
-    : ';background:rgba(0,214,143,.07);border:1px solid rgba(0,214,143,.22);color:var(--green,#00d68f)';
+  verdict.style.cssText = `border-radius:9px;padding:11px 15px;margin-bottom:16px;font-size:12px;
+    font-family:var(--mono,'Space Mono',monospace);font-weight:700;
+    display:flex;align-items:center;gap:8px;letter-spacing:.02em;
+    background:${isAnomaly ? 'rgba(255,61,90,.07)' : 'rgba(0,214,143,.07)'};
+    border:1px solid ${isAnomaly ? 'rgba(255,61,90,.22)' : 'rgba(0,214,143,.2)'};
+    color:${acColor}`;
   verdict.innerHTML = isAnomaly
-    ? `<span style="font-size:13px;font-weight:900;letter-spacing:.05em">ANOMALY</span> &mdash; ${ml.attack_class || 'Unknown'}`
-    : `<span style="font-size:13px;font-weight:900;letter-spacing:.05em">NORMAL TRAFFIC</span>`;
+    ? `<span style="font-size:12px;font-weight:900;letter-spacing:.06em">ANOMALY</span>
+       <span style="color:var(--sub,#9499b7);font-weight:400">|</span>
+       ${ml.attack_class || 'Unknown'}`
+    : `<span style="font-size:12px;font-weight:900;letter-spacing:.06em">NORMAL TRAFFIC</span>`;
 
-  // ── Traffic features grid ─────────────────────────────────────
-  const feats = [
-    ['SYN Packet Ratio',           `${((f.syn_ratio||0)*100).toFixed(1)}%`,  f.syn_ratio||0,    1,     'var(--red,#ff3d5a)'],
-    ['Active Flow Count',          (f.active_flows||0).toLocaleString(),     Math.min(f.active_flows||0, 2000), 2000, 'var(--blue,#3d6cff)'],
-    ['Flow Rate (pps)',             `${(f.pps||0).toLocaleString()} pkt/s`,   Math.min(f.pps||0, 50000), 50000, 'var(--blue,#3d6cff)'],
-    ['Byte Rate',                  _fmtBytes(f.byte_rate||0),                Math.min(f.byte_rate||0, 1e7), 1e7, 'var(--amber,#ffb02e)'],
-    ['Unique Dst Ports',           (f.unique_ports||0).toString(),           Math.min(f.unique_ports||0, 1000), 1000, 'var(--amber,#ffb02e)'],
-    ['SW Delta',                   (f.sw_delta||0).toFixed(2),               Math.min(f.sw_delta||0, 500), 500, 'var(--sub2,#8890b0)'],
-    ['Inter-Arrival (ms)',         ((f.inter_arrival||0)*1000).toFixed(2),   0, 1, 'var(--sub2,#8890b0)'],
-    ['Duration (s)',               (f.duration_sec||0).toFixed(1),           0, 1, 'var(--sub2,#8890b0)'],
-  ];
-
-  document.getElementById('idd-features').innerHTML = feats.map(([label, val, raw, max, col]) => {
-    const pct = max > 0 ? Math.min((raw / max) * 100, 100) : 0;
-    return `
-      <div style="background:var(--surface,#0d0f18);border:1px solid var(--border,#1e2235);
-           border-radius:9px;padding:10px 14px">
-        <div style="font-size:10px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace);
-             margin-bottom:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${label}</div>
-        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
-             color:var(--text,#e8eaf6);margin-bottom:6px">${val}</div>
-        <div style="height:3px;background:var(--border2,#252840);border-radius:2px;overflow:hidden">
-          <div style="height:100%;width:${pct}%;background:${col};transition:width .4s;border-radius:2px"></div>
-        </div>
-      </div>`;
-  }).join('');
-
-  // ── ML evaluation bars ────────────────────────────────────────
-  const ifScore  = ml.if_score   || 0;
-  const rfConf   = ml.confidence || 0;
-  const ifThrVal = th.if_threshold != null ? th.if_threshold : null;
-  const rfGate   = th.rf_conf_gate != null ? th.rf_conf_gate : null;
-
-  const ifPct  = ifThrVal ? Math.min((ifScore / Math.max(ifThrVal * 2, 1)) * 100, 100) : Math.min(ifScore * 100, 100);
-  const rfPct  = Math.min(rfConf, 100);
-  const ifOver = ifThrVal != null ? ifScore >= ifThrVal : false;
-  const rfOver = rfGate   != null ? rfConf  >= rfGate * 100 : false;
-
-  const ifThrLabel = ifThrVal != null ? `Threshold: &gt; ${ifThrVal.toFixed(4)} triggers alert` : 'Threshold: not available';
-  const rfThrLabel = rfGate   != null ? `Threshold: &gt; ${(rfGate * 100).toFixed(0)}% confirms attack` : 'Threshold: not available';
-
-  document.getElementById('idd-ml').innerHTML = `
-    <div>
-      <div style="display:flex;justify-content:space-between;margin-bottom:5px">
-        <span style="font-size:12px;color:var(--sub2,#8890b0);font-family:var(--mono,'Space Mono',monospace)">
-          Isolation Forest (Anomaly Score)
-        </span>
-        <span style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
-              color:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)'}">${ifScore.toFixed(4)}</span>
-      </div>
-      <div style="height:6px;background:var(--border2,#252840);border-radius:3px;overflow:hidden;margin-bottom:4px">
-        <div style="height:100%;width:${ifPct}%;background:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)'};
-             transition:width .5s;border-radius:3px"></div>
-      </div>
-      <div style="font-size:10px;color:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--sub,#5c6080)'};
-           font-family:var(--mono,'Space Mono',monospace)">
-        ${ifThrLabel}
-      </div>
-    </div>
-    <div>
-      <div style="display:flex;justify-content:space-between;margin-bottom:5px">
-        <span style="font-size:12px;color:var(--sub2,#8890b0);font-family:var(--mono,'Space Mono',monospace)">
-          Random Forest (Attack Probability)
-        </span>
-        <span style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
-              color:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--amber,#ffb02e)'}">${rfConf.toFixed(1)}%</span>
-      </div>
-      <div style="height:6px;background:var(--border2,#252840);border-radius:3px;overflow:hidden;margin-bottom:4px">
-        <div style="height:100%;width:${rfPct}%;background:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--amber,#ffb02e)'};
-             transition:width .5s;border-radius:3px"></div>
-      </div>
-      <div style="font-size:10px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace)">
-        ${rfThrLabel}
-      </div>
-    </div>`;
-
-  // ── Mitigation pipeline — dynamic from phase_history ─────────────
-  const phaseHistory = d.phase_history || [];
-  const pipelineEl   = document.getElementById('idd-pipeline');
-
-  // Always start with 2 fixed steps, then append each phase transition
-  const _actionColor = a => {
-    if (/blackhole|block/i.test(a)) return 'var(--red,#ff3d5a)';
-    if (/ban/i.test(a))             return 'var(--amber,#ffb02e)';
-    if (/quarantine/i.test(a))      return 'var(--amber,#ffb02e)';
-    if (/rate.limit/i.test(a))      return 'var(--blue,#3d6cff)';
-    return 'var(--sub2,#8890b0)';
-  };
-
-  const baseSteps = [
-    { top:'Traffic Ingress',   bot:'SDN Switch',                          color:'var(--blue,#3d6cff)' },
-    { top:'Feature Extractor', bot:ml.attack_class || '—',                color:'var(--blue,#3d6cff)' },
-    { top:'Decision Engine',   bot:isAnomaly ? 'Anomalous' : 'Normal',    color:isAnomaly ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)' },
-  ];
-
-  // Build phase steps from history — each is a distinct escalation event
-  const phaseSteps = phaseHistory.length
-    ? phaseHistory.map(ph => ({
-        top: ph.phase ? `Phase ${ph.phase}` : 'Action',
-        bot: ph.action_taken,
-        color: _actionColor(ph.action_taken),
-        ts:   ph.timestamp ? ph.timestamp.slice(11, 19) : '',
-      }))
-    : [{ top:'Action Taken', bot: st.action_taken || '—', color: _actionColor(st.action_taken || ''), ts: '' }];
-
-  const allSteps = [...baseSteps, ...phaseSteps];
-
-  pipelineEl.style.cssText = 'display:flex;align-items:flex-start;gap:0;margin-bottom:16px;flex-wrap:wrap;row-gap:12px';
-  pipelineEl.innerHTML = allSteps.map((s, i) => `
-    <div style="display:flex;align-items:center;flex:1;min-width:80px">
-      <div style="display:flex;flex-direction:column;align-items:center;flex:1;min-width:0">
-        <div style="width:34px;height:34px;border-radius:50%;border:2px solid ${s.color};
-             display:flex;align-items:center;justify-content:center;
-             font-family:var(--mono,'Space Mono',monospace);font-size:12px;font-weight:700;
-             color:${s.color};flex-shrink:0;margin-bottom:5px">${i + 1}</div>
-        <div style="font-size:9px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace);
-             margin-bottom:2px;white-space:nowrap">${s.top}</div>
-        <div style="font-size:11px;font-weight:700;color:${s.color};font-family:var(--mono,'Space Mono',monospace);
-             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:88px;text-align:center">${s.bot}</div>
-        ${s.ts ? `<div style="font-size:9px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace);margin-top:2px">${s.ts}</div>` : ''}
-      </div>
-      ${i < allSteps.length - 1 ? `<div style="color:var(--sub,#5c6080);font-size:14px;padding:0 2px;flex-shrink:0;margin-bottom:20px">›</div>` : ''}
-    </div>`).join('');
-
-  // ── History / state metadata pills ───────────────────────────
-  const hist = document.getElementById('idd-history');
-  const pills = [];
-  if (st.offence_count) pills.push(['Offences',    st.offence_count,   'var(--red,#ff3d5a)']);
-  if (st.ban_level)     pills.push(['Ban Level',   st.ban_level,       'var(--amber,#ffb02e)']);
-  if (st.priority)      pills.push(['Priority',    st.priority,        'var(--blue,#3d6cff)']);
-  if (st.phase)         pills.push(['Phase',       st.phase,           'var(--sub2,#8890b0)']);
-  if (st.first_seen)    pills.push(['First Seen',  _fmtTs(st.first_seen), 'var(--sub,#5c6080)']);
-
-  hist.innerHTML = pills.length ? pills.map(([k,v,c]) => `
-    <div style="background:var(--surface,#0d0f18);border:1px solid var(--border,#1e2235);
-         border-radius:7px;padding:6px 12px;display:flex;flex-direction:column;gap:2px">
-      <div style="font-size:9px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace);
-           text-transform:uppercase;letter-spacing:.08em">${k}</div>
-      <div style="font-size:12px;font-weight:700;color:${c};font-family:var(--mono,'Space Mono',monospace)">${v}</div>
-    </div>`).join('') : '';
+  _renderFeatureSignals(f, ml.attack_class);
+  _renderMlBars(ml, th);
+  _renderPipeline(d, ml, st, isAnomaly);
+  _renderHistoryPills(st);
 
   _iddShow('content');
 }
 
-// ── Format helpers ────────────────────────────────────────────────────────────
+// ── IF/RF signal thresholds per attack class (based on Juniper + research) ────
+
+const _SIGNAL_CONFIG = {
+  "ICMP Flood": {
+    if: [
+      { key:'pps',         label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,   normal:'Normal: <100 pps',      bar: v => Math.min(v/50000,1) },
+      { key:'byte_rate',   label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 51200, normal:'Normal: <50 KB/s',       bar: v => Math.min(v/1e7,1)   },
+      { key:'duration_sec',label:'Duration (s)',      fmt: v => v.toFixed(1)+'s',                                                alert: v => false,     normal:'ICMP: sustained long',   bar: v => Math.min(v/300,1)   },
+    ],
+    rf: [
+      { key:'bpp',         label:'Bytes / Packet',   fmt: v => v.toFixed(1)+' B',  alert: v => v > 0 && v < 100, normal:'ICMP fixed ~84B fingerprint', bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',   label:'Packet Count',     fmt: v => v.toLocaleString(), alert: v => v > 10000,        normal:'Normal: <10,000',             bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count',  label:'Byte Count',       fmt: v => _fmtBytes(v),       alert: v => v > 1e6,          normal:'Normal: <1 MB',               bar: v => Math.min(v/1e9,1)  },
+    ],
+  },
+  "SYN Flood": {
+    if: [
+      { key:'pps',         label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,  normal:'Normal: <50 pps',        bar: v => Math.min(v/50000,1) },
+      { key:'duration_sec',label:'Duration (s)',     fmt: v => v.toFixed(1)+'s',                                                alert: v => v < 1,    normal:'SYN: <1s = no handshake', bar: v => Math.min(v/300,1)   },
+      { key:'byte_rate',   label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 5120, normal:'Low: small packets',      bar: v => Math.min(v/1e7,1)   },
+    ],
+    rf: [
+      { key:'bpp',         label:'Bytes / Packet',   fmt: v => v.toFixed(1)+' B',  alert: v => v > 0 && v < 70, normal:'SYN fixed ~60B fingerprint', bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',   label:'Packet Count',     fmt: v => v.toLocaleString(), alert: v => v > 10000,       normal:'Normal: <10,000',            bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count',  label:'Byte Count',       fmt: v => _fmtBytes(v),       alert: v => v > 1e6,         normal:'Normal: <1 MB',              bar: v => Math.min(v/1e9,1)  },
+    ],
+  },
+  "UDP Flood": {
+    if: [
+      { key:'byte_rate',   label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 512000, normal:'Normal UDP: <500 KB/s',  bar: v => Math.min(v/1e7,1)   },
+      { key:'pps',         label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,    normal:'Normal: <50 pps',         bar: v => Math.min(v/50000,1) },
+      { key:'duration_sec',label:'Duration (s)',     fmt: v => v.toFixed(1)+'s',                                                alert: v => false,      normal:'UDP: moderate duration',  bar: v => Math.min(v/300,1)   },
+    ],
+    rf: [
+      { key:'bpp',         label:'Bytes / Packet',   fmt: v => v.toFixed(1)+' B',  alert: v => v > 200,  normal:'UDP large: 200-1400B',  bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',   label:'Packet Count',     fmt: v => v.toLocaleString(), alert: v => v > 10000,normal:'Normal: <10,000',        bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count',  label:'Byte Count',       fmt: v => _fmtBytes(v),       alert: v => v > 1e6,  normal:'Normal: <1 MB',         bar: v => Math.min(v/1e9,1)  },
+    ],
+  },
+  "Anomalous": {
+    if: [
+      { key:'pps',         label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,  normal:'Normal: <100 pps', bar: v => Math.min(v/50000,1) },
+      { key:'duration_sec',label:'Duration (s)',     fmt: v => v.toFixed(1)+'s',                                                alert: v => false,    normal:'Check flow age',   bar: v => Math.min(v/300,1)   },
+      { key:'byte_rate',   label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 51200,normal:'Normal: <50 KB/s', bar: v => Math.min(v/1e7,1)   },
+    ],
+    rf: [
+      { key:'bpp',        label:'Bytes / Packet',  fmt: v => v.toFixed(1)+' B',  alert: v => false,    normal:'Check packet size', bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',  label:'Packet Count',    fmt: v => v.toLocaleString(), alert: v => v > 10000,normal:'Normal: <10,000',   bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count', label:'Byte Count',      fmt: v => _fmtBytes(v),       alert: v => v > 1e6,  normal:'Normal: <1 MB',    bar: v => Math.min(v/1e9,1)  },
+    ],
+  },
+  "Uncertain": {
+    if: [
+      { key:'pps',        label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,  normal:'Normal: <100 pps', bar: v => Math.min(v/50000,1) },
+      { key:'byte_rate',  label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 51200,normal:'Normal: <50 KB/s', bar: v => Math.min(v/1e7,1)   },
+      { key:'duration_sec',label:'Duration (s)',    fmt: v => v.toFixed(1)+'s',                                                alert: v => false,    normal:'Check flow age',   bar: v => Math.min(v/300,1)   },
+    ],
+    rf: [
+      { key:'bpp',        label:'Bytes / Packet',  fmt: v => v.toFixed(1)+' B',  alert: v => false,    normal:'Check packet size', bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',  label:'Packet Count',    fmt: v => v.toLocaleString(), alert: v => v > 10000,normal:'Normal: <10,000',   bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count', label:'Byte Count',      fmt: v => _fmtBytes(v),       alert: v => v > 1e6,  normal:'Normal: <1 MB',    bar: v => Math.min(v/1e9,1)  },
+    ],
+  },
+};
+
+/* Renders one feature card for IF or RF row */
+function _mkSignalCard(feat, val, isIF) {
+  const isAlert  = feat.alert(val);
+  const barPct   = (feat.bar(val) * 100).toFixed(1);
+  const accentCol = isIF ? 'var(--blue,#3d6cff)' : 'var(--amber,#ffb02e)';
+  const valCol   = isAlert ? 'var(--red,#ff3d5a)' : accentCol;
+  const borderCol = isAlert ? 'var(--red,#ff3d5a)' : accentCol;
+  const glowRgb  = isAlert ? '255,61,90' : (isIF ? '61,108,255' : '255,176,46');
+  const tag      = isAlert
+    ? `<span style="font-size:8px;font-weight:700;color:var(--red,#ff3d5a);
+            background:rgba(255,61,90,.1);border:1px solid rgba(255,61,90,.3);
+            border-radius:3px;padding:1px 4px;flex-shrink:0">ALERT</span>`
+    : `<span style="font-size:8px;font-weight:700;color:var(--green,#00d68f);
+            background:rgba(0,214,143,.08);border:1px solid rgba(0,214,143,.25);
+            border-radius:3px;padding:1px 4px;flex-shrink:0">OK</span>`;
+  const tip = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
+  return `
+    <div class="idd-fc"
+         style="background:var(--surface,#f7f8fc);border-radius:9px;padding:10px 13px;
+                border:1px solid ${borderCol};box-shadow:0 0 0 2px rgba(${glowRgb},.1)"
+         data-tip="${tip}"
+         onmouseenter="_iddShowTip(event,this.dataset.tip)"
+         onmouseleave="_iddHideTip()">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
+        <div style="font-size:9px;color:var(--sub,#9499b7);
+             font-family:var(--mono,'Space Mono',monospace);
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70%">${feat.label}</div>
+        ${tag}
+      </div>
+      <div style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
+           color:${valCol};margin-bottom:3px">${feat.fmt(val)}</div>
+      <div style="font-size:9px;color:var(--sub,#9499b7);
+           font-family:var(--mono,'Space Mono',monospace);margin-bottom:5px">${feat.normal}</div>
+      <div style="height:2px;background:var(--border2,#e2e4ed);border-radius:1px;overflow:hidden">
+        <div style="height:100%;width:${barPct}%;
+             background:${isAlert ? 'var(--red,#ff3d5a)' : accentCol};
+             transition:width .4s;border-radius:1px"></div>
+      </div>
+    </div>`;
+}
+
+/* Main entry: renders both IF and RF signal rows */
+function _renderFeatureSignals(f, attackClass) {
+  const pktCount = f.pkt_count  || 0;
+  const bytCount = f.byte_count || 0;
+  const bpp      = pktCount > 0 ? bytCount / pktCount : 0;
+
+  /* Flat feature lookup by key */
+  const vals = {
+    pps:         f.pps          || 0,
+    byte_rate:   f.byte_rate    || 0,
+    duration_sec:f.duration_sec || 0,
+    pkt_count:   pktCount,
+    byte_count:  bytCount,
+    bpp:         bpp,
+  };
+
+  const cfg = _SIGNAL_CONFIG[attackClass] || _SIGNAL_CONFIG['Uncertain'];
+
+  /* subtitle shows attack class name */
+  const subtitle = attackClass && attackClass !== '--' ? `Key features for ${attackClass}` : 'Key features';
+  const ifSub = document.getElementById('idd-if-subtitle');
+  const rfSub = document.getElementById('idd-rf-subtitle');
+  if (ifSub) ifSub.textContent = subtitle;
+  if (rfSub) rfSub.textContent = subtitle;
+
+  const ifEl = document.getElementById('idd-if-features');
+  const rfEl = document.getElementById('idd-rf-features');
+  if (ifEl) ifEl.innerHTML = cfg.if.map(feat => _mkSignalCard(feat, vals[feat.key], true)).join('');
+  if (rfEl) rfEl.innerHTML = cfg.rf.map(feat => _mkSignalCard(feat, vals[feat.key], false)).join('');
+}
+
+// ── ML evaluation bars ────────────────────────────────────────────────────────
+
+function _renderMlBars(ml, th) {
+  const ifScore  = ml.if_score   || 0;
+  const rfConf   = ml.confidence || 0;
+  const ifThrVal = th.if_threshold  != null ? th.if_threshold  : null;
+  const rfGate   = th.rf_conf_gate  != null ? th.rf_conf_gate  : null;
+
+  const ifPct  = ifThrVal ? Math.min((ifScore / Math.max(ifThrVal * 2, 1)) * 100, 100)
+                           : Math.min(ifScore * 100, 100);
+  const rfPct  = Math.min(rfConf, 100);
+  const ifOver = ifThrVal != null ? ifScore >= ifThrVal : false;
+  const rfOver = rfGate   != null ? rfConf  >= rfGate * 100 : false;
+
+  const ifThrLabel = ifThrVal != null
+    ? `Threshold ${ifThrVal.toFixed(4)} ${ifOver ? '— score exceeds threshold' : '— score below threshold'}`
+    : 'Threshold: not available';
+  const rfThrLabel = rfGate != null
+    ? `Threshold ${(rfGate * 100).toFixed(0)}% ${rfOver ? '— confirms attack class' : '— below confirmation threshold'}`
+    : 'Threshold: not available';
+
+  /* IF bar: scale so threshold sits at 50% visual position */
+  const ifScale  = ifThrVal ? ifThrVal * 2 : 1;
+  const ifBarPct = Math.min((ifScore / ifScale) * 100, 100);
+  const ifThrPct = ifThrVal ? Math.min((ifThrVal / ifScale) * 100, 100) : 50;
+
+  document.getElementById('idd-ml').innerHTML = `
+    <div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px">
+        <span style="font-size:11px;color:var(--sub2,#6b7190);
+              font-family:var(--mono,'Space Mono',monospace)">Isolation Forest (Anomaly Score)</span>
+        <span style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
+              color:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)'}">${ifScore.toFixed(4)}</span>
+      </div>
+      <div style="height:5px;background:var(--border2,#e2e4ed);border-radius:3px;
+           overflow:visible;margin-bottom:4px;position:relative">
+        <div style="height:100%;width:${ifBarPct}%;background:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)'};
+             transition:width .5s;border-radius:3px"></div>
+        ${ifThrVal != null ? `<div style="position:absolute;top:-4px;left:${ifThrPct}%;
+             width:2px;height:13px;background:rgba(255,61,90,.7);border-radius:1px;
+             transform:translateX(-50%)"></div>` : ''}
+      </div>
+      <div style="font-size:10px;color:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--sub,#9499b7)'};
+           font-family:var(--mono,'Space Mono',monospace)">${ifThrLabel}</div>
+    </div>
+    <div>
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px">
+        <span style="font-size:11px;color:var(--sub2,#6b7190);
+              font-family:var(--mono,'Space Mono',monospace)">Random Forest (Attack Probability)</span>
+        <span style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
+              color:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--amber,#ffb02e)'}">${rfConf.toFixed(1)}%</span>
+      </div>
+      <div style="height:5px;background:var(--border2,#e2e4ed);border-radius:3px;
+           overflow:visible;margin-bottom:4px;position:relative">
+        <div style="height:100%;width:${rfPct}%;background:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--amber,#ffb02e)'};
+             transition:width .5s;border-radius:3px"></div>
+        ${rfGate != null ? `<div style="position:absolute;top:-4px;left:50%;
+             width:2px;height:13px;background:rgba(255,61,90,.7);border-radius:1px;
+             transform:translateX(-50%)"></div>` : ''}
+      </div>
+      <div style="font-size:10px;color:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--sub,#9499b7)'};
+           font-family:var(--mono,'Space Mono',monospace)">${rfThrLabel}</div>
+    </div>`;
+}
+
+// ── Mitigation pipeline ───────────────────────────────────────────────────────
+
+function _actionColor(a) {
+  if (/blackhole|block/i.test(a))  return 'var(--red,#ff3d5a)';
+  if (/ban/i.test(a))              return 'var(--amber,#ffb02e)';
+  if (/quarantine/i.test(a))       return 'var(--amber,#ffb02e)';
+  if (/rate.limit/i.test(a))       return 'var(--blue,#3d6cff)';
+  return 'var(--sub2,#6b7190)';
+}
+
+function _renderPipeline(d, ml, st, isAnomaly) {
+  const phaseHistory = d.phase_history || [];
+  const pipelineEl   = document.getElementById('idd-pipeline');
+
+  /* Fixed first 3 steps — always the same */
+  const baseSteps = [
+    { label:'SDN Switch',    sub:'Traffic Ingress',   color:'var(--blue,#3d6cff)' },
+    { label:ml.attack_class||'--', sub:'Feature Extractor', color:'var(--blue,#3d6cff)' },
+    { label:isAnomaly ? 'Anomalous' : 'Normal',
+      sub:'Decision Engine',
+      color:isAnomaly ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)' },
+  ];
+
+  /* Step 4 = current/latest phase only — never add more */
+  let step4 = null;
+  if (d.is_live) {
+    /* Live: show current phase as the live step */
+    step4 = {
+      label: st.action_taken || '--',
+      sub:   st.phase        || 'Active',
+      color: _actionColor(st.action_taken || ''),
+      ts:    '',
+      live:  true,
+    };
+  } else if (phaseHistory.length) {
+    /* Historical: show only the LATEST phase entry */
+    const last = phaseHistory[phaseHistory.length - 1];
+    step4 = {
+      label: last.action_taken || '--',
+      sub:   last.phase ? `Phase ${last.phase}` : 'Action',
+      color: _actionColor(last.action_taken || ''),
+      ts:    last.timestamp ? last.timestamp.slice(11, 19) : '',
+      live:  false,
+    };
+  } else if (st.action_taken && st.action_taken !== '--') {
+    step4 = {
+      label: st.action_taken,
+      sub:   st.phase || 'Action',
+      color: _actionColor(st.action_taken),
+      ts:    '',
+      live:  false,
+    };
+  }
+
+  const allSteps = step4 ? [...baseSteps, step4] : baseSteps;
+
+  /* Render as a clean 4-step horizontal track */
+  pipelineEl.innerHTML = `
+    <div style="display:flex;align-items:flex-start;gap:0;overflow-x:auto;
+         padding-bottom:4px;scrollbar-width:none">
+      ${allSteps.map((s, i) => {
+        const isLast = i === allSteps.length - 1;
+        const isLive = s.live;
+        return `
+          <div style="display:flex;align-items:flex-start;flex:1;min-width:0">
+            <div style="display:flex;flex-direction:column;align-items:center;
+                 flex:1;min-width:60px;padding:0 4px">
+              <!-- Circle -->
+              <div style="position:relative;width:32px;height:32px;border-radius:50%;
+                   border:2px solid ${s.color};
+                   display:flex;align-items:center;justify-content:center;
+                   font-family:var(--mono,'Space Mono',monospace);font-size:11px;font-weight:700;
+                   color:${s.color};flex-shrink:0;margin-bottom:5px;
+                   ${isLive ? `box-shadow:0 0 0 3px ${s.color}22;animation:idd-pulse 2s ease-in-out infinite` : ''}">
+                ${i + 1}
+                ${isLive ? `<div style="position:absolute;top:-2px;right:-2px;
+                     width:8px;height:8px;border-radius:50%;background:${s.color};
+                     animation:idd-pulse 1s ease-in-out infinite;
+                     border:2px solid var(--card,#fff)"></div>` : ''}
+              </div>
+              <!-- Sub label (stage name) -->
+              <div style="font-size:9px;color:var(--sub,#9499b7);
+                   font-family:var(--mono,'Space Mono',monospace);
+                   margin-bottom:2px;text-align:center;white-space:nowrap">${s.sub}</div>
+              <!-- Main label (action/class) -->
+              <div style="font-size:10px;font-weight:700;color:${s.color};
+                   font-family:var(--mono,'Space Mono',monospace);
+                   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+                   max-width:80px;text-align:center">${s.label}</div>
+              ${s.ts ? `<div style="font-size:9px;color:var(--sub,#9499b7);
+                   font-family:var(--mono,'Space Mono',monospace);margin-top:2px">${s.ts}</div>` : ''}
+            </div>
+            <!-- Connector line between steps -->
+            ${!isLast ? `<div style="height:1px;background:var(--border2,#e2e4ed);
+                 flex-shrink:0;width:16px;margin-top:16px;align-self:flex-start"></div>` : ''}
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
+// ── State pills ───────────────────────────────────────────────────────────────
+
+function _renderHistoryPills(st) {
+  const hist  = document.getElementById('idd-history');
+  const pills = [];
+
+  if (st.phase    && st.phase    !== '--') pills.push(['Phase',    st.phase,    'var(--blue,#3d6cff)']);
+  if (st.priority && st.priority !== '--') pills.push(['Priority', st.priority, 'var(--amber,#ffb02e)']);
+
+  /* offence_count: always show numeric value even if 0 */
+  pills.push(['Offences', String(st.offence_count != null ? st.offence_count : 0), 'var(--red,#ff3d5a)']);
+
+  if (st.ban_level)  pills.push(['Ban Level',  st.ban_level,           'var(--amber,#ffb02e)']);
+  if (st.action_taken && st.action_taken !== '--')
+                     pills.push(['Action',     st.action_taken,        'var(--sub2,#6b7190)']);
+
+  /* first_seen: date + year + time */
+  const tsFirst = _fmtTs(st.first_seen);
+  if (tsFirst && tsFirst !== '--') pills.push(['First Seen', tsFirst, 'var(--sub,#9499b7)']);
+
+  /* last_seen: date + year + time */
+  const tsLast = _fmtTs(st.last_seen);
+  if (tsLast && tsLast !== '--') pills.push(['Last Seen', tsLast, 'var(--sub,#9499b7)']);
+
+  hist.innerHTML = pills.map(([k, v, c]) => `
+    <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);
+         border-radius:7px;padding:6px 11px;display:flex;flex-direction:column;gap:2px">
+      <div style="font-size:9px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);
+           text-transform:uppercase;letter-spacing:.08em">${k}</div>
+      <div style="font-size:12px;font-weight:700;color:${c};
+           font-family:var(--mono,'Space Mono',monospace)">${v}</div>
+    </div>`).join('');
+}
+
+// ── Tooltip ───────────────────────────────────────────────────────────────────
+
+function _iddShowTip(e, text) {
+  if (!text) return;
+  const tip = document.getElementById('idd-tooltip');
+  if (!tip) return;
+  tip.textContent = text;
+  tip.style.display = 'block';
+  _iddMoveTip(e);
+}
+
+function _iddMoveTip(e) {
+  const tip = document.getElementById('idd-tooltip');
+  if (!tip || tip.style.display === 'none') return;
+  const x  = e.clientX + 14;
+  const y  = e.clientY - 10;
+  const tw = tip.offsetWidth || 240;
+  tip.style.left = (x + tw > window.innerWidth ? x - tw - 20 : x) + 'px';
+  tip.style.top  = Math.max(4, y) + 'px';
+}
+
+function _iddHideTip() {
+  const tip = document.getElementById('idd-tooltip');
+  if (tip) tip.style.display = 'none';
+}
+
+document.addEventListener('mousemove', e => {
+  if (document.getElementById('idd-tooltip')?.style.display !== 'none') _iddMoveTip(e);
+});
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function _iddShow(which) {
+  const map = { loading:'flex', error:'flex', content:'block' };
+  ['loading','error','content'].forEach(s => {
+    const el = document.getElementById(`idd-${s}`);
+    if (el) el.style.display = (s === which) ? map[s] : 'none';
+  });
+}
+
 function _fmtBytes(b) {
   if (b >= 1e6) return `${(b/1e6).toFixed(2)} MB/s`;
   if (b >= 1e3) return `${(b/1e3).toFixed(1)} KB/s`;
@@ -411,6 +810,14 @@ function _fmtBytes(b) {
 }
 
 function _fmtTs(ts) {
-  if (!ts) return '—';
-  try { return new Date(ts * 1000).toLocaleTimeString(); } catch { return String(ts); }
+  /* Guard against null, 0, NaN, negative, or non-numeric values */
+  if (!ts || isNaN(ts) || ts <= 0) return '--';
+  try {
+    const d = new Date(ts * 1000);
+    if (isNaN(d.getTime())) return '--';
+    /* Format: Jun 4 2026, 17:24:08 */
+    const datePart = d.toLocaleDateString(undefined, { month:'short', day:'numeric', year:'numeric' });
+    const timePart = d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
+    return `${datePart}, ${timePart}`;
+  } catch { return '--'; }
 }
