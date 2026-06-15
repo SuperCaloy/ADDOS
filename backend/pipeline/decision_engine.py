@@ -4,6 +4,7 @@ import threading
 import datetime
 import collections
 from backend.mitigation.state_machine import state_machine
+from backend.mitigation.deception import deception
 from backend.database import writer
 from backend.pipeline import worker
 from backend.models import loader
@@ -12,41 +13,40 @@ log = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 
-# Known legit host IPs in the K=4 fat-tree topology — 8/8 split.
-# Attacker hosts (odd): h1,h3,h5,h7,h9,h11,h13,h15
-# Legit hosts (even):   h2,h4,h6,h8,h10,h12,h14,h16
+# Confidence lock — keeps highest seen confidence+attack_class per IP
+# Only updates if new confidence > locked value
+_conf_lock: dict[str, tuple[float, str]] = {}
+_conf_lock_mutex = threading.Lock()
+
 _LEGIT_HOST_IPS: frozenset = frozenset([
+    "10.0.0.1",  # h1
     "10.0.0.2",  # h2
-    "10.0.1.2",  # h4
-    "10.1.0.2",  # h6
-    "10.1.1.2",  # h8
-    "10.2.0.2",  # h10
-    "10.2.1.2",  # h12
-    "10.3.0.2",  # h14
-    "10.3.1.2",  # h16
+    "10.0.0.3",  # h3
+    "10.0.0.4",  # h4
+    "10.0.0.5", # h5
 ])
 
+# Ground truth — attacker hosts h6-h19
+_ATTACKER_IPS: frozenset = frozenset([f"10.0.0.{i}" for i in range(6, 20)])
+
 _stats = {
-    "total_packets":     0,
-    "malicious_dropped": 0,   # ML events classified as malicious (not physical drops)
-    "actual_pkts_dropped": 0, # F3 fix: real physical packets dropped at OVS level
-                               # accumulated from "dropped_delta" ZMQ messages sent
-                               # by ryu_controller when blocked flow entries are polled.
-                               # This is what the UI should show as "Malicious Dropped".
-    "normal_packets":    0,
-    "false_positives":   0,
-    "ml_processed":      0,
-    "total_latency_ms":  0.0,
-    "latency_samples":   0,
+    "total_packets":       0,
+    "malicious_dropped":   0,   # ML events classified as malicious
+    "actual_pkts_dropped": 0,   # real OVS physical drops from dropped_delta messages
+    "normal_packets":      0,
+    # Dedicated legit counter — incremented directly when IF says normal.
+    # Avoids subtraction (raw_total - dropped) which breaks when attackers dominate.
+    "normal_forwarded":    0,
+    "false_positives":     0,
+    "ml_processed":        0,
+    "total_latency_ms":    0.0,
+    "latency_samples":     0,
 }
 
 _sse_lock   = threading.Lock()
 _sse_buffer: collections.deque = collections.deque(maxlen=200)
 
 _sse_dedup: dict = {}
-# BUG 2 FIX: lowered from 30.0 to 5.0 — 30s dedup was hiding active attacks
-# from the dashboard during short test scenarios. 5s prevents SSE spam while
-# keeping the UI responsive to ongoing attacks.
 _SSE_DEDUP_TTL = 5.0
 
 # ── Pending restores — IPs awaiting baseline traffic restart after manual release
@@ -120,35 +120,23 @@ def get_stats() -> dict:
         s = _stats.copy()
     samples = max(s["latency_samples"], 1)
 
-    # Fix A: use _raw_total_pkts from zmq_receiver as total_packets.
-    # Previously total_packets only counted flows that reached on_result()
-    # (i.e. passed the MIN_PPS=2.0 gate) — baseline pings at 0.33 pps were
-    # never counted → UI showed 8 even though hundreds of packets had flowed.
-    # _raw_total_pkts accumulates delta_pkts from EVERY flow_stats message,
-    # including below-threshold flows, giving the true total packet count.
-    try:
-        from backend.transport.zmq_receiver import get_raw_counts
-        raw_total = max(get_raw_counts()["raw_total"], s["total_packets"])
-    except Exception:
-        raw_total = s["total_packets"]  # fallback if receiver not started yet
-
-    # F3 fix: use actual_pkts_dropped (real OVS drops) as malicious_dropped.
+    # real_dropped -- OVS physical drops preferred; fall back to ML-event count
     real_dropped = s["actual_pkts_dropped"] if s["actual_pkts_dropped"] > 0 else s["malicious_dropped"]
 
-    # Bug 2+3 fix: actual_pkts_dropped accumulates across ZMQ reconnects but
-    # raw_total resets to 0 on each reconnect (_reset_flow_state).  Clamp so
-    # dropped can never exceed total — prevents negative normal_packets and the
-    # "Malicious Dropped > Total Detected" UI anomaly.
-    real_dropped = min(real_dropped, raw_total)
+    # normal -- dedicated forwarded counter, incremented per normal flow result
+    normal = s["normal_forwarded"]
 
-    # normal_packets = total observed − confirmed malicious drops
-    normal = max(raw_total - real_dropped, 0)
+    # total -- malicious + normal only (industry standard: total analyzed by ML pipeline)
+    # Raw OVS packet counts are excluded -- they recount the same packets every poll
+    # and include ARP/broadcast/control traffic never classified by the ML pipeline.
+    # This ensures total always equals malicious + normal exactly.
+    total = real_dropped + normal
 
     return {
-        "total_packets":     raw_total,
+        "total_packets":     total,
         "malicious_dropped": real_dropped,
         "normal_packets":    normal,
-        "active_threats":    len(state_machine.get_active_list()),
+        "active_threats":    len(state_machine.get_active_list()) + len(deception.get_active_list()),
         "fp_rate":           round((s["false_positives"] / max(s["ml_processed"], 1)) * 100, 2),
         "avg_latency_ms":    round(s["total_latency_ms"] / samples, 1),
     }
@@ -248,6 +236,10 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # ── Debug log — record every inference result ─────────────────────────────
     _pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
+
+    # update sinkhole PPS so observation window can escalate/release correctly
+    deception.update_pps(src_ip, _pps)
+
     _push_debug({
         "ts":          datetime.datetime.now().strftime("%H:%M:%S"),
         "src_ip":      src_ip,
@@ -261,21 +253,25 @@ def on_result(src_ip: str, if_score, is_anomaly,
     })
 
     if not is_anomaly:
-        with _lock:
-            _stats["normal_packets"] += 1
-        # Use actual packet_count from flow_stats so the chart reflects real
-        # traffic volume, not just 1 per flow evaluation per interval.
         _pkt_count = int((flow_stats or {}).get("packet_count", 1))
         _pkt_count = max(_pkt_count, 1)
-        writer.log_traffic_summary(total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0)
+        with _lock:
+            _stats["normal_packets"]  += 1
+            _stats["normal_forwarded"] += _pkt_count
+
+        # IF: normal → TN if legit, FN if attacker
+        _is_attacker = src_ip in _ATTACKER_IPS
+        writer.log_traffic_summary(
+            total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0,
+            tn=(0 if _is_attacker else 1),
+            fn=(1 if _is_attacker else 0),
+            if_tn=(0 if _is_attacker else 1),
+            if_fn=(1 if _is_attacker else 0),
+        )
         return
 
     loader.require_loaded()
 
-    # IF score > threshold confirmed anomaly — quarantine regardless of RF confidence.
-    # RF "Uncertain" just means attack TYPE is unknown, not that it's safe.
-    # The IF already confirmed it's anomalous — proceed with mitigation.
-    # Low-confidence RF result is shown in UI as "Uncertain" attack vector.
     log.debug("Anomaly confirmed: %s  IF=%.4f  RF=%s  conf=%.1f%%",
               src_ip, if_score, attack_class, (confidence or 0)*100)
 
@@ -297,6 +293,15 @@ def on_result(src_ip: str, if_score, is_anomaly,
         writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1)
         log.warning("FALSE POSITIVE detected: %s is a known legit host!", src_ip)
 
+    # Confidence lock — only update attack_class/confidence if new > locked
+    with _conf_lock_mutex:
+        prev = _conf_lock.get(src_ip)
+        if prev is not None and confidence < prev[0]:
+            confidence   = prev[0]
+            attack_class = prev[1]
+        else:
+            _conf_lock[src_ip] = (confidence, attack_class)
+
     predicted_class = "DDoS" if attack_class != "Uncertain" else "Anomaly"
     priority        = _assign_priority(if_score, confidence)
 
@@ -312,7 +317,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         if prior and prior[0].get("ban_level", 0) is not None:
             prev_ban   = int(prior[0].get("ban_level", 0) or 0)
             prev_off   = int(prior[0].get("offence_count", 0) or 0)
-            if prev_ban > 0 or prev_off > 0:
+            if prev_ban > 0:  # only re-offence if previously banned, not just quarantined
                 state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_off)
                 action_taken = state_machine._states[src_ip].action_taken if src_ip in state_machine._states else "Quarantined"
             else:
@@ -346,7 +351,71 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "is_manual":       0,
         "force_insert":    True,   # never overwrite existing rows
     })
-    writer.log_traffic_summary(total=1, threats=1, true_neg=0, fp=0)
+    _threat_pps = max(int(float((flow_stats or {}).get("packet_count_per_second", 1.0))), 1)
+    _is_tp      = src_ip in _ATTACKER_IPS
+    _is_legit   = src_ip in _LEGIT_HOST_IPS
+
+    # IF metrics
+    _if_tp = 1 if _is_tp    else 0
+    _if_fp = 1 if _is_legit else 0
+
+    # RF ground truth — use live topology-reported attack type
+    from backend.api.stats import get_active_attacks as _get_gt
+    _gt = _get_gt()
+    _expected_class = _gt.get(src_ip)  # "SYN", "ICMP", "UDP" or None
+
+    # Map RF attack_class to short type
+    _class_map = {"SYN Flood": "SYN", "ICMP Flood": "ICMP", "UDP Flood": "UDP"}
+    _predicted  = _class_map.get(attack_class)
+
+    _rf_tp = _rf_fp = _rf_tn = _rf_fn = 0
+    _rf_tp_syn = _rf_fp_syn = _rf_tn_syn = _rf_fn_syn = 0
+    _rf_tp_icmp= _rf_fp_icmp= _rf_tn_icmp= _rf_fn_icmp= 0
+    _rf_tp_udp = _rf_fp_udp = _rf_tn_udp = _rf_fn_udp = 0
+    _rf_syn_as_icmp = _rf_syn_as_udp = 0
+    _rf_icmp_as_syn = _rf_icmp_as_udp = 0
+    _rf_udp_as_syn  = _rf_udp_as_icmp = 0
+
+    if _expected_class and _predicted:
+        if _predicted == _expected_class:
+            _rf_tp = 1
+            if _expected_class == "SYN":
+                _rf_tp_syn = 1; _rf_tn_icmp = 1; _rf_tn_udp = 1
+            elif _expected_class == "ICMP":
+                _rf_tp_icmp = 1; _rf_tn_syn = 1; _rf_tn_udp = 1
+            elif _expected_class == "UDP":
+                _rf_tp_udp = 1; _rf_tn_syn = 1; _rf_tn_icmp = 1
+        else:
+            # Misclassification — track off-diagonal cell
+            _rf_fp = 1; _rf_fn = 1
+            _mis = (_expected_class, _predicted)
+            if   _mis == ("SYN",  "ICMP"): _rf_syn_as_icmp  = 1
+            elif _mis == ("SYN",  "UDP"):  _rf_syn_as_udp   = 1
+            elif _mis == ("ICMP", "SYN"):  _rf_icmp_as_syn  = 1
+            elif _mis == ("ICMP", "UDP"):  _rf_icmp_as_udp  = 1
+            elif _mis == ("UDP",  "SYN"):  _rf_udp_as_syn   = 1
+            elif _mis == ("UDP",  "ICMP"): _rf_udp_as_icmp  = 1
+    elif _expected_class and not _predicted:
+        _rf_fn = 1
+        if _expected_class == "SYN":   _rf_fn_syn  = 1
+        elif _expected_class == "ICMP": _rf_fn_icmp = 1
+        elif _expected_class == "UDP":  _rf_fn_udp  = 1
+
+    writer.log_traffic_summary(
+        total=_threat_pps, threats=_threat_pps, true_neg=0, fp=0,
+        tp=(1 if _is_tp else 0),
+        if_tp=_if_tp, if_fp=_if_fp,
+        rf_tp=_rf_tp, rf_fp=_rf_fp, rf_tn=_rf_tn, rf_fn=_rf_fn,
+        rf_tp_syn=_rf_tp_syn, rf_fp_syn=_rf_fp_syn,
+        rf_tn_syn=_rf_tn_syn, rf_fn_syn=_rf_fn_syn,
+        rf_tp_icmp=_rf_tp_icmp, rf_fp_icmp=_rf_fp_icmp,
+        rf_tn_icmp=_rf_tn_icmp, rf_fn_icmp=_rf_fn_icmp,
+        rf_tp_udp=_rf_tp_udp, rf_fp_udp=_rf_fp_udp,
+        rf_tn_udp=_rf_tn_udp, rf_fn_udp=_rf_fn_udp,
+        rf_syn_as_icmp=_rf_syn_as_icmp, rf_syn_as_udp=_rf_syn_as_udp,
+        rf_icmp_as_syn=_rf_icmp_as_syn, rf_icmp_as_udp=_rf_icmp_as_udp,
+        rf_udp_as_syn=_rf_udp_as_syn,   rf_udp_as_icmp=_rf_udp_as_icmp,
+    )
 
     elapsed_ms = (time.monotonic() - t_start) * 1000
     with _lock:
