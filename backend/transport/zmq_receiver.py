@@ -3,7 +3,7 @@ import json
 import time
 import threading
 import logging
-from backend.config import ZMQ_TELEMETRY_ADDR, FLOOD_SYN_LIMIT, FLOOD_ICMP_LIMIT, FLOOD_UDP_LIMIT
+from backend.config import ZMQ_TELEMETRY_ADDR
 
 # Whitelisted IPs — never flood-filtered or submitted to ML pipeline.
 # h20 = victim server, h21 = sinkhole dummy.
@@ -61,26 +61,7 @@ def _reset_flow_state() -> None:
     log.info("ZMQ receiver: flow state reset on reconnect (raw_total preserved)")
 
 
-def _build_synthetic_flow_stats(proto: str, limit: int) -> dict:
-    """
-    Build a fake flow_stats dict for a prefilter-tripped IP.
-    Used so the worker gets something meaningful to feed into IF.
-    Protocol number: ICMP=1, TCP=6, UDP=17
-    """
-    proto_num = {"SYN": 6, "ICMP": 1, "UDP": 17}.get(proto, 0)
-    avg_bytes  = {"SYN": 60, "ICMP": 84, "UDP": 48}.get(proto, 60)
-    return {
-        "packet_count":            limit,
-        "packet_count_per_second": float(limit),
-        "switch_delta_pps":        float(limit),
-        "ip_proto":                proto_num,
-        "src_port":                0,
-        "dst_port":                80,
-        "byte_count":              limit * avg_bytes,
-        "byte_count_per_second":   float(limit * avg_bytes),
-        "flow_duration_sec":       1.0,
-        "flow_duration_nsec":      0,
-    }
+
 
 
 def _parse_and_route(raw: bytes) -> None:
@@ -125,9 +106,7 @@ def _parse_and_route(raw: bytes) -> None:
                 # SYN flood tracking
                 tripped = flood_filter.on_packet(src_ip, "SYN")
                 if tripped:
-                    flow_stats = _build_synthetic_flow_stats("SYN", FLOOD_SYN_LIMIT)
-                    worker.submit(src_ip, flow_stats, {})
-                    log.info("FloodPreFilter SYN tripped: %s → submitted to pipeline", src_ip)
+                    log.info("FloodPreFilter SYN tripped: %s — awaiting real flow_stats", src_ip)
 
             elif msg.get("tcp_flags_ack"):
                 # ACK means handshake completed — reduce half-open count
@@ -137,18 +116,14 @@ def _parse_and_route(raw: bytes) -> None:
             # ICMP flood tracking — count every echo request
             tripped = flood_filter.on_packet(src_ip, "ICMP")
             if tripped:
-                flow_stats = _build_synthetic_flow_stats("ICMP", FLOOD_ICMP_LIMIT)
-                worker.submit(src_ip, flow_stats, {})
-                log.info("FloodPreFilter ICMP tripped: %s → submitted to pipeline", src_ip)
+                log.info("FloodPreFilter ICMP tripped: %s — awaiting real flow_stats", src_ip)
 
         elif proto == "UDP":
             # UDP flood tracking — this is the key fix for slow UDP detection
             # Previously UDP had no prefilter so had to wait for stats poll
             tripped = flood_filter.on_packet(src_ip, "UDP")
             if tripped:
-                flow_stats = _build_synthetic_flow_stats("UDP", FLOOD_UDP_LIMIT)
-                worker.submit(src_ip, flow_stats, {})
-                log.info("FloodPreFilter UDP tripped: %s → submitted to pipeline", src_ip)
+                log.info("FloodPreFilter UDP tripped: %s — awaiting real flow_stats", src_ip)
 
     # ------------------------------------------------------------------
     # dropped_delta — real physical packet drop count from OVS

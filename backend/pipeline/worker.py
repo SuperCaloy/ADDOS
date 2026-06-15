@@ -166,10 +166,13 @@ def _process_item(src_ip: str, flow_stats: dict,
         confidence   = 0.0
 
         if is_anomaly:
-            rf_switch   = dict(switch_stats) if switch_stats else {}
+            # Merge flow_stats into rf_switch — RF needs per-flow fields (pps, bps etc)
+            rf_switch = {}
+            if switch_stats:
+                rf_switch.update(switch_stats)
+            if flow_stats:
+                rf_switch.update(flow_stats)
             _flow_proto = int((flow_stats or {}).get("ip_proto", 0))
-
-            # Per-flow ip_proto is more reliable than switch-level proto
             if _flow_proto:
                 rf_switch["ip_proto"] = _flow_proto
 

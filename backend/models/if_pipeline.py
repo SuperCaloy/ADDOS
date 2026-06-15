@@ -1,8 +1,8 @@
 import numpy as np
 import threading
+import pandas as pd
 from backend.models import loader
 
-# Per-feature running median tracker for NaN fill
 _median_lock     = threading.Lock()
 _feature_sums    = None
 _feature_counts  = None
@@ -17,7 +17,7 @@ def _init_median_tracker(n: int) -> None:
 
 
 def _update_medians(vec: np.ndarray) -> None:
-    # Incremental mean used as a stable median approximation
+    # Incremental mean as stable median approximation
     with _median_lock:
         mask = np.isfinite(vec)
         _feature_counts[mask] += 1
@@ -32,75 +32,57 @@ def _get_medians() -> np.ndarray:
 
 
 def extract_if_features(flow_stats: dict) -> np.ndarray:
-    """Build shape-(1,16) feature matrix from raw Ryu OFPFlowStatsRequest fields."""
+    """Build shape-(1,17) feature matrix matching feature_contract.json order."""
     loader.require_loaded()
 
     n = len(loader.if_features)
     if _feature_sums is None:
         _init_median_tracker(n)
 
-    s = flow_stats
+    s   = flow_stats
     eps = 1e-9
 
     # --- Raw fields ---
-    fds  = float(s.get("flow_duration_sec",  0))
-    fdns = float(s.get("flow_duration_nsec", 0))
-    ito  = float(s.get("idle_timeout",       0))
-    hto  = float(s.get("hard_timeout",       0))
-    flg  = float(s.get("flags",              0))
+    fds  = float(s.get("flow_duration_sec",        0))
+    fdns = float(s.get("flow_duration_nsec",       0))
+    flg  = float(s.get("flags",                    0))
+    pkt  = float(s.get("packet_count",             0))
+    byt  = float(s.get("byte_count",               0))
+    pps  = float(s.get("packet_count_per_second",  0))
+    bps  = float(s.get("byte_count_per_second",    0))
+    fcps = float(s.get("flow_count_per_src",       0))
+    tps  = float(s.get("tp_src",                   0))
+    tpd  = float(s.get("tp_dst",                   0))
+    ipr  = float(s.get("ip_proto",                 0))
 
-    pkt_raw = float(s.get("packet_count", 0))
-    byt_raw = float(s.get("byte_count",   0))
+    # --- Engineered features ---
+    pkt_byte_rate_ratio = np.log1p(max(pps / (bps + eps), 0))
+    avg_bytes_per_pkt   = byt / (pkt + eps)
+    flow_intensity      = np.log1p(max(pkt * bps, 0))          # fixed: bps not pps
+    port_entropy        = np.log1p(max(tps / (tpd + 1), 0))
+    bytes_per_duration  = np.log1p(max(byt / (fds + eps), 0))
+    pkt_size_uniformity = np.log1p(max(avg_bytes_per_pkt / (bps + 1), 0))
+    flow_src_intensity  = np.log1p(max(fcps * pps, 0))
 
-    # Recompute rates using exact same formula as sdn_collector_controller
-    _total_s = fds + fdns / 1e9
-    _total_s = max(_total_s, 1e-9)
-    pps_raw  = pkt_raw / _total_s        # packet_count_per_second
-    bps_raw  = byt_raw / _total_s        # byte_count_per_second
-
-    # --- Engineered (raw-based) ---
-    # flow_duration_total_ns (log1p)
-    fdt_raw = fds * 1e9 + fdns
-    fdt     = np.log1p(max(fdt_raw, 0))
-
-    # bytes_per_packet
-    bpp = np.log1p(max(byt_raw / (pkt_raw + eps), 0))
-
-    # pkt_byte_rate_ratio
-    pbr = np.log1p(max(pps_raw / (bps_raw + eps), 0))
-
-    # flow_per_packet — flood = many packets, one flow
-    flow_per_packet = 1.0 / (pkt_raw + 1)
-
-    # duration_pkt_ratio — uses log1p'd fdt
-    # guard: pkt_raw=0 with fdt>0 -> /eps blowup, treat as 0 (no flood signal)
-    if pkt_raw > 0:
-        duration_pkt_ratio = np.log1p(max(fdt / (pkt_raw + eps), 0))
-    else:
-        duration_pkt_ratio = 0.0
-
-    # pkt_rate_per_duration — uses log1p'd fdt
-    pkt_rate_per_duration = np.log1p(max(pkt_raw / (fdt + eps), 0))
-
-    # avg_bytes_per_pkt — raw, unlogged
-    avg_bytes_per_pkt = byt_raw / (pkt_raw + eps)
-
-    # rate_to_count_ratio — burst rate vs sustained count
-    rate_to_count_ratio = np.log1p(max(pps_raw / (pkt_raw + eps), 0))
-
-    # --- log1p final transform for raw count/rate columns ---
-    pkt_log = np.log1p(max(pkt_raw, 0))
-    byt_log = np.log1p(max(byt_raw, 0))
-    pps_log = np.log1p(max(pps_raw, 0))
-    bps_log = np.log1p(max(bps_raw, 0))
-
-    # 16 features matching feature_contract.json order exactly
+    # --- Build vector in contract order ---
     vec = np.array([
-        fds, ito, hto, flg,
-        pkt_log, byt_log, pps_log, bps_log,
-        fdt, bpp, pbr,
-        flow_per_packet, duration_pkt_ratio, pkt_rate_per_duration,
-        avg_bytes_per_pkt, rate_to_count_ratio,
+        np.log1p(max(fds,  0)),   # flow_duration_sec
+        flg,                       # flags
+        np.log1p(max(pkt,  0)),   # packet_count
+        np.log1p(max(byt,  0)),   # byte_count
+        np.log1p(max(pps,  0)),   # packet_count_per_second
+        np.log1p(max(bps,  0)),   # byte_count_per_second
+        np.log1p(max(fcps, 0)),   # flow_count_per_src
+        np.log1p(max(tps,  0)),   # tp_src
+        np.log1p(max(tpd,  0)),   # tp_dst
+        ipr,                       # ip_proto
+        pkt_byte_rate_ratio,
+        avg_bytes_per_pkt,
+        flow_intensity,
+        port_entropy,
+        bytes_per_duration,
+        pkt_size_uniformity,
+        flow_src_intensity,
     ], dtype=np.float64)
 
     # Replace inf/-inf with NaN then fill with running median
@@ -110,15 +92,14 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     if nans.any():
         vec[nans] = _get_medians()[nans]
 
-    import pandas as pd
-    # Scaler was fitted with feature names — pass DataFrame to silence warning
-    df = pd.DataFrame(vec.reshape(1, -1), columns=loader.if_features)
-    vec_scaled = loader.if_scaler.transform(df)
-    return vec_scaled   # shape (1, 16)
+    # Two-stage scaling: RobustScaler → QuantileTransformer (matches training)
+    df      = pd.DataFrame(vec.reshape(1, -1), columns=loader.if_features)
+    X_rob   = loader.if_scaler.transform(df)
+    return loader.if_quantiler.transform(X_rob)   # shape (1, 17)
 
 
 def run_if_inference(vec_scaled: np.ndarray) -> tuple[float, bool]:
-    """Return (if_score, is_anomaly). Score uses negated sign per contract."""
+    """Return (if_score, is_anomaly)."""
     loader.require_loaded()
     if_score   = float(-loader.if_model.score_samples(vec_scaled)[0])
     is_anomaly = if_score >= loader.if_threshold

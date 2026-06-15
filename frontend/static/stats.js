@@ -61,12 +61,38 @@ async function fetchStats() {
   } catch (_) {}
 }
 
-/* Fetch model info once at boot — not polled, never changes at runtime */
-async function fetchModelInfo() {
+/* fetchModelInfo — now delegates to pollModelInfo (polled every 30s) */
+async function fetchModelInfo() { await pollModelInfo(); }
+/* Poll system metrics (CPU/Memory) every 5s */
+async function fetchSystemMetrics() {
+  try {
+    const m = await apiFetch('/api/system_metrics');
+    const cpuEl = document.getElementById('p-cpu');
+    const memEl = document.getElementById('p-mem');
+    const cpu = m.ctrl_cpu ?? m.cpu ?? 0;
+    const mem = m.ctrl_mem ?? m.mem_mb ?? 0;
+    const cpuBar = document.getElementById('cpu-bar');
+    const memBar = document.getElementById('mem-bar');
+    if (cpuEl) {
+      cpuEl.textContent = `${cpu.toFixed(1)}%`;
+      cpuEl.style.color = cpu > 80 ? 'var(--danger,#ff3d5a)'
+                        : cpu > 50 ? 'var(--warn,#ffb300)' : 'var(--ok,#00d68f)';
+    }
+    if (cpuBar) {
+      cpuBar.style.width = `${Math.min(cpu, 100)}%`;
+      cpuBar.className = `resource-bar cpu-bar${cpu > 80 ? ' crit' : cpu > 50 ? ' warn' : ''}`;
+    }
+    if (memEl) memEl.textContent = `${mem.toFixed(0)} MB`;
+    if (memBar) memBar.style.width = `${Math.min((mem / 4096) * 100, 100)}%`;
+  } catch (_) {}
+}
+
+/* Poll model accuracy every 30s */
+async function pollModelInfo() {
   try {
     const info = await apiFetch('/api/model_info');
     if (info.if_accuracy != null) set('p-if', `Anomaly detection accuracy: ${info.if_accuracy.toFixed(1)}%`);
     if (info.rf_accuracy != null) set('p-rf', `Classification accuracy: ${info.rf_accuracy.toFixed(1)}%`);
-    if (info.if_threshold)        ifThr = info.if_threshold;
+    if (info.if_threshold) ifThr = info.if_threshold;
   } catch (_) {}
 }

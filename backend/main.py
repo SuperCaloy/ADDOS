@@ -80,7 +80,7 @@ def create_app() -> Flask:
     from backend.api.ip_detail  import bp as ip_detail_bp
     from backend.api.graph     import bp as graph_bp
     from backend.api.events    import bp as events_bp
-    from backend.api.quarantine import bp as quarantine_bp
+    from backend.api.mitigation import bp as quarantine_bp
     from backend.api.report    import bp as report_bp
 
     app.register_blueprint(stats_bp)

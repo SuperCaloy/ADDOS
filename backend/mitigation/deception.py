@@ -40,15 +40,6 @@ class SinkholeEntry:
 
 
 class DeceptionModule:
-    # Manages sinkhole observation for uncertain / low-confidence IPs.
-    #
-    # Flow:
-    #   1. state_machine calls enter_sinkhole() for uncertain IPs
-    #   2. ZmqCommander sends redirect FlowMod → traffic goes to h21
-    #   3. tick() checks observation windows every second
-    #   4. After SINKHOLE_OBSERVE_SECONDS:
-    #        pps still elevated → escalate_callback → Phase 1
-    #        pps dropped        → release_callback  → clear rules
 
     def __init__(self):
         self._lock              = threading.Lock()
@@ -97,9 +88,9 @@ class DeceptionModule:
             "attack_vector":   attack_vector,
             "confidence":      confidence,
             "priority":        "Low",
-            "action_taken":    f"Sinkhole (redirect→{SINKHOLE_IP})",
+            "action_taken":    f"Sinkhole",
             "if_score":        if_score,
-            "phase":           "Deception — Sinkhole Observation",
+            "phase":           "Sinkhole",
             "is_manual":       False,
         })
 
@@ -127,7 +118,7 @@ class DeceptionModule:
                     "elapsed_sec":   int(e.elapsed()),
                     "remaining_sec": max(0, int(SINKHOLE_OBSERVE_SECONDS - e.elapsed())),
                     "recent_pps":    round(e.recent_pps, 2),
-                    "phase":         "Deception — Sinkhole",
+                    "phase":         "Sinkhole",
                 }
                 for e in self._entries.values()
             ]
