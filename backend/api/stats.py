@@ -46,17 +46,55 @@ def stats():
     })
 
 
+def _compute_accuracy():
+    try:
+        rows = query("""
+            SELECT is_anomaly, attack_class, confidence
+            FROM detection_features ORDER BY id DESC LIMIT 500
+        """)
+        if not rows:
+            return None, None
+        # IF: anomaly flag vs actual class
+        if_correct = sum(1 for r in rows
+                         if (r["is_anomaly"] == 1) == (r["attack_class"] != "Normal"))
+        if_acc = round((if_correct / len(rows)) * 100, 1)
+        # RF: avg confidence on confirmed attack rows
+        atk = [r for r in rows if r["attack_class"] not in ("Normal", "Uncertain")]
+        rf_acc = round(sum(r["confidence"] for r in atk) / len(atk) * 100, 1) if atk else None
+        return if_acc, rf_acc
+    except Exception:
+        return None, None
+
+
 @bp.get("/api/model_info")
 def model_info():
     loader.require_loaded()
+    if_acc, rf_acc = _compute_accuracy()
     return jsonify({
-        "if_accuracy":  None,
-        "rf_accuracy":  None,
+        "if_accuracy":  if_acc,
+        "rf_accuracy":  rf_acc,
         "if_threshold": loader.if_threshold,
         "rf_conf_gate": loader.rf_conf_gate,
         "if_features":  loader.if_features,
         "rf_features":  loader.rf_features,
         "rf_classes":   loader.rf_classes,
+    })
+
+
+@bp.get("/api/system_metrics")
+def system_metrics():
+    rows = query("""
+        SELECT cpu_percent, mem_mb, ctrl_cpu_percent, ctrl_mem_mb
+        FROM system_metrics ORDER BY id DESC LIMIT 1
+    """)
+    if not rows:
+        return jsonify({"cpu": 0, "mem_mb": 0, "ctrl_cpu": 0, "ctrl_mem": 0})
+    r = rows[0]
+    return jsonify({
+        "cpu":      round(r["cpu_percent"] or 0, 1),
+        "mem_mb":   round(r["mem_mb"] or 0, 1),
+        "ctrl_cpu": round(r["ctrl_cpu_percent"] or 0, 1),
+        "ctrl_mem": round(r["ctrl_mem_mb"] or 0, 1),
     })
 
 

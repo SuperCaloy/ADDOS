@@ -1,13 +1,3 @@
-"""
-backend/api/ip_detail.py — Dedicated IP threat analysis endpoints.
-
-Two endpoints:
-  GET /api/ip_detail/<ip>       — full detail, live if active else DB fallback
-  GET /api/ip_detail/<ip>/live  — real-time features only, 404 if not active
-
-Separated from stats.py so polling logic is isolated and stats stays clean.
-"""
-
 from flask import Blueprint, jsonify
 from backend.pipeline.flow_tracker import tracker
 from backend.mitigation.state_machine import state_machine
@@ -43,22 +33,20 @@ def _build_live_features(src_ip: str) -> dict | None:
 
     # Pull live phase/priority from state machine
     state    = state_machine._states.get(src_ip)
-    phase    = state.phase    if state else "—"
-    priority = state.priority if state else "—"
-    action   = state.action   if state else "—"
+    phase    = state.phase        if state else "—"
+    priority = state.priority     if state else "—"
+    action   = state.action_taken if state else "—"
 
     return {
         "src_ip":   src_ip,
         "is_live":  True,
         "features": {
             "pkt_count":     fs.get("packet_count", 0),
+            "byte_count":    fs.get("byte_count", 0),
             "syn_ratio":     round(syn_ratio, 4),
             "pps":           fs.get("packet_count_per_second", 0),
             "byte_rate":     fs.get("byte_count_per_second", 0),
             "active_flows":  tracker.active_count(),
-            "sw_delta":      fs.get("switch_delta_pps", 0),
-            "inter_arrival": fs.get("inter_arrival", 0),
-            "unique_ports":  fs.get("unique_ports", 0),
             "duration_sec":  fs.get("flow_duration_sec", 0),
         },
         "ml": {
@@ -113,24 +101,19 @@ def _build_db_features(src_ip: str) -> dict | None:
 
     # Real feature values from detection_features table
     feat_rows = query("""
-        SELECT packet_count, packet_count_per_second, byte_count_per_second,
-               flow_duration_sec, flags, disp_pakt, disp_interval,
-               gsp, gfe, mean_pkt, mean_byte
+        SELECT packet_count, byte_count, packet_count_per_second,
+               byte_count_per_second, flow_duration_sec, flags,
+               bytes_per_packet, flow_count_per_src,
+               tp_src, tp_dst, ip_proto
         FROM detection_features
         WHERE src_ip = ?
         ORDER BY timestamp DESC LIMIT 1
     """, (src_ip,))
     feat = feat_rows[0] if feat_rows else {}
 
-    pkt_count    = max(int(feat.get("packet_count", 0) or 0), 1)
-    flags        = int(feat.get("flags", 0) or 0)
-    syn_ratio    = round((flags & 0x02) / pkt_count, 4) if flags else 0.0
-    gfe          = feat.get("gfe") or 0
-    gsp          = max(feat.get("gsp") or 1, 1)
-    unique_ports = int(gfe / gsp) if gsp else 0
-    disp_pakt    = max(feat.get("disp_pakt") or 1, 1)
-    disp_interval = feat.get("disp_interval") or 0
-    inter_arrival = round(disp_interval / disp_pakt, 6)
+    pkt_count = max(int(feat.get("packet_count", 0) or 0), 1)
+    flags     = int(feat.get("flags", 0) or 0)
+    syn_ratio = round((flags & 0x02) / pkt_count, 4) if flags else 0.0
 
     # ip_attack_history — offence/ban/phase metadata
     hist = query("""
@@ -173,13 +156,10 @@ def _build_db_features(src_ip: str) -> dict | None:
         "is_live":  False,
         "features": {
             "pkt_count":     feat.get("packet_count", 0) or 0,
+            "byte_count":    feat.get("byte_count", 0) or 0,
             "syn_ratio":     syn_ratio,
             "pps":           feat.get("packet_count_per_second", 0) or 0,
             "byte_rate":     feat.get("byte_count_per_second", 0) or 0,
-            "active_flows":  gfe,
-            "sw_delta":      round(feat.get("mean_pkt") or 0, 2),
-            "inter_arrival": inter_arrival,
-            "unique_ports":  unique_ports,
             "duration_sec":  feat.get("flow_duration_sec", 0) or 0,
         },
         "ml": {

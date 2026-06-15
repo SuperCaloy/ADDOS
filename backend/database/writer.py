@@ -119,44 +119,39 @@ def log_detection_features(src_ip: str, if_score: float,
                             flow_stats: dict,
                             switch_stats: dict) -> None:
     try:
-        fs = flow_stats  or {}
-        ss = switch_stats or {}
-        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        fs  = flow_stats  or {}
+        ts  = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        eps = 1e-9
 
-        flow_duration_sec         = fs.get("flow_duration_sec", 0.0)
-        flow_duration_nsec        = fs.get("flow_duration_nsec", 0.0)
-        idle_timeout              = fs.get("idle_timeout", 0)
-        hard_timeout              = fs.get("hard_timeout", 0)
-        flags                     = fs.get("flags", 0)
-        packet_count              = fs.get("packet_count", 0)
-        byte_count                = fs.get("byte_count", 0)
-        packet_count_per_second   = fs.get("packet_count_per_second", 0.0)
-        packet_count_per_nsecond  = fs.get("packet_count_per_nsecond", 0.0)
-        byte_count_per_second     = fs.get("byte_count_per_second", 0.0)
-        byte_count_per_nsecond    = fs.get("byte_count_per_nsecond", 0.0)
-        flow_duration_total_ns    = fs.get("flow_duration_total_ns",
+        # --- Raw flow fields ---
+        flow_duration_sec        = fs.get("flow_duration_sec", 0.0)
+        flow_duration_nsec       = fs.get("flow_duration_nsec", 0.0)
+        idle_timeout             = fs.get("idle_timeout", 0)
+        hard_timeout             = fs.get("hard_timeout", 0)
+        flags                    = fs.get("flags", 0)
+        packet_count             = fs.get("packet_count", 0)
+        byte_count               = fs.get("byte_count", 0)
+        packet_count_per_second  = fs.get("packet_count_per_second", 0.0)
+        packet_count_per_nsecond = fs.get("packet_count_per_nsecond", 0.0)
+        byte_count_per_second    = fs.get("byte_count_per_second", 0.0)
+        byte_count_per_nsecond   = fs.get("byte_count_per_nsecond", 0.0)
+        flow_duration_total_ns   = fs.get("flow_duration_total_ns",
             flow_duration_sec * 1e9 + flow_duration_nsec)
-        bytes_per_packet          = (byte_count / max(packet_count, 1))
-        pkt_byte_rate_ratio       = (packet_count_per_second /
-                                     max(byte_count_per_second, 1e-9))
+        flow_count_per_src       = fs.get("flow_count_per_src", 0.0)
+        tp_src                   = fs.get("tp_src", 0)
+        tp_dst                   = fs.get("tp_dst", 0)
+        ip_proto                 = fs.get("ip_proto", 0)
 
-        disp_pakt         = ss.get("disp_pakt", 0)
-        disp_byte         = ss.get("disp_byte", 0)
-        mean_pkt          = ss.get("mean_pkt", 0.0)
-        mean_byte         = ss.get("mean_byte", 0.0)
-        avg_durat         = ss.get("avg_durat", 0.0)
-        avg_flow_dst      = ss.get("avg_flow_dst", 0)
-        rate_pkt_in       = ss.get("rate_pkt_in", 0.0)
-        disp_interval     = ss.get("disp_interval", 1.0)
-        gfe               = ss.get("gfe", 0)
-        g_usip            = ss.get("g_usip", 0)
-        rfip              = ss.get("rfip", 0)
-        gsp               = ss.get("gsp", 0)
-        ip_diversity_ratio = (g_usip / max(gfe, 1))
-        byte_per_interval  = (disp_byte / max(disp_interval, 1e-9))
-        pkt_per_interval   = (disp_pakt / max(disp_interval, 1e-9))
-        flow_entry_ratio   = (gfe / max(gsp, 1))
-        mean_pkt_byte_ratio = (mean_pkt / max(mean_byte, 1e-9))
+        # --- Engineered features (raw, pre-log — match IF/RF formulas) ---
+        bytes_per_packet      = byte_count / max(packet_count, 1)
+        pkt_byte_rate_ratio   = packet_count_per_second / (byte_count_per_second + eps)
+        flow_intensity        = packet_count * byte_count_per_second
+        port_entropy          = tp_src / (tp_dst + 1)
+        bytes_per_duration    = byte_count / (flow_duration_sec + eps)
+        pkt_size_uniformity   = bytes_per_packet / (byte_count_per_second + 1)
+        flow_src_intensity    = flow_count_per_src * packet_count_per_second
+        duration_pkt_ratio    = flow_duration_total_ns / (packet_count + eps)
+        pkt_rate_per_duration = packet_count / (flow_duration_total_ns + eps)
 
         flag_syn_flood  = 1 if attack_class == "SYN Flood"  else 0
         flag_icmp_flood = 1 if attack_class == "ICMP Flood" else 0
@@ -171,10 +166,10 @@ def log_detection_features(src_ip: str, if_score: float,
                 packet_count_per_second, packet_count_per_nsecond,
                 byte_count_per_second,  byte_count_per_nsecond,
                 flow_duration_total_ns, bytes_per_packet, pkt_byte_rate_ratio,
-                disp_pakt, disp_byte, mean_pkt, mean_byte, avg_durat,
-                avg_flow_dst, rate_pkt_in, disp_interval, gfe, g_usip, rfip, gsp,
-                ip_diversity_ratio, byte_per_interval, pkt_per_interval,
-                flow_entry_ratio, mean_pkt_byte_ratio,
+                flow_count_per_src, tp_src, tp_dst, ip_proto,
+                flow_intensity, port_entropy, bytes_per_duration,
+                pkt_size_uniformity, flow_src_intensity,
+                duration_pkt_ratio, pkt_rate_per_duration,
                 flag_syn_flood, flag_icmp_flood, flag_udp_flood, flag_normal
             ) VALUES (
                 ?,?,?,?,?,?,
@@ -183,9 +178,9 @@ def log_detection_features(src_ip: str, if_score: float,
                 ?,?,
                 ?,?,
                 ?,?,?,
-                ?,?,?,?,?,
-                ?,?,?,?,?,?,?,
+                ?,?,?,?,
                 ?,?,?,
+                ?,?,
                 ?,?,
                 ?,?,?,?
             )
@@ -197,10 +192,10 @@ def log_detection_features(src_ip: str, if_score: float,
             packet_count_per_second, packet_count_per_nsecond,
             byte_count_per_second, byte_count_per_nsecond,
             flow_duration_total_ns, bytes_per_packet, pkt_byte_rate_ratio,
-            disp_pakt, disp_byte, mean_pkt, mean_byte, avg_durat,
-            avg_flow_dst, rate_pkt_in, disp_interval, gfe, g_usip, rfip, gsp,
-            ip_diversity_ratio, byte_per_interval, pkt_per_interval,
-            flow_entry_ratio, mean_pkt_byte_ratio,
+            flow_count_per_src, tp_src, tp_dst, ip_proto,
+            flow_intensity, port_entropy, bytes_per_duration,
+            pkt_size_uniformity, flow_src_intensity,
+            duration_pkt_ratio, pkt_rate_per_duration,
             flag_syn_flood, flag_icmp_flood, flag_udp_flood, flag_normal,
         ))
     except Exception:

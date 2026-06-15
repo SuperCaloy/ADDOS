@@ -6,13 +6,14 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 IF_DIR  = os.path.join(_ROOT, "models", "isolation_forest")
 RF_DIR  = os.path.join(_ROOT, "models", "random_forest")
 
-IF_MODEL_PATH    = os.path.join(IF_DIR, "isolation_forest.pkl")
-IF_SCALER_PATH   = os.path.join(IF_DIR, "scaler.pkl")
-IF_CONTRACT_PATH = os.path.join(IF_DIR, "feature_contract.json")
+IF_MODEL_PATH     = os.path.join(IF_DIR, "isolation_forest.pkl")
+IF_SCALER_PATH    = os.path.join(IF_DIR, "scaler.pkl")
+IF_QUANTILER_PATH = os.path.join(IF_DIR, "quantiler.pkl")
+IF_CONTRACT_PATH  = os.path.join(IF_DIR, "feature_contract.json")
 
-RF_MODEL_PATH    = os.path.join(RF_DIR, "random_forest_sdn_final.pkl")
+RF_MODEL_PATH    = os.path.join(RF_DIR, "random_forest_final.pkl")
 RF_SCALER_PATH   = os.path.join(RF_DIR, "scaler.pkl")
-RF_CONTRACT_PATH = os.path.join(RF_DIR, "rf_sdn_feature_contract.json")
+RF_CONTRACT_PATH = os.path.join(RF_DIR, "rf_feature_contract.json")
 RF_ENCODER_PATH  = os.path.join(RF_DIR, "label_encoder.pkl")
 
 # --- Database ---

@@ -4,6 +4,7 @@ import threading
 import datetime
 import collections
 from backend.mitigation.state_machine import state_machine
+from backend.mitigation.deception import deception
 from backend.database import writer
 from backend.pipeline import worker
 from backend.models import loader
@@ -135,7 +136,7 @@ def get_stats() -> dict:
         "total_packets":     total,
         "malicious_dropped": real_dropped,
         "normal_packets":    normal,
-        "active_threats":    len(state_machine.get_active_list()),
+        "active_threats":    len(state_machine.get_active_list()) + len(deception.get_active_list()),
         "fp_rate":           round((s["false_positives"] / max(s["ml_processed"], 1)) * 100, 2),
         "avg_latency_ms":    round(s["total_latency_ms"] / samples, 1),
     }
@@ -235,6 +236,10 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # ── Debug log — record every inference result ─────────────────────────────
     _pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
+
+    # update sinkhole PPS so observation window can escalate/release correctly
+    deception.update_pps(src_ip, _pps)
+
     _push_debug({
         "ts":          datetime.datetime.now().strftime("%H:%M:%S"),
         "src_ip":      src_ip,

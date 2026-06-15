@@ -26,9 +26,9 @@ MIN_QUARANTINE_CONFIDENCE = 0.60
 CONFIDENCE_LOCK_THRESHOLD = 0.80
 
 PHASE_LABELS = {
-    1: "Phase 1 — Quarantined",
-    2: "Phase 2 — Time Ban",
-    3: "Phase 3 — Blackhole",
+    1: "Quarantined",
+    2: "Time Ban",
+    3: "Blackhole",
     4: "Probation",
 }
 
@@ -190,12 +190,10 @@ class StateMachine:
                     pass
 
                 elif should_sinkhole(attack_class, confidence, phase=0):
-                    # Uncertain + low confidence → redirect to sinkhole for observation
-                    # Deception module manages these IPs — do NOT add to _states
                     log.info("Sinkhole: %s  vector=%s  conf=%.1f%%",
                              src_ip, attack_class, confidence * 100)
                     self._pending_sinkhole = (src_ip, attack_class, if_score, confidence)
-                    return "Sinkhole"
+                    # fall through to post-lock dispatch
 
                 else:
                     if _prio == "High":
@@ -259,7 +257,8 @@ class StateMachine:
                     state.attack_vector = attack_class
                 self._persist(state)
 
-            return state.action_taken
+            if state is not None:
+                return state.action_taken
 
         # ── Post-lock: sinkhole dispatch ──────────────────────────────
         pending = getattr(self, "_pending_sinkhole", None)
@@ -381,7 +380,7 @@ class StateMachine:
             "priority":        state.priority,
             "action_taken":    f"Time Ban ({ban_label})",
             "if_score":        state.if_score,
-            "phase":           "Phase 2 — Time Ban",
+            "phase":           "Time Ban",
             "is_manual":       False,
         })
 
@@ -420,7 +419,7 @@ class StateMachine:
             "priority":        state.priority,
             "action_taken":    "Blackhole",
             "if_score":        state.if_score,
-            "phase":           "Phase 3 — Blackhole",
+            "phase":           "Blackhole",
             "is_manual":       False,
         })
 

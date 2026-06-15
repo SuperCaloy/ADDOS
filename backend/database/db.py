@@ -145,7 +145,20 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             flag_syn_flood   INTEGER NOT NULL DEFAULT 0,
             flag_icmp_flood  INTEGER NOT NULL DEFAULT 0,
             flag_udp_flood   INTEGER NOT NULL DEFAULT 0,
-            flag_normal      INTEGER NOT NULL DEFAULT 0
+            flag_normal      INTEGER NOT NULL DEFAULT 0,
+
+            -- IF/RF contract features
+            flow_count_per_src    REAL,
+            tp_src                INTEGER,
+            tp_dst                INTEGER,
+            ip_proto              INTEGER,
+            flow_intensity        REAL,
+            port_entropy          REAL,
+            bytes_per_duration    REAL,
+            pkt_size_uniformity   REAL,
+            flow_src_intensity    REAL,
+            duration_pkt_ratio    REAL,
+            pkt_rate_per_duration REAL
         );
 
         CREATE INDEX IF NOT EXISTS idx_df_src_ip
@@ -273,6 +286,28 @@ def _migrate(conn: sqlite3.Connection) -> None:
             pass
         try:
             conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+
+    # IF/RF contract feature columns
+    df_new_cols = [
+        ("flow_count_per_src",    "REAL"),
+        ("tp_src",                "INTEGER"),
+        ("tp_dst",                "INTEGER"),
+        ("ip_proto",              "INTEGER"),
+        ("flow_intensity",        "REAL"),
+        ("port_entropy",          "REAL"),
+        ("bytes_per_duration",    "REAL"),
+        ("pkt_size_uniformity",   "REAL"),
+        ("flow_src_intensity",    "REAL"),
+        ("duration_pkt_ratio",    "REAL"),
+        ("pkt_rate_per_duration", "REAL"),
+    ]
+    for col, typ in df_new_cols:
+        try:
+            conn.execute(f"ALTER TABLE detection_features ADD COLUMN {col} {typ}")
             conn.commit()
         except sqlite3.OperationalError:
             pass

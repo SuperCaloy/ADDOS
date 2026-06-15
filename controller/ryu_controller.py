@@ -81,6 +81,9 @@ class FatTreeController(app_manager.RyuApp):
         self._switch_proto: dict = collections.defaultdict(lambda: collections.defaultdict(int))
         self._src_proto:    dict = collections.defaultdict(lambda: collections.defaultdict(int))
 
+        # Cache tp_src, tp_dst per src_ip for IF features
+        self._src_ports: dict[str, tuple[int, int]] = {}
+
         # PacketIn rate limiter — prevents OVS overload under rand-source floods
         self._pkt_in_rate: dict = {}
         self._PKT_IN_RATE_LIMIT = 150
@@ -254,6 +257,15 @@ class FatTreeController(app_manager.RyuApp):
             self._switch_proto[dpid][ip4.proto] += 1
             self._src_proto[dpid][src_ip] = ip4.proto
 
+        # Cache tp_src, tp_dst per src_ip for IF features
+        _tp_src = _tp_dst = 0
+        if tcp_pkt:
+            _tp_src, _tp_dst = tcp_pkt.src_port, tcp_pkt.dst_port
+        elif udp_pkt:
+            _tp_src, _tp_dst = udp_pkt.src_port, udp_pkt.dst_port
+        if _tp_src or _tp_dst:
+            self._src_ports[src_ip] = (_tp_src, _tp_dst)
+
         self._push({
             "type":          "packet_in",
             "dpid":          dpid,
@@ -346,6 +358,8 @@ class FatTreeController(app_manager.RyuApp):
         durations  = []
         dst_ips    = set()
         src_ips    = set()
+        # Count flows per src_ip for flow_count_per_src feature
+        _flow_count_per_src: dict[str, int] = collections.defaultdict(int)
 
         # Compute pkt_in rate then reset counter
         _rate_pkt_in_now = self._pkt_in_count.get(dpid, 0) / max(interval, 0.001)
@@ -401,6 +415,7 @@ class FatTreeController(app_manager.RyuApp):
                 continue
             if src_ip in _SKIP_SRC:  # skip server/sinkhole reply traffic
                 continue
+            _flow_count_per_src[src_ip] += 1
             if stat.packet_count == 0:
                 # no traffic yet -- avoids eps-division blowup in
                 # duration_pkt_ratio (IF feature), always-anomaly bug
@@ -429,6 +444,7 @@ class FatTreeController(app_manager.RyuApp):
             if not _flow_ip_proto:
                 _flow_ip_proto = int(self._src_proto[dpid].get(src_ip, 0))
 
+            _ports = self._src_ports.get(src_ip, (0, 0))
             self._push({
                 "type":       "flow_stats",
                 "dpid":       dpid,
@@ -446,6 +462,9 @@ class FatTreeController(app_manager.RyuApp):
                     "byte_count_per_second":    bps,
                     "byte_count_per_nsecond":   bpns,
                     "ip_proto":                 _flow_ip_proto,
+                    "tp_src":                   _ports[0],
+                    "tp_dst":                   _ports[1],
+                    "flow_count_per_src":       _flow_count_per_src[src_ip],
                 },
                 "switch_stats": self._build_switch_stats(dpid),
             })
@@ -526,6 +545,7 @@ class FatTreeController(app_manager.RyuApp):
             self._cooldown_intervals.clear()
             self._switch_proto.clear()
             self._src_proto.clear()
+            self._src_ports.clear()
             self._pkt_in_rate.clear()
             # Re-arm first-poll bypass so fresh flows pass young-flow gate on restart
             self._switch_first_poll.clear()
