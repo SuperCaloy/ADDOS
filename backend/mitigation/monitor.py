@@ -17,7 +17,9 @@ def _get_ctrl_metrics() -> tuple:
             if 'ryu-manager' in (proc.info['name'] or '') or \
                any('ryu-manager' in c for c in (proc.info['cmdline'] or [])):
                 # non-blocking — uses delta since last call, not a sleep
-                return (proc.cpu_percent(interval=None),
+                # divide by core count so % reflects total system, not one core
+                cpu_pct = proc.cpu_percent(interval=None) / psutil.cpu_count()
+                return (cpu_pct,
                         proc.memory_info().rss / (1024 * 1024))
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
