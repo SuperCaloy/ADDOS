@@ -1,9 +1,6 @@
 {
   "feature_names": [
     "flow_duration_sec",
-    "idle_timeout",
-    "hard_timeout",
-    "flags",
     "packet_count",
     "byte_count",
     "packet_count_per_second",
@@ -19,7 +16,7 @@
     "pkt_size_uniformity",
     "flow_src_intensity"
   ],
-  "n_features": 18,
+  "n_features": 15,
   "class_names": [
     "ICMP Flood",
     "SYN Flood",

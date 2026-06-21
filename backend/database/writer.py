@@ -441,6 +441,22 @@ def get_offense_count(src_ip: str) -> float:
         return 0.0
 
 
+def get_offense_total_count(src_ip: str) -> int:
+    # Raw count of past offenses for this IP — simple "caught N times".
+    try:
+        from backend.database.db import query
+        rows = query(
+            "SELECT COUNT(*) as cnt FROM ip_attack_history WHERE src_ip = ?",
+            (src_ip,)
+        )
+        if rows and rows[0]["cnt"] is not None:
+            return int(rows[0]["cnt"])
+        return 0
+    except Exception as exc:
+        log.warning("writer: failed to get offense total count for %s — %s", src_ip, exc)
+        return 0
+
+
 def get_ban_level(src_ip: str) -> int:
     # Returns the highest ban_level ever recorded for this IP in DB.
     # Used by behavioral to set starting ban level for returning offenders.
@@ -546,6 +562,24 @@ def get_if_metrics(start: str, end: str) -> dict:
         return {}
 
 
+def _calc_overall_from_confusion(cm: dict) -> dict:
+    """Micro-averaged Precision/Recall/F1/Accuracy from a 3x3 confusion matrix.
+
+    Standard approach for multi-class: with one predicted label per flow,
+    micro precision = micro recall = micro accuracy = overall correct / total.
+    """
+    correct = cm["syn_as_syn"] + cm["icmp_as_icmp"] + cm["udp_as_udp"]
+    total   = sum(cm.values())
+    acc     = correct / max(total, 1)
+
+    return {
+        "precision": round(acc * 100, 2),
+        "recall":    round(acc * 100, 2),
+        "f1":        round(acc * 100, 2),
+        "accuracy":  round(acc * 100, 2),
+    }
+
+
 def get_rf_metrics(start: str, end: str) -> dict:
     """RF-level metrics — overall + per-class (SYN/ICMP/UDP)."""
     try:
@@ -566,22 +600,30 @@ def get_rf_metrics(start: str, end: str) -> dict:
         """, (f"{start} 00:00:00", f"{end} 23:59:59"))
         r = rows[0] if rows else {}
         g = lambda k: float(r.get(k) or 0)
+
+        # confusion matrix cells (3x3, classified flows only)
+        cm = {
+            "syn_as_syn":   int(g("tp_syn")),
+            "syn_as_icmp":  int(g("syn_as_icmp")),
+            "syn_as_udp":   int(g("syn_as_udp")),
+            "icmp_as_syn":  int(g("icmp_as_syn")),
+            "icmp_as_icmp": int(g("tp_icmp")),
+            "icmp_as_udp":  int(g("icmp_as_udp")),
+            "udp_as_syn":   int(g("udp_as_syn")),
+            "udp_as_icmp":  int(g("udp_as_icmp")),
+            "udp_as_udp":   int(g("tp_udp")),
+        }
+
+        # overall = micro-averaged directly from the matrix above
+        # (correct + total classified), not from the separate rf_tp/fp/tn/fn counters
+        overall = _calc_overall_from_confusion(cm)
+
         return {
-            "overall": _calc_metrics(g("tp"), g("fp"), g("tn"), g("fn")),
+            "overall": overall,
             "syn":     _calc_metrics(g("tp_syn"),  g("fp_syn"),  g("tn_syn"),  g("fn_syn")),
             "icmp":    _calc_metrics(g("tp_icmp"), g("fp_icmp"), g("tn_icmp"), g("fn_icmp")),
             "udp":     _calc_metrics(g("tp_udp"),  g("fp_udp"),  g("tn_udp"),  g("fn_udp")),
-            "confusion": {
-                "syn_as_syn":   int(g("tp_syn")),
-                "syn_as_icmp":  int(g("syn_as_icmp")),
-                "syn_as_udp":   int(g("syn_as_udp")),
-                "icmp_as_syn":  int(g("icmp_as_syn")),
-                "icmp_as_icmp": int(g("tp_icmp")),
-                "icmp_as_udp":  int(g("icmp_as_udp")),
-                "udp_as_syn":   int(g("udp_as_syn")),
-                "udp_as_icmp":  int(g("udp_as_icmp")),
-                "udp_as_udp":   int(g("tp_udp")),
-            },
+            "confusion": cm,
         }
     except Exception:
         log.exception("Failed to compute RF metrics")

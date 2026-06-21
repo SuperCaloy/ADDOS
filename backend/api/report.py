@@ -292,14 +292,14 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     if_data = [
         ["Metric", "Value", "Description"],
-        ["Precision",                f"{if_m.get('precision',0):.2f}%",  "Flagged anomalies that were true attacks"],
-        ["Recall (TPR)",             f"{if_m.get('recall',0):.2f}%",     "Attacks correctly flagged as anomalies"],
-        ["F1-Score",                 f"{if_m.get('f1',0):.2f}%",         "Harmonic mean of Precision and Recall"],
-        ["Accuracy",                 f"{if_m.get('accuracy',0):.2f}%",   "Overall correct anomaly decisions"],
-        ["False Positive Rate (FPR)",f"{if_m.get('fpr',0):.2f}%",        "Normal traffic incorrectly flagged"],
-        ["False Negative Rate (FNR)",f"{if_m.get('fnr',0):.2f}%",        "Attacks that bypassed anomaly detection"],
-        ["True Positive Rate (TPR)", f"{if_m.get('tpr',0):.2f}%",        "Proportion of attacks correctly flagged"],
-        ["True Negative Rate (TNR)", f"{if_m.get('tnr',0):.2f}%",        "Normal traffic correctly passed"],
+        ["Precision",                f"{if_m.get('precision',0):.2f}%",  "Share of flagged anomalies that were genuine attacks"],
+        ["Recall (TPR)",             f"{if_m.get('recall',0):.2f}%",     "Share of actual attacks successfully flagged"],
+        ["F1-Score",                 f"{if_m.get('f1',0):.2f}%",         "Balanced measure combining Precision and Recall"],
+        ["Accuracy",                 f"{if_m.get('accuracy',0):.2f}%",   "Overall proportion of correct anomaly decisions"],
+        ["False Positive Rate (FPR)",f"{if_m.get('fpr',0):.2f}%",        "Normal traffic incorrectly flagged as an attack"],
+        ["False Negative Rate (FNR)",f"{if_m.get('fnr',0):.2f}%",        "Actual attacks that went undetected"],
+        ["True Positive Rate (TPR)", f"{if_m.get('tpr',0):.2f}%",        "Same measure as Recall, attacks correctly flagged"],
+        ["True Negative Rate (TNR)", f"{if_m.get('tnr',0):.2f}%",        "Normal traffic correctly identified as safe"],
     ]
     story.append(_bench_table(if_data))
     story.append(Spacer(1, 0.3*cm))
@@ -348,14 +348,10 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     rf_data = [
         ["Metric", "Value", "Description"],
-        ["Precision",                f"{rf_o.get('precision',0):.2f}%",  "Correctly classified attacks out of all flagged"],
-        ["Recall (TPR)",             f"{rf_o.get('recall',0):.2f}%",     "Attacks correctly classified by type"],
-        ["F1-Score",                 f"{rf_o.get('f1',0):.2f}%",         "Harmonic mean of Precision and Recall"],
-        ["Accuracy",                 f"{rf_o.get('accuracy',0):.2f}%",   "Overall correct attack type classifications"],
-        ["False Positive Rate (FPR)",f"{rf_o.get('fpr',0):.2f}%",        "Wrong attack type flagged"],
-        ["False Negative Rate (FNR)",f"{rf_o.get('fnr',0):.2f}%",        "Attacks misclassified or missed"],
-        ["True Positive Rate (TPR)", f"{rf_o.get('tpr',0):.2f}%",        "Proportion of attacks correctly classified"],
-        ["True Negative Rate (TNR)", f"{rf_o.get('tnr',0):.2f}%",        "Non-matching classes correctly excluded"],
+        ["Precision",  f"{rf_o.get('precision',0):.2f}%", "Share of classified flows assigned the correct attack type"],
+        ["Recall",     f"{rf_o.get('recall',0):.2f}%",    "Share of attacks of each type that were correctly identified"],
+        ["F1-Score",   f"{rf_o.get('f1',0):.2f}%",        "Balanced measure combining Precision and Recall"],
+        ["Accuracy",   f"{rf_o.get('accuracy',0):.2f}%",  "Overall proportion of correct classifications"],
     ]
     rf_tbl = Table(rf_data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
     rf_tbl.setStyle(TableStyle([
@@ -435,22 +431,22 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
          "Avg time from detection to release"],
         # Backend
         ["Backend CPU (Baseline)",                  f"{sys.get('baseline_cpu',0):.2f}%",
-         "Detection backend CPU — normal traffic"],
+         "Detection backend CPU usage under normal traffic"],
         ["Backend CPU (Active Attack)",             f"{sys.get('attack_cpu',0):.2f}%",
-         "Detection backend CPU — DDoS simulation"],
+         "Detection backend CPU usage during a DDoS simulation"],
         ["Backend Memory (Baseline)",               f"{sys.get('baseline_mem',0):.1f} MB",
-         "Detection backend memory — normal traffic"],
+         "Detection backend memory usage under normal traffic"],
         ["Backend Memory (Active Attack)",          f"{sys.get('attack_mem',0):.1f} MB",
-         "Detection backend memory — DDoS simulation"],
+         "Detection backend memory usage during a DDoS simulation"],
         # Controller
         ["Controller CPU (Baseline)",               f"{sys.get('baseline_ctrl_cpu',0):.2f}%",
-         "Ryu controller CPU — normal traffic"],
+         "Ryu controller CPU usage under normal traffic"],
         ["Controller CPU (Active Attack)",          f"{sys.get('attack_ctrl_cpu',0):.2f}%",
-         "Ryu controller CPU — DDoS simulation"],
+         "Ryu controller CPU usage during a DDoS simulation"],
         ["Controller Memory (Baseline)",            f"{sys.get('baseline_ctrl_mem',0):.1f} MB",
-         "Ryu controller memory — normal traffic"],
+         "Ryu controller memory usage under normal traffic"],
         ["Controller Memory (Active Attack)",       f"{sys.get('attack_ctrl_mem',0):.1f} MB",
-         "Ryu controller memory — DDoS simulation"],
+         "Ryu controller memory usage during a DDoS simulation"],
         # Combined
         ["Combined Memory Overhead (Attack)",
          f"{sys.get('attack_mem',0) + sys.get('attack_ctrl_mem',0):.1f} MB",
