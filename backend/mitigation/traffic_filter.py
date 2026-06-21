@@ -41,11 +41,9 @@ SINKHOLE_CONFIDENCE_THRESHOLD = 0.70
 
 
 def resolve_phase1_actions(priority: str) -> list[str]:
-    # Both quarantine + rate_limit sent simultaneously on Phase 1 entry.
-    # quarantine (90): aggressive drop
-    # rate_limit (80): secondary containment
-    # priority reserved for future per-severity tuning
-    return [ACTION_QUARANTINE, ACTION_RATE_LIMIT]
+    # Phase 1 observation: throttle, don't drop.
+    # Lets us watch the IP without fully cutting off possibly-legit traffic.
+    return [ACTION_RATE_LIMIT]
 
 
 def resolve_ban_action(ban_duration_sec: int) -> tuple[str, int]:

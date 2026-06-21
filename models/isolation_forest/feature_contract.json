@@ -1,7 +1,6 @@
 {
   "feature_names": [
     "flow_duration_sec",
-    "flags",
     "packet_count",
     "byte_count",
     "packet_count_per_second",
@@ -18,8 +17,8 @@
     "pkt_size_uniformity",
     "flow_src_intensity"
   ],
-  "n_features": 17,
-  "threshold": 0.6066441375941327,
+  "n_features": 16,
+  "threshold": 0.6052241858026261,
   "score_sign": "negated",
   "score_formula": "if_score = -model.score_samples(X)",
   "anomaly_rule": "is_anomaly = (if_score >= threshold)",
