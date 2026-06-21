@@ -666,11 +666,13 @@ def get_system_metrics_avg(start: str, end: str) -> dict:
 
 
 def get_system_metrics_attack_vs_baseline(start: str, end: str) -> dict:
-    """Returns avg CPU/mem (backend + controller) during attack vs baseline."""
+    """Returns avg and peak CPU/mem (system + controller) during attack vs baseline."""
     try:
         attack = query("""
             SELECT AVG(cpu_percent) as cpu, AVG(mem_mb) as mem,
-                   AVG(ctrl_cpu_percent) as ctrl_cpu, AVG(ctrl_mem_mb) as ctrl_mem
+                   AVG(ctrl_cpu_percent) as ctrl_cpu, AVG(ctrl_mem_mb) as ctrl_mem,
+                   MAX(cpu_percent) as cpu_peak, MAX(mem_mb) as mem_peak,
+                   MAX(ctrl_cpu_percent) as ctrl_cpu_peak, MAX(ctrl_mem_mb) as ctrl_mem_peak
             FROM system_metrics
             WHERE timestamp >= ? AND timestamp <= ? AND is_attack = 1
         """, (f"{start} 00:00:00", f"{end} 23:59:59"))
@@ -689,6 +691,10 @@ def get_system_metrics_attack_vs_baseline(start: str, end: str) -> dict:
             "attack_mem":        round(float(a.get("mem")      or 0), 2),
             "attack_ctrl_cpu":   round(float(a.get("ctrl_cpu") or 0), 2),
             "attack_ctrl_mem":   round(float(a.get("ctrl_mem") or 0), 2),
+            "attack_cpu_peak":      round(float(a.get("cpu_peak")      or 0), 2),
+            "attack_mem_peak":      round(float(a.get("mem_peak")      or 0), 2),
+            "attack_ctrl_cpu_peak": round(float(a.get("ctrl_cpu_peak") or 0), 2),
+            "attack_ctrl_mem_peak": round(float(a.get("ctrl_mem_peak") or 0), 2),
             "baseline_cpu":      round(float(b.get("cpu")      or 0), 2),
             "baseline_mem":      round(float(b.get("mem")      or 0), 2),
             "baseline_ctrl_cpu": round(float(b.get("ctrl_cpu") or 0), 2),
