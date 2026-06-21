@@ -304,8 +304,8 @@
   /* Poll system metrics every 5s, model accuracy every 30s */
   fetchSystemMetrics();
   pollModelInfo();
-  setInterval(fetchSystemMetrics, 5000);
-  setInterval(pollModelInfo, 5000);
+  setInterval(fetchSystemMetrics, 1000);
+  setInterval(pollModelInfo, 1000);
 </script>
 <script src="/static/ip-drawer.js"></script>
 </body>

@@ -1,72 +1,54 @@
-/* frontend/static/ip-drawer.js
-   IP Threat Analysis Drawer — modular, self-contained.
-   Depends on: window.API_URL (set by dashboard.html), showToast, _qRows
-   Exposes:    window.openIpDrawer(ip), window.closeIpDrawer()
-
-   Live mode:  polls /api/ip_detail/<ip>/live every 2s while drawer open + IP active.
-               Auto-stops on 404 (IP released), switches to DB data.
-   DB mode:    single fetch from /api/ip_detail/<ip>, shows HISTORICAL badge.
-*/
-
-// ── Feature tooltips — only real model inputs (IF + RF contracts) ─────────────
+// Plain-language explanations — no jargon, for non-technical users
 const _FEAT_TOOLTIPS = {
-  "Flow Rate (pps)":    "IF: packet_count_per_second | RF: pkt_per_interval\nPackets/sec from this source. Normal: 1-100 pps. Attack: 1,000-100,000+ pps.",
-  "Byte Rate":          "IF: byte_count_per_second | RF: byte_per_interval\nBandwidth from this source. ICMP stays moderate (84B x pps). UDP spikes high.",
-  "Duration (s)":       "IF: flow_duration_sec + flow_duration_total_ns\nFlow age. SYN floods are very short (no handshake). ICMP/UDP floods are long.",
-  "Bytes / Packet":     "IF: bytes_per_packet (engineered) | RF: bytes_per_packet_raw + mean_byte_raw\nAvg packet size. ICMP ~84B fixed. SYN ~60B fixed. UDP large/variable.",
-  "Packet Count":       "IF: packet_count (log1p scaled)\nTotal packets seen. IF uses log-transformed count to detect volume anomalies.",
-  "Byte Count":         "IF: byte_count (log1p scaled)\nTotal bytes seen. Combined with packet count to derive rates and bytes/packet ratio.",
+  "Flow Rate (pps)": "Packets transmitted per second for this flow. Flood attacks are characterized by abnormally high packet rates compared to legitimate traffic baselines.",
+  "Byte Rate":       "Volume of data transmitted per second. A sharp increase indicates potential bandwidth exhaustion, a primary goal of volumetric DDoS attacks.",
+  "Bytes / Packet":  "Average packet size (byte count ÷ packet count). Each attack type tends to produce a consistent packet size signature, useful for classification.",
+  "Port Entropy":    "Ratio of source port activity to destination port activity. UDP floods often spray traffic across many ports, producing a distinct ratio compared to normal traffic.",
+  "Pkt Size Uniformity": "A model-derived measure of how consistent packet sizes are within this flow. SYN packets carry no payload, so a SYN flood produces near-identical packet sizes, a low, tightly clustered value here.",
+  "Packet Count":    "Cumulative packets observed in this flow. Rapid accumulation within a short window is a strong indicator of flooding behavior.",
+  "Byte Count":      "Cumulative data volume observed in this flow, in bytes.",
 };
 
-// ── Attack context — compact signal table per attack class ────────────────────
+// ── Attack summaries — plain language, per attack type ─────
 const _ATTACK_CONTEXT = {
   "ICMP Flood": {
     color: 'var(--red,#ff3d5a)',
-    desc: 'Continuous echo requests exhaust CPU processing replies.',
+    desc: 'An ICMP Flood overwhelms the target with a high volume of ping (echo request) packets, consuming bandwidth and processing resources until legitimate traffic can no longer be served.',
     rows: [
-      ['Flow Rate (pps)', 'Very high', '1,000-100,000+ pps'],
-      ['Byte Rate',       'Moderate',  '84B x pps'],
-      ['Duration (s)',    'Long',      'Sustained until blocked'],
-      ['Bytes / Packet',  'Fixed ~84B','ICMP echo fixed size'],
+      ['Flow Rate (pps)', 'Very high', 'Sending way more pings than normal'],
+      ['Byte Rate',       'Moderate',  'Small messages, but a lot of them'],
+      ['Bytes / Packet',  'Fixed size','Matches a typical ping packet'],
     ],
-    normal: 'Normal: <5 pps, <500 B/s',
   },
   "SYN Flood": {
     color: 'var(--red,#ff3d5a)',
-    desc: 'SYN without ACK fills connection table with half-open entries.',
+    desc: 'A SYN Flood exploits the TCP three-way handshake by initiating many connections without completing them, exhausting the server\'s connection table and denying service to legitimate users.',
     rows: [
-      ['Flow Rate (pps)', 'Very high', '1,000-50,000+ pps'],
-      ['Duration (s)',    'Very short','<1s per flow, no handshake'],
-      ['Bytes / Packet',  'Fixed ~60B','IP + TCP SYN only'],
-      ['Byte Rate',       'Low',       'Small packets despite high pps'],
+      ['Flow Rate (pps)', 'Very high', 'Opening connections rapidly'],
+      ['Bytes / Packet',  'Small',     'Just a connection request, no data'],
+      ['Byte Rate',       'Low',       'Small packets despite the high rate'],
     ],
-    normal: 'Normal TCP: 1-50 pps, 1-60s duration, 200-1500B/pkt',
   },
   "UDP Flood": {
     color: 'var(--amber,#ffb02e)',
-    desc: 'High-volume UDP datagrams, no handshake, large variable payloads.',
+    desc: 'A UDP Flood sends a high volume of connectionless packets to random or targeted ports, forcing the target to process and respond to traffic that consumes bandwidth with no legitimate purpose.',
     rows: [
-      ['Byte Rate',       'Very high', 'MB/s range'],
-      ['Bytes / Packet',  'Large',     '200-1400B variable'],
-      ['Flow Rate (pps)', 'High',      'Lower than SYN/ICMP'],
-      ['Duration (s)',    'Moderate',  'Longer than SYN (no expiry)'],
+      ['Byte Rate',       'Very high', 'Sending a lot of data quickly'],
+      ['Bytes / Packet',  'Large',     'Each message carries more data'],
+      ['Flow Rate (pps)', 'High',      'Frequent messages'],
     ],
-    normal: 'Normal UDP: <50 pps, <5 KB/s',
   },
   "Anomalous": {
     color: 'var(--sub2,#8890b0)',
-    desc: 'IF flagged out-of-distribution. RF could not match a known flood class.',
+    desc: 'Traffic deviates from the established normal baseline but does not match a known attack signature with sufficient confidence for classification.',
     rows: [
-      ['Flow Rate (pps)', 'Elevated',  'Above normal distribution'],
-      ['Duration (s)',    'Abnormal',  'Too short or too long'],
+      ['Flow Rate (pps)', 'Elevated',  'Higher than typical traffic'],
     ],
-    normal: 'Check IF score vs threshold. RF conf < 50% = unclassified.',
   },
   "Uncertain": {
     color: 'var(--sub,#5c6080)',
-    desc: 'RF confidence below 50% gate. Check IF score to confirm anomaly.',
+    desc: 'The anomaly detector flagged this traffic, but classifier confidence fell below the threshold required to assign a specific attack label.',
     rows: [],
-    normal: 'IF score above threshold = anomalous but unclassified.',
   },
 };
 
@@ -149,9 +131,13 @@ const _ATTACK_CONTEXT = {
     <div id="idd-content" style="display:none;flex:1;overflow-y:auto;padding:18px 22px 36px">
 
       <!-- Verdict banner -->
-      <div id="idd-verdict" style="border-radius:9px;padding:11px 15px;margin-bottom:16px;
+      <div id="idd-verdict" style="border-radius:9px;padding:11px 15px;margin-bottom:8px;
            font-size:12px;font-family:var(--mono,'Space Mono',monospace);font-weight:700;
            display:flex;align-items:center;gap:8px;letter-spacing:.02em"></div>
+
+      <!-- Attack description -->
+      <div id="idd-desc" style="font-size:12px;line-height:1.6;color:var(--sub2,#6b7190);
+           margin-bottom:16px"></div>
 
       <!-- State pills -->
       <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#9499b7);
@@ -328,13 +314,13 @@ async function _fetchIpDetail(ip) {
       const fallback = {
         src_ip: ip, is_live: false,
         features: { pkt_count:0, pps:0, byte_rate:0, duration_sec:0,
-                    byte_count:0 },
+                    byte_count:0, port_entropy:0 },
         ml:    { if_score: parseFloat(cells[3]?.textContent)||0,
                  is_anomaly: true,
                  attack_class: cells[2]?.textContent.trim()||'--',
                  confidence: parseFloat(cells[4]?.textContent)||0 },
         state: { phase:'--', priority:'--', action_taken:'Quarantined',
-                 offence_count:0, ban_level:0, first_seen:null },
+                 offence_count:0, reputation_score:0, ban_level:0, first_seen:null },
         thresholds: { if_threshold:null, rf_conf_gate:null },
         phase_history: [],
       };
@@ -407,7 +393,7 @@ function _renderIpDetail(d) {
   const isAnomaly = ml.is_anomaly;
   const acColor   = isAnomaly ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)';
   const verdict   = document.getElementById('idd-verdict');
-  verdict.style.cssText = `border-radius:9px;padding:11px 15px;margin-bottom:16px;font-size:12px;
+  verdict.style.cssText = `border-radius:9px;padding:11px 15px;margin-bottom:8px;font-size:12px;
     font-family:var(--mono,'Space Mono',monospace);font-weight:700;
     display:flex;align-items:center;gap:8px;letter-spacing:.02em;
     background:${isAnomaly ? 'rgba(255,61,90,.07)' : 'rgba(0,214,143,.07)'};
@@ -419,6 +405,11 @@ function _renderIpDetail(d) {
        ${ml.attack_class || 'Unknown'}`
     : `<span style="font-size:12px;font-weight:900;letter-spacing:.06em">NORMAL TRAFFIC</span>`;
 
+  /* Attack description line */
+  const descEl = document.getElementById('idd-desc');
+  const ctx = _ATTACK_CONTEXT[ml.attack_class];
+  descEl.textContent = isAnomaly && ctx ? ctx.desc : '';
+
   _renderFeatureSignals(f, ml.attack_class);
   _renderMlBars(ml, th);
   _renderPipeline(d, ml, st, isAnomaly);
@@ -429,65 +420,68 @@ function _renderIpDetail(d) {
 
 // ── IF/RF signal thresholds per attack class (based on Juniper + research) ────
 
+// ── Feature thresholds per attack type ──────────────────────
+// Each entry: which raw value to read, how to format it, and
+// when to flag it red (alert). No subtext — keep cards simple.
 const _SIGNAL_CONFIG = {
   "ICMP Flood": {
     if: [
-      { key:'pps',         label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,   normal:'Normal: <100 pps',      bar: v => Math.min(v/50000,1) },
-      { key:'byte_rate',   label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 51200, normal:'Normal: <50 KB/s',       bar: v => Math.min(v/1e7,1)   },
-      { key:'duration_sec',label:'Duration (s)',      fmt: v => v.toFixed(1)+'s',                                                alert: v => false,     normal:'ICMP: sustained long',   bar: v => Math.min(v/300,1)   },
+      { key:'pps',          label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,   bar: v => Math.min(v/50000,1) },
+      { key:'byte_rate',    label:'Byte Rate',       fmt: v => _fmtBytes(v),                                                     alert: v => v > 51200, bar: v => Math.min(v/1e7,1)   },
+      { key:'bpp',          label:'Bytes / Packet',  fmt: v => v.toFixed(1)+' B',                                                alert: v => v > 0 && v < 100, bar: v => Math.min(v/1500,1) },
     ],
     rf: [
-      { key:'bpp',         label:'Bytes / Packet',   fmt: v => v.toFixed(1)+' B',  alert: v => v > 0 && v < 100, normal:'ICMP fixed ~84B fingerprint', bar: v => Math.min(v/1500,1) },
-      { key:'pkt_count',   label:'Packet Count',     fmt: v => v.toLocaleString(), alert: v => v > 10000,        normal:'Normal: <10,000',             bar: v => Math.min(v/1e6,1)  },
-      { key:'byte_count',  label:'Byte Count',       fmt: v => _fmtBytes(v),       alert: v => v > 1e6,          normal:'Normal: <1 MB',               bar: v => Math.min(v/1e9,1)  },
+      { key:'bpp',        label:'Bytes / Packet', fmt: v => v.toFixed(1)+' B',  alert: v => v > 0 && v < 100, bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',  label:'Packet Count',   fmt: v => v.toLocaleString(), alert: v => v > 10000,        bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count', label:'Byte Count',     fmt: v => _fmtBytes(v),       alert: v => v > 1e6,          bar: v => Math.min(v/1e9,1)  },
     ],
   },
   "SYN Flood": {
     if: [
-      { key:'pps',         label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,  normal:'Normal: <50 pps',        bar: v => Math.min(v/50000,1) },
-      { key:'duration_sec',label:'Duration (s)',     fmt: v => v.toFixed(1)+'s',                                                alert: v => v < 1,    normal:'SYN: <1s = no handshake', bar: v => Math.min(v/300,1)   },
-      { key:'byte_rate',   label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 5120, normal:'Low: small packets',      bar: v => Math.min(v/1e7,1)   },
+      { key:'pps',          label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,  bar: v => Math.min(v/50000,1) },
+      { key:'pkt_size_uniformity', label:'Pkt Size Uniformity', fmt: v => v.toFixed(3), alert: v => v < 0.05, bar: v => Math.min(v/0.5,1) },
+      { key:'byte_rate',    label:'Byte Rate',       fmt: v => _fmtBytes(v),                                                     alert: v => v > 5120, bar: v => Math.min(v/1e7,1)   },
     ],
     rf: [
-      { key:'bpp',         label:'Bytes / Packet',   fmt: v => v.toFixed(1)+' B',  alert: v => v > 0 && v < 70, normal:'SYN fixed ~60B fingerprint', bar: v => Math.min(v/1500,1) },
-      { key:'pkt_count',   label:'Packet Count',     fmt: v => v.toLocaleString(), alert: v => v > 10000,       normal:'Normal: <10,000',            bar: v => Math.min(v/1e6,1)  },
-      { key:'byte_count',  label:'Byte Count',       fmt: v => _fmtBytes(v),       alert: v => v > 1e6,         normal:'Normal: <1 MB',              bar: v => Math.min(v/1e9,1)  },
+      { key:'bpp',        label:'Bytes / Packet', fmt: v => v.toFixed(1)+' B',  alert: v => v > 0 && v < 70, bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',  label:'Packet Count',   fmt: v => v.toLocaleString(), alert: v => v > 10000,       bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count', label:'Byte Count',     fmt: v => _fmtBytes(v),       alert: v => v > 1e6,         bar: v => Math.min(v/1e9,1)  },
     ],
   },
   "UDP Flood": {
     if: [
-      { key:'byte_rate',   label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 512000, normal:'Normal UDP: <500 KB/s',  bar: v => Math.min(v/1e7,1)   },
-      { key:'pps',         label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,    normal:'Normal: <50 pps',         bar: v => Math.min(v/50000,1) },
-      { key:'duration_sec',label:'Duration (s)',     fmt: v => v.toFixed(1)+'s',                                                alert: v => false,      normal:'UDP: moderate duration',  bar: v => Math.min(v/300,1)   },
+      { key:'byte_rate',    label:'Byte Rate',       fmt: v => _fmtBytes(v),                                                     alert: v => v > 512000, bar: v => Math.min(v/1e7,1)   },
+      { key:'pps',          label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,    bar: v => Math.min(v/50000,1) },
+      { key:'port_entropy', label:'Port Entropy',    fmt: v => v.toFixed(2),                                                     alert: v => v > 1,      bar: v => Math.min(v/5,1)     },
     ],
     rf: [
-      { key:'bpp',         label:'Bytes / Packet',   fmt: v => v.toFixed(1)+' B',  alert: v => v > 200,  normal:'UDP large: 200-1400B',  bar: v => Math.min(v/1500,1) },
-      { key:'pkt_count',   label:'Packet Count',     fmt: v => v.toLocaleString(), alert: v => v > 10000,normal:'Normal: <10,000',        bar: v => Math.min(v/1e6,1)  },
-      { key:'byte_count',  label:'Byte Count',       fmt: v => _fmtBytes(v),       alert: v => v > 1e6,  normal:'Normal: <1 MB',         bar: v => Math.min(v/1e9,1)  },
+      { key:'bpp',        label:'Bytes / Packet', fmt: v => v.toFixed(1)+' B',  alert: v => v > 200,   bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',  label:'Packet Count',   fmt: v => v.toLocaleString(), alert: v => v > 10000, bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count', label:'Byte Count',     fmt: v => _fmtBytes(v),       alert: v => v > 1e6,   bar: v => Math.min(v/1e9,1)  },
     ],
   },
   "Anomalous": {
     if: [
-      { key:'pps',         label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,  normal:'Normal: <100 pps', bar: v => Math.min(v/50000,1) },
-      { key:'duration_sec',label:'Duration (s)',     fmt: v => v.toFixed(1)+'s',                                                alert: v => false,    normal:'Check flow age',   bar: v => Math.min(v/300,1)   },
-      { key:'byte_rate',   label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 51200,normal:'Normal: <50 KB/s', bar: v => Math.min(v/1e7,1)   },
+      { key:'pps',          label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,   bar: v => Math.min(v/50000,1) },
+      { key:'bpp',          label:'Bytes / Packet',  fmt: v => v.toFixed(1)+' B',                                                alert: v => false,     bar: v => Math.min(v/1500,1)  },
+      { key:'byte_rate',    label:'Byte Rate',       fmt: v => _fmtBytes(v),                                                     alert: v => v > 51200, bar: v => Math.min(v/1e7,1)   },
     ],
     rf: [
-      { key:'bpp',        label:'Bytes / Packet',  fmt: v => v.toFixed(1)+' B',  alert: v => false,    normal:'Check packet size', bar: v => Math.min(v/1500,1) },
-      { key:'pkt_count',  label:'Packet Count',    fmt: v => v.toLocaleString(), alert: v => v > 10000,normal:'Normal: <10,000',   bar: v => Math.min(v/1e6,1)  },
-      { key:'byte_count', label:'Byte Count',      fmt: v => _fmtBytes(v),       alert: v => v > 1e6,  normal:'Normal: <1 MB',    bar: v => Math.min(v/1e9,1)  },
+      { key:'bpp',        label:'Bytes / Packet', fmt: v => v.toFixed(1)+' B',  alert: v => false,     bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',  label:'Packet Count',   fmt: v => v.toLocaleString(), alert: v => v > 10000, bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count', label:'Byte Count',     fmt: v => _fmtBytes(v),       alert: v => v > 1e6,   bar: v => Math.min(v/1e9,1)  },
     ],
   },
   "Uncertain": {
     if: [
-      { key:'pps',        label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,  normal:'Normal: <100 pps', bar: v => Math.min(v/50000,1) },
-      { key:'byte_rate',  label:'Byte Rate',        fmt: v => _fmtBytes(v),                                                    alert: v => v > 51200,normal:'Normal: <50 KB/s', bar: v => Math.min(v/1e7,1)   },
-      { key:'duration_sec',label:'Duration (s)',    fmt: v => v.toFixed(1)+'s',                                                alert: v => false,    normal:'Check flow age',   bar: v => Math.min(v/300,1)   },
+      { key:'pps',          label:'Flow Rate (pps)', fmt: v => `${v.toLocaleString(undefined,{maximumFractionDigits:1})} pkt/s`, alert: v => v > 500,   bar: v => Math.min(v/50000,1) },
+      { key:'byte_rate',    label:'Byte Rate',       fmt: v => _fmtBytes(v),                                                     alert: v => v > 51200, bar: v => Math.min(v/1e7,1)   },
+      { key:'bpp',          label:'Bytes / Packet',  fmt: v => v.toFixed(1)+' B',                                                alert: v => false,     bar: v => Math.min(v/1500,1)  },
     ],
     rf: [
-      { key:'bpp',        label:'Bytes / Packet',  fmt: v => v.toFixed(1)+' B',  alert: v => false,    normal:'Check packet size', bar: v => Math.min(v/1500,1) },
-      { key:'pkt_count',  label:'Packet Count',    fmt: v => v.toLocaleString(), alert: v => v > 10000,normal:'Normal: <10,000',   bar: v => Math.min(v/1e6,1)  },
-      { key:'byte_count', label:'Byte Count',      fmt: v => _fmtBytes(v),       alert: v => v > 1e6,  normal:'Normal: <1 MB',    bar: v => Math.min(v/1e9,1)  },
+      { key:'bpp',        label:'Bytes / Packet', fmt: v => v.toFixed(1)+' B',  alert: v => false,     bar: v => Math.min(v/1500,1) },
+      { key:'pkt_count',  label:'Packet Count',   fmt: v => v.toLocaleString(), alert: v => v > 10000, bar: v => Math.min(v/1e6,1)  },
+      { key:'byte_count', label:'Byte Count',     fmt: v => _fmtBytes(v),       alert: v => v > 1e6,   bar: v => Math.min(v/1e9,1)  },
     ],
   },
 };
@@ -522,9 +516,7 @@ function _mkSignalCard(feat, val, isIF) {
         ${tag}
       </div>
       <div style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
-           color:${valCol};margin-bottom:3px">${feat.fmt(val)}</div>
-      <div style="font-size:9px;color:var(--sub,#9499b7);
-           font-family:var(--mono,'Space Mono',monospace);margin-bottom:5px">${feat.normal}</div>
+           color:${valCol};margin-bottom:6px">${feat.fmt(val)}</div>
       <div style="height:2px;background:var(--border2,#e2e4ed);border-radius:1px;overflow:hidden">
         <div style="height:100%;width:${barPct}%;
              background:${isAlert ? 'var(--red,#ff3d5a)' : accentCol};
@@ -547,6 +539,8 @@ function _renderFeatureSignals(f, attackClass) {
     pkt_count:   pktCount,
     byte_count:  bytCount,
     bpp:         bpp,
+    port_entropy:f.port_entropy || 0,
+    pkt_size_uniformity: f.pkt_size_uniformity || 0,
   };
 
   const cfg = _SIGNAL_CONFIG[attackClass] || _SIGNAL_CONFIG['Uncertain'];
@@ -741,7 +735,10 @@ function _renderHistoryPills(st) {
   /* offence_count: always show numeric value even if 0 */
   pills.push(['Offences', String(st.offence_count != null ? st.offence_count : 0), 'var(--red,#ff3d5a)']);
 
-  if (st.ban_level)  pills.push(['Ban Level',  st.ban_level,           'var(--amber,#ffb02e)']);
+  /* reputation_score: decay-weighted risk score, always show */
+  const rep = st.reputation_score != null ? st.reputation_score : 0;
+  pills.push(['Reputation', rep.toFixed(2), 'var(--purple,#a855f7)']);
+
   if (st.action_taken && st.action_taken !== '--')
                      pills.push(['Action',     st.action_taken,        'var(--sub2,#6b7190)']);
 

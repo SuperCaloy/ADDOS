@@ -83,6 +83,7 @@ class FatTreeController(app_manager.RyuApp):
 
         # Cache tp_src, tp_dst per src_ip for IF features
         self._src_ports: dict[str, tuple[int, int]] = {}
+        self._src_proto_global: dict[str, int] = {}  # fallback: ip -> proto across all dpids
 
         # PacketIn rate limiter — prevents OVS overload under rand-source floods
         self._pkt_in_rate: dict = {}
@@ -255,7 +256,14 @@ class FatTreeController(app_manager.RyuApp):
         # Track per-IP protocol for RF classification
         if ip4.proto:
             self._switch_proto[dpid][ip4.proto] += 1
-            self._src_proto[dpid][src_ip] = ip4.proto
+            # TCP(6)/UDP(17) take priority over ICMP(1) — prevents warmup ping overwriting real proto
+            cur = self._src_proto[dpid].get(src_ip, 0)
+            if ip4.proto in (6, 17) or cur == 0:
+                self._src_proto[dpid][src_ip] = ip4.proto
+            # global fallback — survives dpid mismatch
+            gcur = self._src_proto_global.get(src_ip, 0)
+            if ip4.proto in (6, 17) or gcur == 0:
+                self._src_proto_global[src_ip] = ip4.proto
 
         # Cache tp_src, tp_dst per src_ip for IF features
         _tp_src = _tp_dst = 0
@@ -443,6 +451,8 @@ class FatTreeController(app_manager.RyuApp):
             _flow_ip_proto = int(match.get("ip_proto", 0))
             if not _flow_ip_proto:
                 _flow_ip_proto = int(self._src_proto[dpid].get(src_ip, 0))
+            if not _flow_ip_proto:
+                _flow_ip_proto = int(self._src_proto_global.get(src_ip, 0))
 
             _ports = self._src_ports.get(src_ip, (0, 0))
             self._push({
@@ -545,6 +555,7 @@ class FatTreeController(app_manager.RyuApp):
             self._cooldown_intervals.clear()
             self._switch_proto.clear()
             self._src_proto.clear()
+            self._src_proto_global.clear()
             self._src_ports.clear()
             self._pkt_in_rate.clear()
             # Re-arm first-poll bypass so fresh flows pass young-flow gate on restart

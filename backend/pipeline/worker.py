@@ -107,10 +107,17 @@ def _process_item(src_ip: str, flow_stats: dict,
         ip_state       = state_machine._states.get(src_ip)
         already_banned = ip_state is not None and ip_state.phase >= 2
 
-        # Lock: banned IP or high-confidence classification — no re-run needed
+        # Re-check banned IPs every 10s — avoids permanent wrong-class lock
+        _recheck_due = (
+            already_banned and ip_state.time_in_phase_sec() % 10 < 1
+        )
+
+        # Lock: banned/high-confidence — skip unless recheck window hit
         is_locked = (
-            already_banned or
-            (cached.confidence >= 0.70 and cached.attack_class != "Uncertain")
+            not _recheck_due and (
+                already_banned or
+                (cached.confidence >= 0.70 and cached.attack_class != "Uncertain")
+            )
         )
         if is_locked:
             if _result_callback:

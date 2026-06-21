@@ -32,7 +32,7 @@ EXTRACTION_TRIGGER_PKTS = 1
 EXTRACTION_TRIGGER_S    = 0.05
 
 # --- Simulation mode ---
-SIMULATION_MODE = False
+SIMULATION_MODE = True
 
 # --- Old SYN-only pre-filter (kept for backward compat, replaced by flood prefilter) ---
 SYN_HALFOPEN_LIMIT  = 100
