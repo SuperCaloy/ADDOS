@@ -48,19 +48,35 @@ def stats():
 
 def _compute_accuracy():
     try:
-        rows = query("""
-            SELECT is_anomaly, attack_class, confidence
-            FROM detection_features ORDER BY id DESC LIMIT 500
+        # IF: real accuracy from ground truth tp/fp/tn/fn, all time
+        if_rows = query("""
+            SELECT SUM(if_tp) as tp, SUM(if_fp) as fp,
+                   SUM(if_tn) as tn, SUM(if_fn) as fn
+            FROM traffic_summary
         """)
-        if not rows:
-            return None, None
-        # IF: anomaly flag vs actual class
-        if_correct = sum(1 for r in rows
-                         if (r["is_anomaly"] == 1) == (r["attack_class"] != "Normal"))
-        if_acc = round((if_correct / len(rows)) * 100, 1)
-        # RF: avg confidence on confirmed attack rows
-        atk = [r for r in rows if r["attack_class"] not in ("Normal", "Uncertain")]
-        rf_acc = round(sum(r["confidence"] for r in atk) / len(atk) * 100, 1) if atk else None
+        r = if_rows[0] if if_rows else {}
+        tp, fp = float(r.get("tp") or 0), float(r.get("fp") or 0)
+        tn, fn = float(r.get("tn") or 0), float(r.get("fn") or 0)
+        if_total = tp + fp + tn + fn
+        if_acc = round((tp + tn) / if_total * 100, 1) if if_total else None
+
+        # RF: real accuracy from 3x3 confusion matrix, all time
+        rf_rows = query("""
+            SELECT SUM(rf_tp_syn)  as tp_syn,  SUM(rf_tp_icmp) as tp_icmp,
+                   SUM(rf_tp_udp)  as tp_udp,
+                   SUM(rf_syn_as_icmp) as syn_as_icmp, SUM(rf_syn_as_udp)  as syn_as_udp,
+                   SUM(rf_icmp_as_syn) as icmp_as_syn, SUM(rf_icmp_as_udp) as icmp_as_udp,
+                   SUM(rf_udp_as_syn)  as udp_as_syn,  SUM(rf_udp_as_icmp) as udp_as_icmp
+            FROM traffic_summary
+        """)
+        rr = rf_rows[0] if rf_rows else {}
+        g  = lambda k: float(rr.get(k) or 0)
+        correct = g("tp_syn") + g("tp_icmp") + g("tp_udp")
+        wrong   = (g("syn_as_icmp") + g("syn_as_udp") + g("icmp_as_syn") +
+                   g("icmp_as_udp") + g("udp_as_syn") + g("udp_as_icmp"))
+        rf_total = correct + wrong
+        rf_acc = round(correct / rf_total * 100, 1) if rf_total else None
+
         return if_acc, rf_acc
     except Exception:
         return None, None
