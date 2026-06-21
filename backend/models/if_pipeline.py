@@ -32,7 +32,7 @@ def _get_medians() -> np.ndarray:
 
 
 def extract_if_features(flow_stats: dict) -> np.ndarray:
-    """Build shape-(1,17) feature matrix matching feature_contract.json order."""
+    """Build shape-(1,16) feature matrix matching feature_contract.json order."""
     loader.require_loaded()
 
     n = len(loader.if_features)
@@ -45,7 +45,6 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     # --- Raw fields ---
     fds  = float(s.get("flow_duration_sec",        0))
     fdns = float(s.get("flow_duration_nsec",       0))
-    flg  = float(s.get("flags",                    0))
     pkt  = float(s.get("packet_count",             0))
     byt  = float(s.get("byte_count",               0))
     pps  = float(s.get("packet_count_per_second",  0))
@@ -67,7 +66,6 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     # --- Build vector in contract order ---
     vec = np.array([
         np.log1p(max(fds,  0)),   # flow_duration_sec
-        flg,                       # flags
         np.log1p(max(pkt,  0)),   # packet_count
         np.log1p(max(byt,  0)),   # byte_count
         np.log1p(max(pps,  0)),   # packet_count_per_second
@@ -95,7 +93,7 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     # Two-stage scaling: RobustScaler → QuantileTransformer (matches training)
     df      = pd.DataFrame(vec.reshape(1, -1), columns=loader.if_features)
     X_rob   = loader.if_scaler.transform(df)
-    return loader.if_quantiler.transform(X_rob)   # shape (1, 17)
+    return loader.if_quantiler.transform(X_rob)   # shape (1, 16)
 
 
 def run_if_inference(vec_scaled: np.ndarray) -> tuple[float, bool]:

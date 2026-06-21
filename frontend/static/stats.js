@@ -1,7 +1,3 @@
-/* stats.js — polls /api/stats, updates metric cards, feeds live chart
- * Also fetches /api/model_info once at boot (never changes at runtime). */
-
-/* Previous cumulative values — used to compute per-interval deltas for chart */
 let prev = { t: 0, m: 0, n: 0 };
 
 /* Shared IF threshold — set once by fetchModelInfo, read by quarantine.js */
@@ -69,12 +65,12 @@ async function fetchSystemMetrics() {
     const m = await apiFetch('/api/system_metrics');
     const cpuEl = document.getElementById('p-cpu');
     const memEl = document.getElementById('p-mem');
-    const cpu = m.ctrl_cpu ?? m.cpu ?? 0;
-    const mem = m.ctrl_mem ?? m.mem_mb ?? 0;
+    const cpu = m.ctrl_cpu ?? 0;
+    const mem = m.ctrl_mem ?? 0;
     const cpuBar = document.getElementById('cpu-bar');
     const memBar = document.getElementById('mem-bar');
     if (cpuEl) {
-      cpuEl.textContent = `${cpu.toFixed(1)}%`;
+      cpuEl.textContent = `${cpu.toFixed(2)}%`;
       cpuEl.style.color = cpu > 80 ? 'var(--danger,#ff3d5a)'
                         : cpu > 50 ? 'var(--warn,#ffb300)' : 'var(--ok,#00d68f)';
     }
@@ -82,7 +78,7 @@ async function fetchSystemMetrics() {
       cpuBar.style.width = `${Math.min(cpu, 100)}%`;
       cpuBar.className = `resource-bar cpu-bar${cpu > 80 ? ' crit' : cpu > 50 ? ' warn' : ''}`;
     }
-    if (memEl) memEl.textContent = `${mem.toFixed(0)} MB`;
+    if (memEl) memEl.textContent = `${mem.toFixed(2)} MB`;
     if (memBar) memBar.style.width = `${Math.min((mem / 4096) * 100, 100)}%`;
   } catch (_) {}
 }

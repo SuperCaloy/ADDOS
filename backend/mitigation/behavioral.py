@@ -19,7 +19,8 @@ REPEAT_HIGH_PRIORITY_IF     = 0.65
 def record_offense(src_ip: str, attack_vector: str, if_score: float,
                    confidence: float, priority: str,
                    phase_reached: int, first_seen: str,
-                   unblock_reason: str = "Auto-Released") -> None:
+                   unblock_reason: str = "Auto-Released",
+                   ban_level: int = 0, offence_count: int = 1) -> None:
     # Write completed offense to ip_attack_history.
     # Called by state_machine._clear() so history persists across restarts.
     try:
@@ -32,6 +33,8 @@ def record_offense(src_ip: str, attack_vector: str, if_score: float,
             phase_reached  = phase_reached,
             first_seen     = first_seen,
             unblock_reason = unblock_reason,
+            ban_level      = ban_level,
+            offence_count  = offence_count,
         )
         log.debug("Behavioral: offense recorded — %s  vector=%s  phase=%d",
                   src_ip, attack_vector, phase_reached)
@@ -50,11 +53,21 @@ def get_decay_score(src_ip: str) -> float:
         return 0.0
 
 
+def get_offence_count(src_ip: str) -> int:
+    # Raw count — literal number of times this IP has offended.
+    try:
+        count = writer.get_offense_total_count(src_ip)
+        return count if count is not None else 0
+    except Exception as exc:
+        log.warning("Behavioral: failed to get offence count for %s — %s", src_ip, exc)
+        return 0
+
+
 def get_offences(src_ip: str) -> int:
     # Query total offense count for this IP from ip_attack_history.
     # Returns 0 on no history or DB error.
     try:
-        count = writer.get_offense_count(src_ip)
+        count = writer.get_offense_total_count(src_ip)
         return count if count is not None else 0
     except Exception as exc:
         log.warning("Behavioral: failed to get offenses for %s — %s", src_ip, exc)

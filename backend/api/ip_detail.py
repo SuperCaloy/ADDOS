@@ -1,8 +1,10 @@
+import math
 from flask import Blueprint, jsonify
 from backend.pipeline.flow_tracker import tracker
 from backend.mitigation.state_machine import state_machine
 from backend.database.db import query
 from backend.models import loader
+from backend.mitigation import behavioral
 
 bp = Blueprint("ip_detail", __name__)
 
@@ -27,9 +29,21 @@ def _build_live_features(src_ip: str) -> dict | None:
         return None
 
     fs        = flow.flow_stats or {}
-    flags     = fs.get("flags", 0)
     pkt_count = max(int(fs.get("packet_count", 0)), 1)
-    syn_ratio = (flags & 0x02) / pkt_count if flags else 0.0
+
+    # ICMP signal: average packet size
+    byte_count        = fs.get("byte_count", 0)
+    byte_rate         = fs.get("byte_count_per_second", 0)
+    bytes_per_packet  = round(byte_count / pkt_count, 1)
+
+    # SYN signal: packet size uniformity (matches IF model feature)
+    # SYN packets are near-identical size (handshake only, no payload)
+    pkt_size_uniformity = round(math.log1p(max(bytes_per_packet / (byte_rate + 1), 0)), 4)
+
+    # UDP signal: source port spread vs dest port (matches IF model feature)
+    tp_src        = float(fs.get("tp_src", 0))
+    tp_dst        = float(fs.get("tp_dst", 0))
+    port_entropy  = round(tp_src / (tp_dst + 1), 4)
 
     # Pull live phase/priority from state machine
     state    = state_machine._states.get(src_ip)
@@ -43,11 +57,13 @@ def _build_live_features(src_ip: str) -> dict | None:
         "features": {
             "pkt_count":     fs.get("packet_count", 0),
             "byte_count":    fs.get("byte_count", 0),
-            "syn_ratio":     round(syn_ratio, 4),
             "pps":           fs.get("packet_count_per_second", 0),
             "byte_rate":     fs.get("byte_count_per_second", 0),
             "active_flows":  tracker.active_count(),
             "duration_sec":  fs.get("flow_duration_sec", 0),
+            "bytes_per_packet":    bytes_per_packet,
+            "port_entropy":        port_entropy,
+            "pkt_size_uniformity": pkt_size_uniformity,
         },
         "ml": {
             "if_score":     cached.if_score,
@@ -56,12 +72,13 @@ def _build_live_features(src_ip: str) -> dict | None:
             "confidence":   round(cached.confidence * 100, 1),
         },
         "state": {
-            "phase":         phase,
-            "priority":      priority,
-            "action_taken":  action,
-            "offence_count": getattr(state, "offence_count", 0) if state else 0,
-            "ban_level":     getattr(state, "ban_level", 0)     if state else 0,
-            "first_seen":    None,
+            "phase":            phase,
+            "priority":         priority,
+            "action_taken":     action,
+            "offence_count":    getattr(state, "offence_count", 0) if state else 0,
+            "ban_level":        getattr(state, "ban_level", 0)     if state else 0,
+            "reputation_score": behavioral.get_decay_score(src_ip),
+            "first_seen":       None,
         },
         "thresholds": {
             "if_threshold": loader.if_threshold,
@@ -112,8 +129,20 @@ def _build_db_features(src_ip: str) -> dict | None:
     feat = feat_rows[0] if feat_rows else {}
 
     pkt_count = max(int(feat.get("packet_count", 0) or 0), 1)
-    flags     = int(feat.get("flags", 0) or 0)
-    syn_ratio = round((flags & 0x02) / pkt_count, 4) if flags else 0.0
+    byte_rate = float(feat.get("byte_count_per_second", 0) or 0)
+
+    # ICMP signal: average packet size (use stored value, fallback to calc)
+    bytes_per_packet = feat.get("bytes_per_packet")
+    if bytes_per_packet is None:
+        bytes_per_packet = round((feat.get("byte_count", 0) or 0) / pkt_count, 1)
+
+    # SYN signal: packet size uniformity (matches IF model feature)
+    pkt_size_uniformity = round(math.log1p(max(bytes_per_packet / (byte_rate + 1), 0)), 4)
+
+    # UDP signal: source port spread vs dest port
+    tp_src       = float(feat.get("tp_src", 0) or 0)
+    tp_dst       = float(feat.get("tp_dst", 0) or 0)
+    port_entropy = round(tp_src / (tp_dst + 1), 4)
 
     # ip_attack_history — offence/ban/phase metadata
     hist = query("""
@@ -157,9 +186,11 @@ def _build_db_features(src_ip: str) -> dict | None:
         "features": {
             "pkt_count":     feat.get("packet_count", 0) or 0,
             "byte_count":    feat.get("byte_count", 0) or 0,
-            "syn_ratio":     syn_ratio,
             "pps":           feat.get("packet_count_per_second", 0) or 0,
             "byte_rate":     feat.get("byte_count_per_second", 0) or 0,
+            "bytes_per_packet":    bytes_per_packet,
+            "port_entropy":        port_entropy,
+            "pkt_size_uniformity": pkt_size_uniformity,
             "duration_sec":  feat.get("flow_duration_sec", 0) or 0,
         },
         "ml": {
@@ -169,12 +200,13 @@ def _build_db_features(src_ip: str) -> dict | None:
             "confidence":   conf_pct,
         },
         "state": {
-            "phase":         ev.get("phase") or h.get("phase_reached") or "—",
-            "priority":      ev.get("priority") or h.get("priority") or "—",
-            "action_taken":  ev.get("action_taken") or "—",
-            "offence_count": h.get("offence_count", 0),
-            "ban_level":     h.get("ban_level", 0),
-            "first_seen":    h.get("first_seen"),
+            "phase":            ev.get("phase") or h.get("phase_reached") or "—",
+            "priority":         ev.get("priority") or h.get("priority") or "—",
+            "action_taken":     ev.get("action_taken") or "—",
+            "offence_count":    h.get("offence_count", 0),
+            "ban_level":        h.get("ban_level", 0),
+            "reputation_score": behavioral.get_decay_score(src_ip),
+            "first_seen":       h.get("first_seen"),
         },
         "phase_history":  phases,
         "thresholds": {

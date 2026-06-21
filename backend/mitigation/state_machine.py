@@ -242,19 +242,14 @@ class StateMachine:
                         self._persist(state)
 
             else:
-                # Already tracked — update scores
-                # Lock attack_vector if:
-                #   phase >= 2: never flip vector on a mid-ban IP
-                #   OR confidence >= threshold: confirmed classification
-                _vector_locked = (
-                    state.phase >= 2
-                    or (state.attack_vector != "Uncertain"
-                        and state.confidence >= CONFIDENCE_LOCK_THRESHOLD)
-                )
+                # Update vector only if new confidence beats prior — best evidence wins
+                _better_evidence = confidence > state.confidence
                 state.if_score   = if_score
-                state.confidence = confidence
-                if not _vector_locked:
+                if _better_evidence:
                     state.attack_vector = attack_class
+                    state.confidence     = confidence
+                else:
+                    state.confidence = confidence
                 self._persist(state)
 
             if state is not None:
@@ -438,6 +433,8 @@ class StateMachine:
                 phase_reached  = state.phase,
                 first_seen     = state.first_seen,
                 unblock_reason = reason,
+                ban_level      = state.ban_level,
+                offence_count  = state.offence_count,
             )
         log.info("Cleared: %s  reason=%s", src_ip, reason)
 

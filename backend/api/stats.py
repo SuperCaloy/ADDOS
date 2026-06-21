@@ -91,10 +91,10 @@ def system_metrics():
         return jsonify({"cpu": 0, "mem_mb": 0, "ctrl_cpu": 0, "ctrl_mem": 0})
     r = rows[0]
     return jsonify({
-        "cpu":      round(r["cpu_percent"] or 0, 1),
-        "mem_mb":   round(r["mem_mb"] or 0, 1),
-        "ctrl_cpu": round(r["ctrl_cpu_percent"] or 0, 1),
-        "ctrl_mem": round(r["ctrl_mem_mb"] or 0, 1),
+        "cpu":      round(r["cpu_percent"] or 0, 2),
+        "mem_mb":   round(r["mem_mb"] or 0, 2),
+        "ctrl_cpu": round(r["ctrl_cpu_percent"] or 0, 2),
+        "ctrl_mem": round(r["ctrl_mem_mb"] or 0, 2),
     })
 
 
