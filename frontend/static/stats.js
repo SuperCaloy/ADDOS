@@ -34,10 +34,9 @@ async function fetchStats() {
     const fpEl   = document.getElementById('p-fp');
     if (fpEl) {
       fpEl.textContent = `${fpRate.toFixed(1)} %`;
-      fpEl.style.color = fpRate === 0 ? 'var(--ok, #00d68f)'
-                       : fpRate <  1  ? 'var(--warn, #ffb300)'
-                       : fpRate <  5  ? 'var(--warn, #ff8c00)'
-                       : 'var(--danger, #ff3d5a)';
+      fpEl.style.color = fpRate < 1 ? 'var(--green)'
+                       : fpRate < 5 ? 'var(--amber)'
+                       : 'var(--red)';
     }
 
     /* Feed live chart — compute per-interval deltas from cumulative values */

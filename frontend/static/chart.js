@@ -19,12 +19,29 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
     responsive: true, maintainAspectRatio: false, animation: { duration: 180 },
     interaction: { mode: 'index', intersect: false },
     plugins: {
-      legend: { labels: { color: '#5c6080', font: { family: 'Space Mono', size: 10 }, boxWidth: 12 } },
+      legend: {
+        labels: {
+          color: '#5c6080',
+          font: { family: 'Space Mono', size: 10 },
+          boxWidth: 12,
+          usePointStyle: true,
+          pointStyle: 'circle',
+        },
+      },
       tooltip: {
         backgroundColor: '#111320', borderColor: '#1e2235', borderWidth: 1,
         titleColor: '#8890b0', bodyColor: '#e8eaf6',
         titleFont: { family: 'Space Mono', size: 10 },
         bodyFont:  { family: 'Space Mono', size: 11 },
+        callbacks: {
+          /* Fix: datasets use near-transparent backgroundColor for area fill,
+             which renders as white in the tooltip swatch. Override with the
+             solid borderColor so swatches are clearly blue / red / green. */
+          labelColor: function (context) {
+            const clr = context.dataset.borderColor || '#5c6080';
+            return { borderColor: clr, backgroundColor: clr, borderWidth: 2, borderRadius: 2 };
+          },
+        },
       },
     },
     scales: {
