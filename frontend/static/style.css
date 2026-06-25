@@ -85,14 +85,14 @@ header {
 }
 .metric-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--accent); opacity: .75; }
 .metric-card:hover { border-color: var(--border2); }
-.m-label { font-size: 11px; font-weight: 600; color: var(--sub); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 13px; }
+.m-label { font-size: 11px; font-weight: 600; color: var(--sub); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 13px; font-family: ui-sans-serif, system-ui, sans-serif; }
 .m-value { font-family: var(--mono); font-size: 34px; font-weight: 700; line-height: 1; color: var(--text); margin-bottom: 9px; }
 .m-sub   { font-size: 12px; font-weight: 600; color: var(--accent); font-family: var(--mono); }
 
 /* ── PANEL ───────────────────────────────────────────────────── */
 .panel { background: var(--card); border: 1px solid var(--border); border-radius: 16px; margin-bottom: 22px; overflow: hidden; }
 .panel-header { display: flex; align-items: center; justify-content: space-between; padding: 20px 26px; border-bottom: 1px solid var(--border); }
-.panel-title { font-size: 14px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 10px; }
+.panel-title { font-size: 15px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 10px; }
 .badge { font-family: var(--mono); font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 5px; background: rgba(61,108,255,.13); color: var(--blue); border: 1px solid rgba(61,108,255,.28); }
 .panel-sub { font-size: 12px; color: var(--sub); }
 
@@ -133,7 +133,7 @@ header {
 
 table { width: 100%; border-collapse: collapse; }
 thead { position: sticky; top: 0; z-index: 2; }
-thead th { background: var(--card); padding: 13px 18px; text-align: left; font-size: 11px; font-weight: 700; color: var(--sub); text-transform: uppercase; letter-spacing: .1em; border-bottom: 1px solid var(--border); white-space: nowrap; }
+thead th { background: var(--card); padding: 13px 18px; text-align: left; font-size: 12px; font-weight: 700; color: var(--sub); text-transform: uppercase; letter-spacing: .1em; border-bottom: 1px solid var(--border); white-space: nowrap; }
 tbody tr { border-bottom: 1px solid var(--border); transition: background .14s; }
 tbody tr:hover { background: rgba(255,255,255,.018); }
 tbody tr.tr-clickable { cursor: pointer; }
@@ -142,12 +142,12 @@ tbody tr.tr-clickable:hover td.ip { color: var(--blue); text-decoration: underli
 tbody tr.row-in { animation: rowIn .35s ease; }
 @keyframes rowIn { from { opacity:0; transform:translateY(-5px); background:rgba(61,108,255,.07); } to { opacity:1; transform:translateY(0); } }
 
-td { padding: 13px 18px; font-size: 13px; color: var(--sub2); vertical-align: middle; white-space: nowrap; }
+td { padding: 13px 18px; font-size: 14px; color: var(--sub2); vertical-align: middle; white-space: nowrap; }
 td.mono { font-family: var(--mono); color: var(--text); }
-td.ip   { font-family: var(--mono); color: var(--text); font-weight: 600; font-size: 14px; }
+td.ip   { font-family: var(--mono); color: var(--text); font-weight: 600; font-size: 15px; }
 
 /* ── TAGS ────────────────────────────────────────────────────── */
-.tag { display: inline-block; padding: 4px 10px; border-radius: 5px; font-size: 11px; font-weight: 700; font-family: var(--mono); border: 1px solid; white-space: nowrap; }
+.tag { display: inline-block; padding: 4px 10px; border-radius: 5px; font-size: 12px; font-weight: 700; font-family: var(--mono); border: 1px solid; white-space: nowrap; }
 .t-ddos    { color:#ff6b6b; border-color:rgba(255,107,107,.4); background:rgba(255,107,107,.07); }
 .t-anomaly { color:var(--amber); border-color:rgba(255,176,46,.4); background:rgba(255,176,46,.07); }
 .t-syn     { color:var(--amber); border-color:rgba(255,176,46,.35); background:rgba(255,176,46,.06); }
@@ -158,8 +158,8 @@ td.ip   { font-family: var(--mono); color: var(--text); font-weight: 600; font-s
 .t-rl      { color:#fb923c; border-color:rgba(251,146,60,.4); background:rgba(251,146,60,.07); }
 .t-blocked { color:var(--red); border-color:rgba(255,61,90,.4); background:rgba(255,61,90,.07); }
 .t-ban     { color:#ffb300; border-color:rgba(255,179,0,.4); background:rgba(255,179,0,.07); }
-.p-high { color:var(--red); font-weight:700; font-family:var(--mono); font-size:11px; }
-.p-low  { color:var(--sub2); font-family:var(--mono); font-size:11px; }
+.p-high { color:var(--red); font-weight:700; font-family:var(--mono); font-size:12px; }
+.p-low  { color:var(--sub2); font-family:var(--mono); font-size:12px; }
 .sc-red { color:var(--red);   font-family:var(--mono); font-weight:700; }
 .sc-amb { color:var(--amber); font-family:var(--mono); font-weight:700; }
 .sc-grn { color:var(--green); font-family:var(--mono); font-weight:700; }
@@ -246,16 +246,43 @@ body.light {
   --text:    #111827;
   --sub:     #6b7280;
   --sub2:    #4b5563;
-  --blue-g:  rgba(61,108,255,.08);
-  --red-g:   rgba(255,61,90,.08);
-  --green-g: rgba(0,214,143,.08);
-  --amber-g: rgba(255,176,46,.08);
+
+  /* ── Accent corrections for light mode ─────────────────────────────────────
+     Dark-mode neons are unreadable on white (#00d68f = 1.9:1, #ffb02e = 1.8:1).
+     Each replacement is WCAG AA compliant (≥4.5:1) on white card backgrounds. */
+  --blue:    #2d5be3;           /* #3d6cff → 4.4:1 → now 5.6:1  ✓ AA */
+  --blue-g:  rgba(45,91,227,.09);
+  --green:   #087a56;           /* #00d68f → 1.9:1 → now 5.4:1  ✓ AA */
+  --green-g: rgba(8,122,86,.09);
+  --amber:   #b45309;           /* #ffb02e → 1.8:1 → now 5.0:1  ✓ AA */
+  --amber-g: rgba(180,83,9,.09);
+  --red:     #dc2626;           /* #ff3d5a → 3.5:1 → now 4.8:1  ✓ AA */
+  --red-g:   rgba(220,38,38,.09);
 }
 body.light::before { background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px); opacity: .5; }
 body.light .panel, body.light .metric-card, body.light .perf-card { box-shadow: 0 1px 4px rgba(0,0,0,.06); }
 body.light thead th { background: var(--card); }
 body.light .modal { box-shadow: 0 8px 32px rgba(0,0,0,.12); }
 body.light .badge  { background: rgba(61,108,255,.1); }
+
+
+/* ── LIGHT MODE COMPONENT OVERRIDES ──────────────────────────────────────────
+   Tag colors are hardcoded hex values (not CSS vars) so they never inherit
+   the updated --blue/--red/--green/--amber. Override them explicitly. */
+
+/* UDP tag: #60b4ff = 2.2:1 on white — unusable for text */
+body.light .t-udp  { color:#1d55cc; border-color:rgba(29,85,204,.35);  background:rgba(29,85,204,.07); }
+/* ICMP tag: #f472b6 = 2.6:1 on white */
+body.light .t-icmp { color:#be185d; border-color:rgba(190,24,93,.35);  background:rgba(190,24,93,.07); }
+/* DDoS tag: #ff6b6b = 2.8:1 on white */
+body.light .t-ddos { color:#b91c1c; border-color:rgba(185,28,28,.4);   background:rgba(185,28,28,.07); }
+
+/* Status pill: bg/border are hardcoded to dark-mode green's RGBA values */
+body.light .status-pill { background:rgba(8,122,86,.08); border-color:rgba(8,122,86,.25); }
+
+/* Table row hover: original rgba(255,255,255,.018) is invisible on white */
+body.light tbody tr:hover              { background:rgba(0,0,0,.028); }
+body.light tbody tr.tr-clickable:hover { background:rgba(45,91,227,.05) !important; }
 
 .theme-btn { padding: 9px 18px; border-radius: 9px; cursor: pointer; font-family: var(--sans); font-size: 13px; font-weight: 500; border: 1px solid var(--border2); background: var(--card); color: var(--sub2); transition: all .18s; }
 .theme-btn:hover { border-color: var(--blue); color: var(--text); background: var(--blue-g); }

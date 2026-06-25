@@ -1,0 +1,32 @@
+# ── Web Frameworks & Dashboards ──────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+flask==3.1.0
+flask-cors==5.0.0
+jinja2==3.1.4
+
+# ── Machine Learning & Automated Pipelines ───────────────────
+numpy==1.26.4
+pandas==2.2.3
+scikit-learn==1.4.2
+imbalanced-learn==0.12.4
+scipy==1.13.1
+joblib==1.4.2
+
+# ── Visualization & Performance Analysis ─────────────────────
+matplotlib==3.9.2
+seaborn==0.13.2
+
+# ── Telemetry PDF Report Generation ──────────────────────────
+reportlab==4.2.5
+
+# ── ZeroMQ Asynchronous Message Buses ────────────────────────
+pyzmq==26.2.0
+
+# ── Linux Kernel Firewall Control ────────────────────────────
+python-iptables==1.2.0
+
+# ── Fixed Ryu SDN Controller Architecture ────────────────────
+# Replaces broken upstream setups with the modern community patch
+ryu==4.34
+eventlet==0.34.3
