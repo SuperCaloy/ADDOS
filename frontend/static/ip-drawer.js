@@ -86,11 +86,11 @@ const _ATTACK_CONTEXT = {
     <div id="idd-head" style="display:flex;align-items:flex-start;justify-content:space-between;
          padding:20px 22px 14px;border-bottom:1px solid var(--border,#eef0f6);flex-shrink:0">
       <div style="display:flex;flex-direction:column;gap:5px">
-        <div style="font-size:10px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
+        <div style="font-size:11px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
              font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase">Threat Analysis</div>
         <div style="display:flex;align-items:center;gap:10px">
-          <div id="idd-ip" style="font-family:var(--mono,'Space Mono',monospace);font-size:21px;
-               font-weight:700;color:var(--text,#1a1d2e);letter-spacing:-.3px">--</div>
+          <div id="idd-ip" style="font-family:var(--mono,'Space Mono',monospace);font-size:26px;
+               font-weight:700;color:var(--text,#1a1d2e);letter-spacing:-.5px;line-height:1.1">--</div>
           <div id="idd-status-badge"></div>
         </div>
       </div>
@@ -101,7 +101,7 @@ const _ATTACK_CONTEXT = {
                margin-top:2px;font-family:monospace;line-height:1;padding:0;transition:all .15s"
         onmouseover="this.style.borderColor='var(--red,#ff3d5a)';this.style.color='var(--red,#ff3d5a)'"
         onmouseout="this.style.borderColor='var(--border2,#e2e4ed)';this.style.color='var(--sub,#9499b7)'"
-        onclick="closeIpDrawer()" title="Close (Esc)">x</button>
+        onclick="closeIpDrawer()" title="Close (Esc)">&#x2715;</button>
     </div>
 
     <!-- Loading -->
@@ -136,50 +136,53 @@ const _ATTACK_CONTEXT = {
            display:flex;align-items:center;gap:8px;letter-spacing:.02em"></div>
 
       <!-- Attack description -->
-      <div id="idd-desc" style="font-size:12px;line-height:1.6;color:var(--sub2,#6b7190);
-           margin-bottom:16px"></div>
+      <div id="idd-desc" style="font-size:13px;line-height:1.7;color:var(--sub2,#6b7190);
+           margin-bottom:16px;padding:12px 15px;
+           background:var(--surface,#0d0f18);
+           border:1px solid var(--border,#1e2235);
+           border-radius:9px;display:none"></div>
 
       <!-- State pills -->
-      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#9499b7);
+      <div style="font-size:11px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
            font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
-           margin-bottom:9px">State</div>
+           margin-bottom:10px;margin-top:4px">State</div>
       <div id="idd-history" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px;
            padding-bottom:14px;border-bottom:1px solid var(--border,#eef0f6)"></div>
 
       <!-- IF model signal cards -->
-      <div id="idd-if-header" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+      <div id="idd-if-header" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;margin-top:4px">
+        <span style="font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
               padding:2px 8px;border-radius:4px;
               background:rgba(61,108,255,.1);color:var(--blue,#3d6cff);
               border:1px solid rgba(61,108,255,.25);
               font-family:var(--mono,'Space Mono',monospace)">IF Model Signals</span>
-        <span id="idd-if-subtitle" style="font-size:10px;color:var(--sub,#9499b7);
+        <span id="idd-if-subtitle" style="font-size:11px;color:var(--sub,#9499b7);
               font-family:var(--mono,'Space Mono',monospace)"></span>
       </div>
-      <div id="idd-if-features" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:16px"></div>
+      <div id="idd-if-features" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-bottom:18px"></div>
 
       <!-- RF model signal cards -->
-      <div id="idd-rf-header" style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
+      <div id="idd-rf-header" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;margin-top:6px">
+        <span style="font-size:10px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;
               padding:2px 8px;border-radius:4px;
               background:rgba(255,176,46,.1);color:var(--amber,#ffb02e);
               border:1px solid rgba(255,176,46,.25);
               font-family:var(--mono,'Space Mono',monospace)">RF Model Signals</span>
-        <span id="idd-rf-subtitle" style="font-size:10px;color:var(--sub,#9499b7);
+        <span id="idd-rf-subtitle" style="font-size:11px;color:var(--sub,#9499b7);
               font-family:var(--mono,'Space Mono',monospace)"></span>
       </div>
-      <div id="idd-rf-features" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:7px;margin-bottom:16px"></div>
+      <div id="idd-rf-features" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-bottom:18px"></div>
 
       <!-- ML evaluation bars -->
-      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#9499b7);
+      <div style="font-size:11px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
            font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
-           margin-bottom:9px">ML Evaluation</div>
+           margin-bottom:10px;margin-top:4px">ML Evaluation</div>
       <div id="idd-ml" style="display:flex;flex-direction:column;gap:12px;margin-bottom:16px"></div>
 
       <!-- Mitigation pipeline -->
-      <div style="font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--sub,#9499b7);
+      <div style="font-size:11px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
            font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
-           margin-bottom:9px">Mitigation Pipeline</div>
+           margin-bottom:10px;margin-top:4px">Mitigation Pipeline</div>
       <div id="idd-pipeline" style="margin-bottom:14px"></div>
 
     </div>`;
@@ -393,11 +396,12 @@ function _renderIpDetail(d) {
   const isAnomaly = ml.is_anomaly;
   const acColor   = isAnomaly ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)';
   const verdict   = document.getElementById('idd-verdict');
-  verdict.style.cssText = `border-radius:9px;padding:11px 15px;margin-bottom:8px;font-size:12px;
+  verdict.style.cssText = `
+    border-radius:0 9px 9px 0;padding:13px 16px;margin-bottom:12px;font-size:13px;
     font-family:var(--mono,'Space Mono',monospace);font-weight:700;
-    display:flex;align-items:center;gap:8px;letter-spacing:.02em;
-    background:${isAnomaly ? 'rgba(255,61,90,.07)' : 'rgba(0,214,143,.07)'};
-    border:1px solid ${isAnomaly ? 'rgba(255,61,90,.22)' : 'rgba(0,214,143,.2)'};
+    display:flex;align-items:center;gap:10px;letter-spacing:.03em;
+    background:${isAnomaly ? 'rgba(255,61,90,.06)' : 'rgba(0,214,143,.06)'};
+    border-left:4px solid ${isAnomaly ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)'};
     color:${acColor}`;
   verdict.innerHTML = isAnomaly
     ? `<span style="font-size:12px;font-weight:900;letter-spacing:.06em">ANOMALY</span>
@@ -408,7 +412,9 @@ function _renderIpDetail(d) {
   /* Attack description line */
   const descEl = document.getElementById('idd-desc');
   const ctx = _ATTACK_CONTEXT[ml.attack_class];
-  descEl.textContent = isAnomaly && ctx ? ctx.desc : '';
+  const descText = isAnomaly && ctx ? ctx.desc : '';
+  descEl.textContent = descText;
+  descEl.style.display = descText ? 'block' : 'none';
 
   _renderFeatureSignals(f, ml.attack_class);
   _renderMlBars(ml, th);
@@ -488,39 +494,38 @@ const _SIGNAL_CONFIG = {
 
 /* Renders one feature card for IF or RF row */
 function _mkSignalCard(feat, val, isIF) {
-  const isAlert  = feat.alert(val);
-  const barPct   = (feat.bar(val) * 100).toFixed(1);
+  const isAlert   = feat.alert(val);
+  const barPct    = (feat.bar(val) * 100).toFixed(1);
   const accentCol = isIF ? 'var(--blue,#3d6cff)' : 'var(--amber,#ffb02e)';
-  const valCol   = isAlert ? 'var(--red,#ff3d5a)' : accentCol;
-  const borderCol = isAlert ? 'var(--red,#ff3d5a)' : accentCol;
-  const glowRgb  = isAlert ? '255,61,90' : (isIF ? '61,108,255' : '255,176,46');
-  const tag      = isAlert
-    ? `<span style="font-size:8px;font-weight:700;color:var(--red,#ff3d5a);
-            background:rgba(255,61,90,.1);border:1px solid rgba(255,61,90,.3);
-            border-radius:3px;padding:1px 4px;flex-shrink:0">ALERT</span>`
-    : `<span style="font-size:8px;font-weight:700;color:var(--green,#00d68f);
-            background:rgba(0,214,143,.08);border:1px solid rgba(0,214,143,.25);
-            border-radius:3px;padding:1px 4px;flex-shrink:0">OK</span>`;
+  /* Alert: red border + red value. Normal: neutral gray border, neutral text. */
+  const borderCol = isAlert ? 'var(--red,#ff3d5a)' : 'var(--border,#1e2235)';
+  const valCol    = isAlert ? 'var(--red,#ff3d5a)' : 'var(--text,#e8eaf6)';
+  /* Alert: warning triangle. Normal: nothing — keep the card clean. */
+  const icon = isAlert
+    ? `<span style="font-size:15px;color:var(--red,#ff3d5a);flex-shrink:0;line-height:1"
+            title="Anomalous value">&#9651;</span>`
+    : '';
   const tip = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
   return `
     <div class="idd-fc"
-         style="background:var(--surface,#f7f8fc);border-radius:9px;padding:10px 13px;
-                border:1px solid ${borderCol};box-shadow:0 0 0 2px rgba(${glowRgb},.1)"
+         style="background:var(--surface,#f7f8fc);border-radius:9px;padding:11px 13px;
+                border:1px solid ${borderCol}"
          data-tip="${tip}"
          onmouseenter="_iddShowTip(event,this.dataset.tip)"
          onmouseleave="_iddHideTip()">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:3px">
-        <div style="font-size:9px;color:var(--sub,#9499b7);
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:5px">
+        <div style="font-size:10px;color:var(--sub,#9499b7);
              font-family:var(--mono,'Space Mono',monospace);
-             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:70%">${feat.label}</div>
-        ${tag}
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80%;
+             padding-top:1px">${feat.label}</div>
+        ${icon}
       </div>
-      <div style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
-           color:${valCol};margin-bottom:6px">${feat.fmt(val)}</div>
-      <div style="height:2px;background:var(--border2,#e2e4ed);border-radius:1px;overflow:hidden">
+      <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;
+           color:${valCol};margin-bottom:7px">${feat.fmt(val)}</div>
+      <div style="height:3px;background:var(--border2,#e2e4ed);border-radius:2px;overflow:hidden">
         <div style="height:100%;width:${barPct}%;
              background:${isAlert ? 'var(--red,#ff3d5a)' : accentCol};
-             transition:width .4s;border-radius:1px"></div>
+             transition:width .4s;border-radius:2px"></div>
       </div>
     </div>`;
 }
@@ -582,43 +587,38 @@ function _renderMlBars(ml, th) {
   /* IF bar: scale so threshold sits at 50% visual position */
   const ifScale  = ifThrVal ? ifThrVal * 2 : 1;
   const ifBarPct = Math.min((ifScore / ifScale) * 100, 100);
-  const ifThrPct = ifThrVal ? Math.min((ifThrVal / ifScale) * 100, 100) : 50;
 
   document.getElementById('idd-ml').innerHTML = `
     <div>
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px">
-        <span style="font-size:11px;color:var(--sub2,#6b7190);
+        <span style="font-size:12px;color:var(--sub2,#6b7190);
               font-family:var(--mono,'Space Mono',monospace)">Isolation Forest (Anomaly Score)</span>
-        <span style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
+        <span style="font-family:var(--mono,'Space Mono',monospace);font-size:14px;font-weight:700;
               color:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)'}">${ifScore.toFixed(4)}</span>
       </div>
-      <div style="height:5px;background:var(--border2,#e2e4ed);border-radius:3px;
-           overflow:visible;margin-bottom:4px;position:relative">
+      <div style="height:7px;background:var(--border2,#e2e4ed);border-radius:4px;
+           overflow:hidden;margin-bottom:5px">
         <div style="height:100%;width:${ifBarPct}%;background:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--green,#00d68f)'};
-             transition:width .5s;border-radius:3px"></div>
-        ${ifThrVal != null ? `<div style="position:absolute;top:-4px;left:${ifThrPct}%;
-             width:2px;height:13px;background:rgba(255,61,90,.7);border-radius:1px;
-             transform:translateX(-50%)"></div>` : ''}
+             transition:width .5s;border-radius:4px"></div>
+
       </div>
-      <div style="font-size:10px;color:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--sub,#9499b7)'};
+      <div style="font-size:11px;color:${ifOver ? 'var(--red,#ff3d5a)' : 'var(--sub,#9499b7)'};
            font-family:var(--mono,'Space Mono',monospace)">${ifThrLabel}</div>
     </div>
     <div>
       <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px">
-        <span style="font-size:11px;color:var(--sub2,#6b7190);
+        <span style="font-size:12px;color:var(--sub2,#6b7190);
               font-family:var(--mono,'Space Mono',monospace)">Random Forest (Attack Probability)</span>
-        <span style="font-family:var(--mono,'Space Mono',monospace);font-size:13px;font-weight:700;
+        <span style="font-family:var(--mono,'Space Mono',monospace);font-size:14px;font-weight:700;
               color:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--amber,#ffb02e)'}">${rfConf.toFixed(1)}%</span>
       </div>
-      <div style="height:5px;background:var(--border2,#e2e4ed);border-radius:3px;
-           overflow:visible;margin-bottom:4px;position:relative">
+      <div style="height:7px;background:var(--border2,#e2e4ed);border-radius:4px;
+           overflow:hidden;margin-bottom:5px">
         <div style="height:100%;width:${rfPct}%;background:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--amber,#ffb02e)'};
-             transition:width .5s;border-radius:3px"></div>
-        ${rfGate != null ? `<div style="position:absolute;top:-4px;left:50%;
-             width:2px;height:13px;background:rgba(255,61,90,.7);border-radius:1px;
-             transform:translateX(-50%)"></div>` : ''}
+             transition:width .5s;border-radius:4px"></div>
+
       </div>
-      <div style="font-size:10px;color:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--sub,#9499b7)'};
+      <div style="font-size:11px;color:${rfOver ? 'var(--red,#ff3d5a)' : 'var(--sub,#9499b7)'};
            font-family:var(--mono,'Space Mono',monospace)">${rfThrLabel}</div>
     </div>`;
 }
@@ -694,7 +694,7 @@ function _renderPipeline(d, ml, st, isAnomaly) {
               <div style="position:relative;width:32px;height:32px;border-radius:50%;
                    border:2px solid ${s.color};
                    display:flex;align-items:center;justify-content:center;
-                   font-family:var(--mono,'Space Mono',monospace);font-size:11px;font-weight:700;
+                   font-family:var(--mono,'Space Mono',monospace);font-size:12px;font-weight:700;
                    color:${s.color};flex-shrink:0;margin-bottom:5px;
                    ${isLive ? `box-shadow:0 0 0 3px ${s.color}22;animation:idd-pulse 2s ease-in-out infinite` : ''}">
                 ${i + 1}
@@ -704,15 +704,15 @@ function _renderPipeline(d, ml, st, isAnomaly) {
                      border:2px solid var(--card,#fff)"></div>` : ''}
               </div>
               <!-- Sub label (stage name) -->
-              <div style="font-size:9px;color:var(--sub,#9499b7);
+              <div style="font-size:10px;color:var(--sub,#9499b7);
                    font-family:var(--mono,'Space Mono',monospace);
                    margin-bottom:2px;text-align:center;white-space:nowrap">${s.sub}</div>
               <!-- Main label (action/class) -->
-              <div style="font-size:10px;font-weight:700;color:${s.color};
+              <div style="font-size:11px;font-weight:700;color:${s.color};
                    font-family:var(--mono,'Space Mono',monospace);
                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
                    max-width:80px;text-align:center">${s.label}</div>
-              ${s.ts ? `<div style="font-size:9px;color:var(--sub,#9499b7);
+              ${s.ts ? `<div style="font-size:10px;color:var(--sub,#9499b7);
                    font-family:var(--mono,'Space Mono',monospace);margin-top:2px">${s.ts}</div>` : ''}
             </div>
             <!-- Connector line between steps -->
@@ -752,10 +752,10 @@ function _renderHistoryPills(st) {
 
   hist.innerHTML = pills.map(([k, v, c]) => `
     <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);
-         border-radius:7px;padding:6px 11px;display:flex;flex-direction:column;gap:2px">
-      <div style="font-size:9px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);
-           text-transform:uppercase;letter-spacing:.08em">${k}</div>
-      <div style="font-size:12px;font-weight:700;color:${c};
+         border-radius:9px;padding:8px 13px;display:flex;flex-direction:column;gap:3px">
+      <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);
+           text-transform:uppercase;letter-spacing:.1em">${k}</div>
+      <div style="font-size:13px;font-weight:700;color:${c};
            font-family:var(--mono,'Space Mono',monospace)">${v}</div>
     </div>`).join('');
 }

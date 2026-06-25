@@ -39,21 +39,21 @@ async function fetchQuarantine() {
 
       /* TTL countdown for time-ban rows */
       const ttlRemaining = e.ttl_remaining_sec != null
-        ? ` <span style="color:var(--amber,#ffb300);font-size:10px;font-family:var(--mono)">[${Math.floor(e.ttl_remaining_sec/60)}m ${e.ttl_remaining_sec%60}s]</span>`
+        ? ` <span style="color:var(--amber,#ffb300);font-size:11px;font-family:var(--mono)">[${Math.floor(e.ttl_remaining_sec/60)}m ${e.ttl_remaining_sec%60}s]</span>`
         : '';
 
       /* High priority badge */
       const priBadge = e.priority === 'High'
-        ? `<span class="p-high" style="font-size:11px">HIGH </span>`
+        ? `<span class="p-high">HIGH </span>`
         : '';
 
       const inner = `
         <td class="ip">${e.src_ip || '—'}</td>
-        <td style="color:var(--sub2);font-size:12px">${priBadge}${e.phase || '—'}${ttlRemaining}</td>
+        <td style="color:var(--sub2);font-size:13px">${priBadge}${e.phase || '—'}${ttlRemaining}</td>
         <td>${renderVector(e.attack_vector || '—')}</td>
         <td class="${scCls}">${sc.toFixed(4)}</td>
         <td class="mono">${conf}</td>
-        <td style="color:var(--sub2);font-family:var(--mono);font-size:11px">${time}</td>
+        <td style="color:var(--sub2);font-family:var(--mono);font-size:12px">${time}</td>
         <td><div style="display:flex;gap:6px">
           <button class="q-btn q-rel" onclick="event.stopPropagation();quarantineAction('release','${e.src_ip}')">Release</button>
           <button class="q-btn q-blk" onclick="event.stopPropagation();quarantineAction('block','${e.src_ip}')">Blackhole</button>
