@@ -87,7 +87,7 @@ class FatTreeController(app_manager.RyuApp):
 
         # PacketIn rate limiter — prevents OVS overload under rand-source floods
         self._pkt_in_rate: dict = {}
-        self._PKT_IN_RATE_LIMIT = 150
+        self._PKT_IN_RATE_LIMIT = 999999999
 
         hub.spawn(self._stats_poll_loop)
         hub.spawn(self._command_listener)

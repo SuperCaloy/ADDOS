@@ -2,6 +2,7 @@ import datetime
 import threading
 import logging
 from backend.database.db import execute, executemany, query
+from backend.config import ML_ENABLED
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,9 @@ def log_detection_features(src_ip: str, if_score: float,
                             confidence: float,
                             flow_stats: dict,
                             switch_stats: dict) -> None:
+    # --- ML OFF — skip DB write to avoid polluting dataset ---
+    if not ML_ENABLED:
+        return
     try:
         fs  = flow_stats  or {}
         ts  = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -275,6 +279,9 @@ def log_traffic_summary(total: int, threats: int,
                         rf_syn_as_icmp: int = 0, rf_syn_as_udp: int = 0,
                         rf_icmp_as_syn: int = 0, rf_icmp_as_udp: int = 0,
                         rf_udp_as_syn:  int = 0, rf_udp_as_icmp: int = 0) -> None:
+    # --- ML OFF — skip metric writes to keep dataset clean ---
+    if not ML_ENABLED:
+        return
     with _summary_lock:
         _summary_buffer["total"]    += total
         _summary_buffer["threats"]  += threats

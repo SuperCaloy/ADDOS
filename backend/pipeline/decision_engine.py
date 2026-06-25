@@ -8,6 +8,7 @@ from backend.mitigation.deception import deception
 from backend.database import writer
 from backend.pipeline import worker
 from backend.models import loader
+from backend.config import ML_ENABLED
 
 log = logging.getLogger(__name__)
 
@@ -213,6 +214,14 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     with _lock:
         _stats["total_packets"] += 1
+
+    # --- ML OFF — count packet as normal, skip all detection and mitigation ---
+    if not ML_ENABLED:
+        _pkt_count = max(int((flow_stats or {}).get("packet_count", 1)), 1)
+        with _lock:
+            _stats["normal_packets"]   += 1
+            _stats["normal_forwarded"] += _pkt_count
+        return
 
     if timed_out:
         state_machine.manual_block(src_ip)
