@@ -11,16 +11,32 @@ _pps_lock    = threading.Lock()
 
 
 def _get_ctrl_metrics() -> tuple:
-    """Find ryu-manager process, return (cpu%, mem_mb). Returns (0,0) if not found."""
+    """Find ryu-manager process + all children, return (cpu%, mem_mb).
+    Includes child processes (eventlet workers, ZMQ threads spawned by Ryu).
+    Returns (0,0) if not found."""
     for proc in psutil.process_iter(['name', 'cmdline']):
         try:
             if 'ryu-manager' in (proc.info['name'] or '') or \
                any('ryu-manager' in c for c in (proc.info['cmdline'] or [])):
-                # non-blocking — uses delta since last call, not a sleep
-                # divide by core count so % reflects total system, not one core
-                cpu_pct = proc.cpu_percent(interval=None) / psutil.cpu_count()
-                return (cpu_pct,
-                        proc.memory_info().rss / (1024 * 1024))
+
+                # --- Collect ryu-manager + all its children ---
+                all_procs = [proc] + proc.children(recursive=True)
+
+                # --- Sum CPU across all, normalize to system-relative % ---
+                total_cpu = sum(
+                    p.cpu_percent(interval=None)
+                    for p in all_procs
+                    if p.is_running()
+                ) / psutil.cpu_count()
+
+                # --- Sum RSS memory across all processes ---
+                total_mem = sum(
+                    p.memory_info().rss
+                    for p in all_procs
+                    if p.is_running()
+                ) / (1024 * 1024)
+
+                return (total_cpu, total_mem)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             pass
     return (0.0, 0.0)
@@ -37,7 +53,7 @@ def start() -> None:
         global _pps_counter
         proc = psutil.Process()
 
-        # prime cpu_percent — first call always returns 0.0
+        # --- Prime cpu_percent — first call always returns 0.0 ---
         psutil.cpu_percent(interval=None)
         _get_ctrl_metrics()
 
@@ -51,7 +67,7 @@ def start() -> None:
                     pps = _pps_counter / 1.0
                     _pps_counter = 0
 
-                # Tag as attack or baseline using live ground truth
+                # --- Tag as attack or baseline using live ground truth ---
                 try:
                     from backend.api.stats import get_active_attacks
                     is_attack = len(get_active_attacks()) > 0

@@ -33,21 +33,22 @@ _LEGIT_NUMS    = {1, 2, 3, 4, 5}
 
 # 5 SYN, 5 ICMP, 2 UDP, 2 MIXED
 _ATTACKER_VARIANTS = {
-    6:  ("SYN", "-S -p 80   --flood"),
-    7:  ("SYN", "-S -p 443  --flood"),
-    8:  ("SYN", "-S -p 22   --flood"),
-    9:  ("SYN", "-S -p 3306 --flood"),
-    10: ("SYN", "-S -p 8080 --flood"),
-    11: ("ICMP", "--icmp --flood --data 1400"),
-    12: ("ICMP", "--icmp --flood --data 64"),
-    13: ("ICMP", "--icmp --flood --data 256"),
-    14: ("ICMP", "--icmp --flood --data 512"),
-    15: ("ICMP", "--icmp --flood --data 128"),
-    16: ("UDP", "--udp -p 53    --flood --data 1400"),
-    17: ("UDP", "--udp -p 123   --flood --data 512"),
+    #        type     flags                              burst   sleep
+    6:  ("SYN",  "-S -p 80   --flood",                  5000, 0.20),
+    7:  ("SYN",  "-S -p 443  --flood",                  5000, 0.20),
+    8:  ("SYN",  "-S -p 22   --flood",                  5000, 0.20),
+    9:  ("SYN",  "-S -p 3306 --flood",                  4000, 0.25),
+    10: ("SYN",  "-S -p 8080 --flood",                  5000, 0.20),
+    11: ("ICMP", "--icmp --flood --data 1400",           8000, 0.10),
+    12: ("ICMP", "--icmp --flood --data 64",             8000, 0.10),
+    13: ("ICMP", "--icmp --flood --data 256",            6000, 0.15),
+    14: ("ICMP", "--icmp --flood --data 512",            6000, 0.15),
+    15: ("ICMP", "--icmp --flood --data 128",            7000, 0.10),
+    16: ("UDP",  "--udp -p 53    --flood --data 1400",   6000, 0.15),
+    17: ("UDP",  "--udp -p 123   --flood --data 512",    6000, 0.15),
     # MIXED fires SYN and UDP together, model never trained on this combo
-    18: ("MIXED", "-S -p 1900  --flood"),
-    19: ("MIXED", "--udp -p 11211 --flood"),
+    18: ("MIXED", "-S -p 1900   --flood",               5000, 0.20),
+    19: ("MIXED", "--udp -p 11211 --flood",              5000, 0.20),
 }
 
 # Stagger order: SYN, then ICMP, then UDP, then MIXED
@@ -204,7 +205,7 @@ def _assign_attacks() -> list[dict]:
     for h in hosts:
         num = int(h.name[1:])
         if num in _ATTACKER_NUMS:
-            attack_type, flags = _ATTACKER_VARIANTS[num]
+            attack_type, flags, _, _ = _ATTACKER_VARIANTS[num]
             _attack_assignments.append({
                 "attacker": h.name, "attack_type": attack_type,
                 "flags": flags, "target": SERVER_IP,
@@ -398,16 +399,29 @@ def start_server() -> None:
 # === ATTACKS ===
 
 def _hping_cmd(attacker_num: int, target: str, count: int = None) -> str:
-    # build hping3 command from attacker variant config
-    atype, flags = _ATTACKER_VARIANTS.get(attacker_num, ("SYN", "-S -p 80 --flood"))
-    count_flag   = f"-c {count} " if count else ""
+    # Build hping3 command from attacker variant config.
+    # Uses burst-sleep loop: send N packets with --flood, sleep briefly, repeat.
+    # This hammers controller in waves instead of pure continuous flood,
+    # which causes more visible CPU spikes on Ryu's packet-in handler.
+    variant  = _ATTACKER_VARIANTS.get(attacker_num, ("SYN", "-S -p 80 --flood", 5000, 0.20))
+    atype, flags, burst, sleep_s = variant
 
+    if count:
+        # One-shot mode — send exact packet count once (used by flash_attack)
+        if atype == "MIXED":
+            return (f"hping3 -S -p 1900 -c {count} {target} 2>/dev/null & "
+                    f"hping3 --udp -p 11211 -c {count} {target} 2>/dev/null &")
+        return f"hping3 {flags} -c {count} {target}"
+
+    # Burst-sleep loop — waves of flood traffic
     if atype == "MIXED":
-        # fire SYN and UDP together, one source IP, two protocols
-        return (f"hping3 -S -p 1900 {count_flag}{target} 2>/dev/null & "
-                f"hping3 --udp -p 11211 {count_flag}{target} 2>/dev/null &")
+        return (f"while true; do "
+                f"hping3 -S -p 1900 -c {burst} {target} > /dev/null 2>&1; "
+                f"hping3 --udp -p 11211 -c {burst} {target} > /dev/null 2>&1; "
+                f"sleep {sleep_s}; done")
 
-    return f"hping3 {flags} {count_flag}{target}"
+    return (f"while true; do hping3 {flags} -c {burst} {target} "
+            f"> /dev/null 2>&1; sleep {sleep_s}; done")
 
 
 def _notify_attack_start(ip: str, attack_type: str) -> None:
@@ -450,7 +464,7 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
         time.sleep(1)
 
     while not stop_event.is_set():
-        atype, _ = _ATTACKER_VARIANTS.get(num, ("SYN", ""))
+        atype, _, _, _ = _ATTACKER_VARIANTS.get(num, ("SYN", "", 5000, 0.20))
         cmd      = _hping_cmd(num, SERVER_IP)
 
         atk_dur = random.randint(atk_min, atk_max)
@@ -574,7 +588,7 @@ def start_mixed_campaign() -> None:
     info("    Each attacker runs a random attack and rest cycle until stopped\n\n")
 
     for num in sorted(_ATTACKER_VARIANTS.keys()):
-        atype, flags = _ATTACKER_VARIANTS[num]
+        atype, flags, _, _ = _ATTACKER_VARIANTS[num]
         delay        = _ATTACKER_START_DELAYS.get(num, 0)
         atk_min, atk_max, rst_min, rst_max = _ATTACKER_CYCLES.get(num, (15, 30, 5, 10))
         info(f"    h{num} [{atype}] {flags}\n"

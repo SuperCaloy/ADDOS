@@ -34,6 +34,12 @@ EXTRACTION_TRIGGER_S    = 0.05
 # --- Simulation mode ---
 SIMULATION_MODE = True
 
+# --- ML Engine toggle ---
+# Set False to disable all detection, mitigation, and DB metric writes.
+# Use for controller overhead baseline measurement (ML OFF vs ML ON comparison).
+# Only system/controller CPU and memory metrics are recorded when False.
+ML_ENABLED = False
+
 # --- Old SYN-only pre-filter (kept for backward compat, replaced by flood prefilter) ---
 SYN_HALFOPEN_LIMIT  = 100
 SYN_WINDOW_S        = 2.0

@@ -11,6 +11,7 @@ from reportlab.platypus import (
 )
 from backend.database.db import query
 from backend.database import writer
+from backend.config import ML_ENABLED
 
 bp = Blueprint("report", __name__)
 
@@ -74,8 +75,12 @@ def generate_report():
         ORDER BY timestamp ASC
     """, (start_sql, end_sql, start_sql, end_sql))
 
-    if not rows:
+    if not rows and ML_ENABLED:
         return jsonify({"error": "No data found for the selected date range."}), 404
+
+    # --- ML OFF — generate report with only system/controller metrics ---
+    if not ML_ENABLED:
+        rows = []
 
     pdf_bytes = _build_pdf(start_str, end_str, rows)
     buf = io.BytesIO(pdf_bytes)
