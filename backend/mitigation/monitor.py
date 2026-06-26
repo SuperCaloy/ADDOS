@@ -3,6 +3,7 @@ import time
 import logging
 import psutil
 from backend.database import writer
+from backend.config import ML_ENABLED
 
 log = logging.getLogger(__name__)
 
@@ -22,12 +23,11 @@ def _get_ctrl_metrics() -> tuple:
                 # --- Collect ryu-manager + all its children ---
                 all_procs = [proc] + proc.children(recursive=True)
 
-                # --- Sum CPU across all, normalize to system-relative % ---
-                total_cpu = sum(
-                    p.cpu_percent(interval=None)
+                total_cpu = min(sum(
+                    p.cpu_percent(interval=0.1)
                     for p in all_procs
                     if p.is_running()
-                ) / psutil.cpu_count()
+                ), 100.0)
 
                 # --- Sum RSS memory across all processes ---
                 total_mem = sum(
@@ -69,8 +69,22 @@ def start() -> None:
 
                 # --- Tag as attack or baseline using live ground truth ---
                 try:
-                    from backend.api.stats import get_active_attacks
-                    is_attack = len(get_active_attacks()) > 0
+                    # Check if hping3 is running anywhere in the process tree.
+                    # Covers rand-source floods where IPs cycle fast and
+                    # active_attacks() may return 0 between quarantine windows.
+                    hping3_running = any(
+                        'hping3' in ' '.join(p.info.get('cmdline') or [])
+                        or p.info.get('name') == 'hping3'
+                        for p in psutil.process_iter(['name', 'cmdline'])
+                    )
+
+                    if ML_ENABLED:
+                        from backend.api.stats import get_active_attacks
+                        # Mark as attack if ML detects active threats OR hping3 is running
+                        is_attack = len(get_active_attacks()) > 0 or hping3_running
+                    else:
+                        # ML OFF — rely on hping3 process detection only
+                        is_attack = hping3_running
                 except Exception:
                     is_attack = False
 

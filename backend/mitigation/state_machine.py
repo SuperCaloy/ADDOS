@@ -12,17 +12,17 @@ from backend.mitigation.traffic_filter import (
     get_ban_duration, get_blackhole_ttl, MAX_BAN_LEVEL,
 )
 from backend.mitigation import behavioral
+from backend.config import SIMULATION_MODE
 
 log = logging.getLogger(__name__)
 
 # ── Phase 1 observation durations ─────────────────────────────────────────
-PHASE1_DURATION_LOW  = 30.0
-PHASE1_DURATION_HIGH = 60.0
+PHASE1_DURATION_LOW  = 10.0
+PHASE1_DURATION_HIGH = 20.0
 
-PROBATION_DURATION        = 120.0
-MIN_QUARANTINE_CONFIDENCE = 0.60
-# attack_vector is locked once confidence reaches this — prevents RF flipping
-# the vector on a mid-ban IP or a previously confirmed classification
+# Simulation: 30s watch. Production: 5 min watch.
+PROBATION_DURATION = 30.0 if SIMULATION_MODE else 300.0
+MIN_QUARANTINE_CONFIDENCE = 0.70
 CONFIDENCE_LOCK_THRESHOLD = 0.80
 
 PHASE_LABELS = {
@@ -242,15 +242,26 @@ class StateMachine:
                         self._persist(state)
 
             else:
-                # Update vector only if new confidence beats prior — best evidence wins
-                _better_evidence = confidence > state.confidence
-                state.if_score   = if_score
-                if _better_evidence:
+                # Phase 4 probation — re-attack detected.
+                # Skip Phase 1, go straight to next ban level.
+                if state.phase == 4:
+                    log.info("Probation re-attack: %s — escalating ban", src_ip)
+                    state.if_score      = if_score
                     state.attack_vector = attack_class
-                    state.confidence     = confidence
+                    state.confidence    = confidence
+                    state.permanent     = True
+                    self._advance_to_ban(state)
+
                 else:
-                    state.confidence = confidence
-                self._persist(state)
+                    # Update vector only if new confidence beats prior — best evidence wins
+                    _better_evidence = confidence > state.confidence
+                    state.if_score   = if_score
+                    if _better_evidence:
+                        state.attack_vector = attack_class
+                        state.confidence     = confidence
+                    else:
+                        state.confidence = confidence
+                    self._persist(state)
 
             if state is not None:
                 return state.action_taken
@@ -297,9 +308,11 @@ class StateMachine:
 
                 elif state.phase == 2:
                     if state.ttl_expires_at and now >= state.ttl_expires_at:
+                        # Ban expired — move to probation, unblock traffic.
+                        # IP is still watched; re-attack skips Phase 1.
                         log.info("Time ban expired: %s (level %d) → probation",
                                  src_ip, state.ban_level)
-                        self._clear(src_ip, reason="Ban Expired")
+                        self._advance_to_probation(src_ip, state)
 
                 elif state.phase == 3:
                     if state.ttl_expires_at and now >= state.ttl_expires_at:
@@ -376,6 +389,38 @@ class StateMachine:
             "action_taken":    f"Time Ban ({ban_label})",
             "if_score":        state.if_score,
             "phase":           "Time Ban",
+            "is_manual":       False,
+        })
+
+    def _advance_to_probation(self, src_ip: str, state: IpState) -> None:
+        # Move IP from Phase 2 to Phase 4 Probation.
+        # Install rate_limit so ML can observe traffic without flood risk.
+        # If ML flags re-attack during probation, jumps straight to Phase 2.
+        state.phase         = 4
+        state.phase_entered = time.monotonic()
+        state.action_taken  = "Probation"
+        state.permanent     = False
+        state.ttl_expires_at = None
+
+        # Remove block rule first, then rate_limit for throttled observation.
+        # rate_limit allows traffic so zmq_receiver can score it via ML.
+        self._push_command(src_ip, resolve_release_action())
+        self._push_command(src_ip, "rate_limit")
+        writer.delete_quarantine_state(src_ip)
+
+        log.info("Phase 4 Probation: %s  ban_level=%d  watch=%.0fs",
+                 src_ip, state.ban_level, PROBATION_DURATION)
+
+        writer.log_mitigation_event({
+            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "src_ip":          src_ip,
+            "predicted_class": "DDoS",
+            "attack_vector":   state.attack_vector,
+            "confidence":      state.confidence,
+            "priority":        state.priority,
+            "action_taken":    "Probation",
+            "if_score":        state.if_score,
+            "phase":           "Probation",
             "is_manual":       False,
         })
 

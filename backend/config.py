@@ -32,28 +32,19 @@ EXTRACTION_TRIGGER_PKTS = 1
 EXTRACTION_TRIGGER_S    = 0.05
 
 # --- Simulation mode ---
-SIMULATION_MODE = True
+SIMULATION_MODE = False
 
 # --- ML Engine toggle ---
-# Set False to disable all detection, mitigation, and DB metric writes.
-# Use for controller overhead baseline measurement (ML OFF vs ML ON comparison).
-# Only system/controller CPU and memory metrics are recorded when False.
-ML_ENABLED = False
+ML_ENABLED = True
 
-# --- Old SYN-only pre-filter (kept for backward compat, replaced by flood prefilter) ---
-SYN_HALFOPEN_LIMIT  = 100
-SYN_WINDOW_S        = 2.0
-
-# --- Flood pre-filter (all protocols) ---
-# Thresholds validated against Juniper Networks and Cisco ASA industry defaults.
-
+# --- Flood pre-filter
 FLOOD_SYN_LIMIT     = 1000
 FLOOD_SYN_WINDOW_S  = 1.0
 
-FLOOD_ICMP_LIMIT    = 1000
+FLOOD_ICMP_LIMIT    = 50
 FLOOD_ICMP_WINDOW_S = 1.0
 
-FLOOD_UDP_LIMIT     = 1000
+FLOOD_UDP_LIMIT     = 50
 FLOOD_UDP_WINDOW_S  = 1.0
 
 # --- Temporal Entropy Analysis (TEA) ---
@@ -64,10 +55,6 @@ TEA_WINDOW_SIZE = 5
 # --- API ---
 FLASK_HOST = "0.0.0.0"
 FLASK_PORT = 5000
-IF_SCORE_THRESHOLD_OVERRIDE = None
-
-# Minimum packet count — zero-packet flows are always dropped
-MIN_FLOW_PKTS_FOR_INFERENCE = 0
 
 # --- UI batching ---
 UI_BATCH_INTERVAL_S = 0.5

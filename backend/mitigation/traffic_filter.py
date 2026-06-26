@@ -16,6 +16,11 @@ MAX_BAN_LEVEL      = len(BAN_LEVELS) - 1
 # Phase 3 blackhole TTL
 BLACKHOLE_TTL_SECONDS = 3600  # 1 hour
 
+# Phase 1 rate limit — OpenFlow Meter threshold (packets per second).
+# 1000 pps matches 2021-2026 SDN DDoS research baseline for observation phase.
+# Excess packets dropped by meter; traffic below limit still reaches server.
+RATE_LIMIT_PPS = 1000 if SIMULATION_MODE else 5000
+
 
 def get_ban_duration(ban_level: int) -> int:
     # Returns ban duration in seconds for the given level.

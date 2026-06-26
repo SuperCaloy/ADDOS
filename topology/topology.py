@@ -34,21 +34,22 @@ _LEGIT_NUMS    = {1, 2, 3, 4, 5}
 # 5 SYN, 5 ICMP, 2 UDP, 2 MIXED
 _ATTACKER_VARIANTS = {
     #        type     flags                              burst   sleep
-    6:  ("SYN",  "-S -p 80   --flood",                  5000, 0.20),
-    7:  ("SYN",  "-S -p 443  --flood",                  5000, 0.20),
-    8:  ("SYN",  "-S -p 22   --flood",                  5000, 0.20),
-    9:  ("SYN",  "-S -p 3306 --flood",                  4000, 0.25),
-    10: ("SYN",  "-S -p 8080 --flood",                  5000, 0.20),
-    11: ("ICMP", "--icmp --flood --data 1400",           8000, 0.10),
-    12: ("ICMP", "--icmp --flood --data 64",             8000, 0.10),
-    13: ("ICMP", "--icmp --flood --data 256",            6000, 0.15),
-    14: ("ICMP", "--icmp --flood --data 512",            6000, 0.15),
-    15: ("ICMP", "--icmp --flood --data 128",            7000, 0.10),
-    16: ("UDP",  "--udp -p 53    --flood --data 1400",   6000, 0.15),
-    17: ("UDP",  "--udp -p 123   --flood --data 512",    6000, 0.15),
+    # burst/sleep unused — all attackers run pure continuous --flood (no -c, no sleep)
+    6:  ("SYN",  "-S -p 80   --flood",                  0, 0),
+    7:  ("SYN",  "-S -p 443  --flood",                  0, 0),
+    8:  ("SYN",  "-S -p 22   --flood",                  0, 0),
+    9:  ("SYN",  "-S -p 3306 --flood",                  0, 0),
+    10: ("SYN",  "-S -p 8080 --flood",                  0, 0),
+    11: ("ICMP", "--icmp --flood --data 1400",           0, 0),
+    12: ("ICMP", "--icmp --flood --data 64",             0, 0),
+    13: ("ICMP", "--icmp --flood --data 256",            0, 0),
+    14: ("ICMP", "--icmp --flood --data 512",            0, 0),
+    15: ("ICMP", "--icmp --flood --data 128",            0, 0),
+    16: ("UDP",  "--udp -p 53    --flood --data 1400",   0, 0),
+    17: ("UDP",  "--udp -p 123   --flood --data 512",    0, 0),
     # MIXED fires SYN and UDP together, model never trained on this combo
-    18: ("MIXED", "-S -p 1900   --flood",               5000, 0.20),
-    19: ("MIXED", "--udp -p 11211 --flood",              5000, 0.20),
+    18: ("MIXED", "-S -p 1900   --flood",               0, 0),
+    19: ("MIXED", "--udp -p 11211 --flood",              0, 0),
 }
 
 # Stagger order: SYN, then ICMP, then UDP, then MIXED
@@ -158,7 +159,10 @@ def _weighted_distribute(n_hosts: int, n_switches: int) -> list[int]:
 
 
 def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
-    # 1 core switch, n_edge switches, hosts on flat 10.0.0.x/24
+    # 1 core switch, n_edge switches, hosts on flat 10.0.0.x/24.
+    # Layout is fixed — not random — so topology is identical every run:
+    #   s1–s7 → h1–h19 evenly spread (2–3 hosts each)
+    #   s8    → h20 server only (dedicated, isolated from attacker switches)
     global _host_switch_map
     _net = Mininet(
         controller=None, switch=OVSKernelSwitch,
@@ -174,19 +178,35 @@ def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
         _net.addLink(core, sw)
         edge_switches.append(sw)
 
-    distribution = _weighted_distribute(n_hosts, n_edge)
-    _hosts, host_num = [], 1
-    for sw, count in zip(edge_switches, distribution):
-        for _ in range(count):
-            ip   = f"10.0.0.{host_num}"
-            mac  = f"00:00:00:00:00:{host_num:02x}"
-            host = _net.addHost(f"h{host_num}", ip=f"{ip}/24", mac=mac)
-            _net.addLink(host, sw)
-            _hosts.append(host)
-            _host_switch_map[f"h{host_num}"] = sw.name
-            host_num += 1
+    # Fixed host-to-switch mapping — deterministic every run.
+    # h1–h19 spread across s1–s7 (3 per switch, last has 1).
+    # h20 server on s8 only — dedicated, no attacker on same switch.
+    _HOST_TO_SWITCH = {
+        1: 1,  2: 1,  3: 1,
+        4: 2,  5: 2,  6: 2,
+        7: 3,  8: 3,  9: 3,
+        10: 4, 11: 4, 12: 4,
+        13: 5, 14: 5, 15: 5,
+        16: 6, 17: 6, 18: 6,
+        19: 7,
+        20: 8,
+    }
 
-    # h21 is a silent sinkhole host, connected to core, receives redirected traffic
+    _hosts = []
+    for host_num in range(1, n_hosts + 1):
+        sw_idx = _HOST_TO_SWITCH[host_num]
+        sw     = edge_switches[sw_idx - 1]
+        ip     = f"10.0.0.{host_num}"
+        mac    = f"00:00:00:00:00:{host_num:02x}"
+        host   = _net.addHost(f"h{host_num}", ip=f"{ip}/24", mac=mac)
+        _net.addLink(host, sw)
+        _hosts.append(host)
+        _host_switch_map[f"h{host_num}"] = sw.name
+
+    # Distribution count per switch — used for banner display only
+    distribution = [3, 3, 3, 3, 3, 3, 1, 1]
+
+    # h21 silent sinkhole — connected to core, receives redirected traffic
     sinkhole = _net.addHost(
         "h21",
         ip=f"{SINKHOLE_IP}/24",
@@ -400,11 +420,10 @@ def start_server() -> None:
 
 def _hping_cmd(attacker_num: int, target: str, count: int = None) -> str:
     # Build hping3 command from attacker variant config.
-    # Uses burst-sleep loop: send N packets with --flood, sleep briefly, repeat.
-    # This hammers controller in waves instead of pure continuous flood,
-    # which causes more visible CPU spikes on Ryu's packet-in handler.
-    variant  = _ATTACKER_VARIANTS.get(attacker_num, ("SYN", "-S -p 80 --flood", 5000, 0.20))
-    atype, flags, burst, sleep_s = variant
+    # Pure continuous flood — no burst limit, no sleep between waves.
+    # Every attacker sends at full --flood rate until killed.
+    variant  = _ATTACKER_VARIANTS.get(attacker_num, ("SYN", "-S -p 80 --flood", 0, 0))
+    atype, flags, _, _ = variant
 
     if count:
         # One-shot mode — send exact packet count once (used by flash_attack)
@@ -413,15 +432,13 @@ def _hping_cmd(attacker_num: int, target: str, count: int = None) -> str:
                     f"hping3 --udp -p 11211 -c {count} {target} 2>/dev/null &")
         return f"hping3 {flags} -c {count} {target}"
 
-    # Burst-sleep loop — waves of flood traffic
+    # Pure continuous flood — no -c limit, no sleep
     if atype == "MIXED":
-        return (f"while true; do "
-                f"hping3 -S -p 1900 -c {burst} {target} > /dev/null 2>&1; "
-                f"hping3 --udp -p 11211 -c {burst} {target} > /dev/null 2>&1; "
-                f"sleep {sleep_s}; done")
+        return (f"hping3 -S -p 1900 --flood {target} > /dev/null 2>&1 & "
+                f"hping3 --udp -p 11211 --flood {target} > /dev/null 2>&1 & "
+                f"wait")
 
-    return (f"while true; do hping3 {flags} -c {burst} {target} "
-            f"> /dev/null 2>&1; sleep {sleep_s}; done")
+    return f"hping3 {flags} {target} > /dev/null 2>&1"
 
 
 def _notify_attack_start(ip: str, attack_type: str) -> None:
@@ -453,46 +470,33 @@ def _notify_attack_stop(ip: str) -> None:
 
 
 def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
-    h      = net.get(f"h{num}")
-    delay  = _ATTACKER_START_DELAYS.get(num, 0)
-    atk_min, atk_max, rst_min, rst_max = _ATTACKER_CYCLES.get(num, (15, 30, 5, 10))
-    ip     = h.IP()
+    # Continuous flood — no rest periods.
+    # Staggered start only, then floods until stop_event is set.
+    h     = net.get(f"h{num}")
+    delay = _ATTACKER_START_DELAYS.get(num, 0)
+    ip    = h.IP()
 
+    # Wait for stagger delay before starting
     for _ in range(delay):
         if stop_event.is_set():
             return
         time.sleep(1)
 
+    atype, _, _, _ = _ATTACKER_VARIANTS.get(num, ("SYN", "", 5000, 0.20))
+    cmd = _hping_cmd(num, SERVER_IP)
+
+    # Start continuous flood — runs until killed
+    h.cmd(f"{cmd} > /dev/null 2>&1 &")
+    _notify_attack_start(ip, atype)
+    _active_attackers.add(ip)
+
+    # Hold until stop signal
     while not stop_event.is_set():
-        atype, _, _, _ = _ATTACKER_VARIANTS.get(num, ("SYN", "", 5000, 0.20))
-        cmd      = _hping_cmd(num, SERVER_IP)
+        time.sleep(1)
 
-        atk_dur = random.randint(atk_min, atk_max)
-        _nsrun(h, f"{cmd} > /dev/null 2>&1")
-        _notify_attack_start(ip, atype)
-        _active_attackers.add(ip)
-
-        for _ in range(atk_dur):
-            if stop_event.is_set():
-                _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
-                _notify_attack_stop(ip)
-                return
-            time.sleep(1)
-
-        _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
-        _notify_attack_stop(ip)
-        if stop_event.is_set():
-            return
-
-        rst_dur = random.randint(rst_min, rst_max)
-        for _ in range(rst_dur):
-            if stop_event.is_set():
-                return
-            time.sleep(1)
-
-    _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
+    # Stop flood and notify backend
+    h.cmd("pkill -9 -f hping3 2>/dev/null; true")
     _notify_attack_stop(ip)
-    _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
 
 
 def launch_attack(sustained: bool = True) -> None:
@@ -551,48 +555,64 @@ def launch_udp_flood_sustained(attacker_name="h16") -> None:
 
 
 def start_syn_flood_campaign() -> None:
-    info("*** [CAMPAIGN] SYN, h6 h7 h8\n")
+    # SYN flood — h6, h7, h8 continuous
+    info("\n" + "=" * 55 + "\n")
+    info("  [SYN CAMPAIGN]  h6 h7 h8  |  Continuous flood\n")
+    info("=" * 55 + "\n")
     for num in [6, 7, 8]:
         h = net.get(f"h{num}")
         _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
-        info(f"    h{num} ({h.IP()}) [{_ATTACKER_VARIANTS[num][1]}]\n")
-    info("    -> use  py stop_all_attacks()  to stop.\n")
+        info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+    info("=" * 55 + "\n")
+    info("  Stop: py stop_all_attacks()\n")
+    info("=" * 55 + "\n\n")
 
 
 def start_icmp_flood_campaign() -> None:
-    info("*** [CAMPAIGN] ICMP, h11 h12 h13\n")
+    # ICMP flood — h11, h12, h13 continuous
+    info("\n" + "=" * 55 + "\n")
+    info("  [ICMP CAMPAIGN]  h11 h12 h13  |  Continuous flood\n")
+    info("=" * 55 + "\n")
     for num in [11, 12, 13]:
         h = net.get(f"h{num}")
         _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
-        info(f"    h{num} ({h.IP()}) [{_ATTACKER_VARIANTS[num][1]}]\n")
-    info("    -> use  py stop_all_attacks()  to stop.\n")
+        info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+    info("=" * 55 + "\n")
+    info("  Stop: py stop_all_attacks()\n")
+    info("=" * 55 + "\n\n")
 
 
 def start_udp_flood_campaign() -> None:
-    info("*** [CAMPAIGN] UDP, h16 h17 h18\n")
+    # UDP flood — h16, h17, h18 continuous
+    info("\n" + "=" * 55 + "\n")
+    info("  [UDP CAMPAIGN]  h16 h17 h18  |  Continuous flood\n")
+    info("=" * 55 + "\n")
     for num in [16, 17, 18]:
         h = net.get(f"h{num}")
         _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
-        info(f"    h{num} ({h.IP()}) [{_ATTACKER_VARIANTS[num][1]}]\n")
-    info("    -> use  py stop_all_attacks()  to stop.\n")
+        info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+    info("=" * 55 + "\n")
+    info("  Stop: py stop_all_attacks()\n")
+    info("=" * 55 + "\n\n")
 
 
 def start_mixed_campaign() -> None:
-    # all attackers, staggered starts, independent random attack/rest cycles
+    # all 14 attackers, staggered starts, continuous flood — no rest periods
     global _mixed_stop_event, _campaign_threads
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
-    info("*** [CAMPAIGN] Mixed, staggered cyclic attack, all 14 attackers\n")
-    info("    SYN (h6-h10) -> ICMP (h11-h15) -> UDP (h16-h17) -> MIXED (h18-h19)\n")
-    info("    Each attacker runs a random attack and rest cycle until stopped\n\n")
+    info("\n" + "=" * 65 + "\n")
+    info("  [MIXED CAMPAIGN]  All 14 attackers  |  Continuous flood\n")
+    info("  SYN (h6-h10) -> ICMP (h11-h15) -> UDP (h16-h17) -> MIXED (h18-h19)\n")
+    info("=" * 65 + "\n")
+    info(f"  {'HOST':<6} {'TYPE':<8} {'FLAGS':<35} START\n")
+    info("  " + "-" * 60 + "\n")
 
     for num in sorted(_ATTACKER_VARIANTS.keys()):
         atype, flags, _, _ = _ATTACKER_VARIANTS[num]
-        delay        = _ATTACKER_START_DELAYS.get(num, 0)
-        atk_min, atk_max, rst_min, rst_max = _ATTACKER_CYCLES.get(num, (15, 30, 5, 10))
-        info(f"    h{num} [{atype}] {flags}\n"
-             f"         start: +{delay}s | attack: {atk_min}-{atk_max}s | rest: {rst_min}-{rst_max}s\n")
+        delay = _ATTACKER_START_DELAYS.get(num, 0)
+        info(f"  h{num:<5} {atype:<8} {flags:<35} +{delay}s\n")
         t = threading.Thread(
             target=_attacker_cycle_worker,
             args=(num, _mixed_stop_event),
@@ -602,32 +622,103 @@ def start_mixed_campaign() -> None:
         _campaign_threads.append(t)
         t.start()
 
-    info("\n    -> use  py stop_all_attacks()  to stop.\n")
+    info("=" * 65 + "\n")
+    info("  Stop: py stop_all_attacks()\n")
+    info("=" * 65 + "\n\n")
+
+
+
+# === STRESS TEST (rand-source) ===
+
+_stress_stop_event = threading.Event()
+_stress_threads: list = []
+
+
+def start_stress_test() -> None:
+    # Pure stress test — all attackers use --rand-source to spoof random IPs.
+    # Forces controller to track thousands of unknown flows, spiking memory.
+    # Use for ML ON or ML OFF controller resource stress measurement.
+    # RF accuracy is not meaningful here — random IPs have no flow history.
+    global _stress_stop_event, _stress_threads
+    _stress_stop_event = threading.Event()
+    _stress_threads.clear()
+
+    # Build rand-source flood commands per attack type
+    _STRESS_CMDS = {
+        6:  "hping3 -S -p 80   --flood --rand-source {t} > /dev/null 2>&1",
+        7:  "hping3 -S -p 443  --flood --rand-source {t} > /dev/null 2>&1",
+        8:  "hping3 -S -p 22   --flood --rand-source {t} > /dev/null 2>&1",
+        9:  "hping3 -S -p 3306 --flood --rand-source {t} > /dev/null 2>&1",
+        10: "hping3 -S -p 8080 --flood --rand-source {t} > /dev/null 2>&1",
+        11: "hping3 --icmp --flood --rand-source --data 1400 {t} > /dev/null 2>&1",
+        12: "hping3 --icmp --flood --rand-source --data 64   {t} > /dev/null 2>&1",
+        13: "hping3 --icmp --flood --rand-source --data 256  {t} > /dev/null 2>&1",
+        14: "hping3 --icmp --flood --rand-source --data 512  {t} > /dev/null 2>&1",
+        15: "hping3 --icmp --flood --rand-source --data 128  {t} > /dev/null 2>&1",
+        16: "hping3 --udp -p 53    --flood --rand-source --data 1400 {t} > /dev/null 2>&1",
+        17: "hping3 --udp -p 123   --flood --rand-source --data 512  {t} > /dev/null 2>&1",
+        18: "hping3 -S -p 1900   --flood --rand-source {t} > /dev/null 2>&1 & hping3 --udp -p 11211 --flood --rand-source {t} > /dev/null 2>&1 & wait",
+        19: "hping3 --udp -p 11211 --flood --rand-source {t} > /dev/null 2>&1 & hping3 -S -p 1900 --flood --rand-source {t} > /dev/null 2>&1 & wait",
+    }
+
+    info("*** Starting stress test — all 14 attackers, rand-source flood -> {}\n".format(SERVER_IP))
+
+    # Stagger each attacker by 100ms — prevents OVS from being hit by all
+    # 14 floods in the same millisecond, which causes switch disconnects.
+    # 100ms per host = ~1.4s total ramp — still appears simultaneous in report.
+    def _stress_worker(num: int) -> None:
+        h   = net.get(f"h{num}")
+        cmd = _STRESS_CMDS[num].format(t=SERVER_IP)
+        # use host.cmd — proven to work, no nsenter needed
+        h.cmd(f"{cmd} &")
+        info(f"    h{num} ({h.IP()}): stress flood started\n")
+
+    for i, num in enumerate(sorted(_ATTACKER_NUMS)):
+        t = threading.Thread(target=_stress_worker, args=(num,), daemon=True)
+        t.start()
+        time.sleep(0.1)
+
+    info("\n    -> Use  py stop_stress_test()  to stop.\n")
+
+
+def stop_stress_test() -> None:
+    # stop all rand-source stress flood processes
+    # use host.cmd — proven to work, no nsenter needed
+    info("*** Stopping stress test...\n")
+    _stress_stop_event.set()
+    for h in net.hosts:
+        if int(h.name[1:]) in _ATTACKER_NUMS:
+            h.cmd("pkill -9 -f hping3 2>/dev/null; true")
+    info("*** Stress test stopped.\n")
 
 
 def stop_all_attacks() -> None:
     global _mixed_stop_event, _campaign_threads
 
-    # signal threads to stop
+    # stop stress test first — covers rand-source floods
+    stop_stress_test()
+
+    # signal mixed campaign threads to stop
     _mixed_stop_event.set()
 
-    # join threads first, so no thread restarts hping3 after we kill it
+    # wait for threads to exit before killing hping3
+    # prevents threads from restarting hping3 after we kill it
     info("*** Waiting for campaign threads to exit...\n")
     for t in _campaign_threads:
         t.join(timeout=5)
     _campaign_threads.clear()
 
-    # kill hping3, wait for it to finish before continuing
+    # kill hping3 using host.cmd — proven to work, no nsenter needed
     info("*** Killing hping3 on all attackers...\n")
     for h in net.hosts:
         if int(h.name[1:]) in _ATTACKER_NUMS:
-            _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
+            h.cmd("pkill -f hping3 2>/dev/null; true")
 
-    # force kill stragglers
+    # force kill any stragglers
     time.sleep(0.3)
     for h in net.hosts:
         if int(h.name[1:]) in _ATTACKER_NUMS:
-            _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
+            h.cmd("pkill -9 -f hping3 2>/dev/null; true")
 
     info("*** Flushing OVS block rules...\n")
     for sw in net.switches:
@@ -995,8 +1086,8 @@ def watch_pipeline(interval: float = 2.0, anomaly_only: bool = False, n: int = 2
                         f" {e.get('pps',0):>8.1f} {e.get('if_score',0):>9.4f}"
                         f" {e.get('threshold',0):>7.4f} {anom:>8}"
                         f" {e.get('attack_class','-'):<12}"
-                        f" {e.get('confidence',0):>6.1f}% {e.get('action','-')}"
-                    )
+                        f" {str(e.get('confidence','-')):>7} {e.get('action','-')}"                    
+                        )
                 lines.append("  " + "=" * 90)
                 info("\r" + "\n".join(lines) + "\n")
             except Exception as exc:
@@ -1060,7 +1151,8 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
     info("  py start_syn_flood_campaign()          # h6,h7,h8\n")
     info("  py start_icmp_flood_campaign()         # h11,h12,h13\n")
     info("  py start_udp_flood_campaign()          # h16,h17,h18\n")
-    info("  py start_mixed_campaign()              # all 14, staggered cyclic\n\n")
+    info("  py start_mixed_campaign()              # all 14, staggered cyclic\n")
+    info("  py start_stress_test()                 # all 14, rand-source, memory stress\n\n")
     info("  ── STOP ──────────────────────────────────────────────────────\n")
     info("  py stop_all_attacks()                  # kill + flush + clear\n")
     info("  py stop_baseline()                     # stop baseline\n\n")
