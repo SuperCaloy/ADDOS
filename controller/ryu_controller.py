@@ -1,25 +1,44 @@
-# eventlet must be patched first
+# eventlet must be patched before all other imports
 import eventlet
 eventlet.monkey_patch()
 
+import os
 import json
 import time
 import collections
+import ipaddress
+import resource
 
 import zmq
 from ryu.base import app_manager
 from ryu.controller import ofp_event
-from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER, set_ev_cls
+from ryu.controller.handler import (
+    CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER, set_ev_cls
+)
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet, ethernet, ipv4, tcp, icmp, udp
 from ryu.lib import hub
-
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from backend.mitigation.traffic_filter import RATE_LIMIT_PPS
+# ── ZMQ addresses ──────────────────────────────────────────────────────────
 TELEMETRY_ADDR = "tcp://127.0.0.1:5555"
 COMMAND_ADDR   = "tcp://127.0.0.1:5556"
+
+# Stats poll interval in seconds
 STATS_INTERVAL = 1.0
 
-# Skip flows originating from server/sinkhole (reply traffic)
+# IPs whose reply traffic should never be scored by the ML pipeline
 _SKIP_SRC = {"10.0.0.20", "10.0.0.21"}
+
+# Action → OVS drop priority mapping
+_DROP_PRIORITY = {"block": 100, "quarantine": 90, "rate_limit": 80}
+
+# All drop priorities including proto-level (50)
+_ALL_DROP_PRIORITIES = (50, 80, 90, 100)
+
+# OpenFlow Meter ID used for rate limiting — fixed ID, one meter per switch
+_RATE_LIMIT_METER_ID = 1
 
 
 class FatTreeController(app_manager.RyuApp):
@@ -27,27 +46,43 @@ class FatTreeController(app_manager.RyuApp):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._init_system()
+        self._init_zmq()
+        self._init_state()
+        hub.spawn(self._stats_poll_loop)
+        hub.spawn(self._command_listener)
 
-        # ZMQ sockets: telemetry PUSH, command PULL
+    # ── Initialisation helpers ─────────────────────────────────────────────
+
+    def _init_system(self) -> None:
+        # Pin to core 0 — simulates single-core controller, shows real saturation
+        os.sched_setaffinity(0, {0})
+
+        # 512MB virtual memory cap — demonstrates OOM failure under stress without ML
+        _MEM_LIMIT = 512 * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (_MEM_LIMIT, _MEM_LIMIT))
+
+    def _init_zmq(self) -> None:
+        # Telemetry PUSH socket — sends flow stats and events to backend
         self._zmq_ctx  = zmq.Context()
-
         self._tel_sock = self._zmq_ctx.socket(zmq.PUSH)
         self._tel_sock.setsockopt(zmq.SNDHWM, 5000)
         self._tel_sock.setsockopt(zmq.LINGER, 0)
         self._tel_sock.bind(TELEMETRY_ADDR)
 
+        # Command PULL socket — receives block/clear/reset commands from backend
         self._cmd_sock = self._zmq_ctx.socket(zmq.PULL)
         self._cmd_sock.setsockopt(zmq.RCVTIMEO, 500)
         self._cmd_sock.setsockopt(zmq.LINGER, 0)
         self._cmd_sock.bind(COMMAND_ADDR)
 
-        # Switch registry and MAC table
-        self._datapaths: dict   = {}
+    def _init_state(self) -> None:
+        # Switch registry and MAC learning table
+        self._datapaths:   dict = {}
         self._mac_to_port: dict = collections.defaultdict(dict)
         FatTreeController._connected_count = 0
 
-        # Per-switch aggregate stats for telemetry
-        self._switch_prev_total: dict[int, tuple] = {}
+        # Per-switch aggregate stats used for telemetry and ML features
         self._switch_agg: dict = collections.defaultdict(lambda: {
             "disp_pakt": 0, "disp_byte": 0, "gfe": 0,
             "g_usip": set(), "rfip": set(),
@@ -55,69 +90,71 @@ class FatTreeController(app_manager.RyuApp):
             "last_reply_ts": None, "disp_interval": 1.0,
         })
 
-        # Track which switches have completed their first stats poll cycle.
-        # First poll always has duration_sec=0 for all flows — skip the young-flow
-        # gate on first poll so fresh flows after restart are not all dropped silently.
+        # Tracks switches that have not completed their first stats poll cycle.
+        # First poll has duration_sec=0 for all flows — bypass young-flow gate once.
         self._switch_first_poll: set[int] = set()
 
+        # Running packet-in count per switch — used to compute pkt_in rate
         self._pkt_in_count: dict = collections.defaultdict(int)
-        self._port_counts:  dict = collections.defaultdict(int)
 
-        # Banned IPs — also checked in throttled fast-path
+        # Active port count per switch — from port stats replies
+        self._port_counts: dict = collections.defaultdict(int)
+
+        # Previous total packet counts per switch — used to compute delta pps
+        self._switch_prev_total: dict[int, int] = {}
+
+        # IPs currently banned — fast check in the throttled packet-in path
         self._banned_ips: set = set()
 
-        # Track which dpid last saw each src_ip — used to scope block rules
-        # to only the attacker's switch, not all switches
+        # Last switch that saw each src_ip — scopes block rules to one switch
         self._ip_to_dpid: dict[str, int] = {}
 
-        # Track cumulative dropped packets per blocked IP for real drop counter
+        # Previous packet counts per drop rule key — used to compute drop deltas.
+        # Key: src_ip for per-IP rules, "__proto__" for protocol-level drop rule.
         self._blocked_prev_pkts: dict[str, int] = {}
 
-        # Cooldown: suppress flood detection for N intervals after attack cleared
+        # Cooldown counter per switch — suppresses ML scoring for N intervals
+        # after an attack clears to avoid stale flow data triggering false alarms
         self._cooldown_intervals: dict[int, int] = {}
         self._COOLDOWN_INTERVALS = 3
 
-        # Per-switch and per-IP protocol tracking for RF classification
-        self._switch_proto: dict = collections.defaultdict(lambda: collections.defaultdict(int))
-        self._src_proto:    dict = collections.defaultdict(lambda: collections.defaultdict(int))
+        # Per-switch and per-IP protocol counts — used for RF attack classification
+        self._switch_proto: dict = collections.defaultdict(
+            lambda: collections.defaultdict(int)
+        )
+        self._src_proto: dict = collections.defaultdict(
+            lambda: collections.defaultdict(int)
+        )
 
-        # Cache tp_src, tp_dst per src_ip for IF features
+        # Fallback protocol cache per src_ip — survives dpid mismatch on re-detection
+        self._src_proto_global: dict[str, int] = {}
+
+        # Cached transport ports (tp_src, tp_dst) per src_ip — used as IF features
         self._src_ports: dict[str, tuple[int, int]] = {}
-        self._src_proto_global: dict[str, int] = {}  # fallback: ip -> proto across all dpids
 
-        # PacketIn rate limiter — prevents OVS overload under rand-source floods
         self._pkt_in_rate: dict = {}
-        self._PKT_IN_RATE_LIMIT = 999999999
+        self._PKT_IN_RATE_LIMIT = 500
 
-        hub.spawn(self._stats_poll_loop)
-        hub.spawn(self._command_listener)
-
-    # ------------------------------------------------------------------
-    # OpenFlow handshake
-    # ------------------------------------------------------------------
+    # ── OpenFlow handshake ─────────────────────────────────────────────────
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         dp     = ev.msg.datapath
         ofp    = dp.ofproto
         parser = dp.ofproto_parser
+
         self._datapaths[dp.id] = dp
         FatTreeController._connected_count = len(self._datapaths)
         self.logger.info(
-            '✔ Switch CONNECTED  dpid=%016x  (%d/%d switches)',
-            dp.id, len(self._datapaths), 9
+            'Switch CONNECTED  dpid=%016x  (%d/%d switches)',
+            dp.id, len(self._datapaths), 9,
         )
 
-        # Push switch count so topology.py can poll without Ryu REST app
-        self._push({
-            "type":      "switch_count",
-            "connected": len(self._datapaths),
-        })
+        # Notify topology.py of current switch count
+        self._push({"type": "switch_count", "connected": len(self._datapaths)})
 
-        # Flush ALL stale rules on reconnect — clears warmup floods AND
-        # any leftover block rules (80,90,100) from previous attack session.
-        # Without flushing 80/90/100, old drop rules survive mn -c and
-        # silently drop baseline traffic on every topology restart.
+        # Flush stale rules from previous session — prevents leftover drop rules
+        # silently blocking baseline traffic on topology restart
         for pri in (0, 1, 80, 90, 100):
             dp.send_msg(parser.OFPFlowMod(
                 datapath=dp, command=ofp.OFPFC_DELETE,
@@ -125,15 +162,21 @@ class FatTreeController(app_manager.RyuApp):
                 priority=pri, match=parser.OFPMatch(),
             ))
 
-        # Mark this switch as needing first-poll bypass — fresh flows
-        # all have duration_sec=0 on first poll so they'd all be skipped
-        # without this flag. Cleared automatically after first poll cycle.
+        # Re-arm first-poll bypass — fresh flows have duration_sec=0 on first poll
         self._switch_first_poll.discard(dp.id)
 
-        # Table-miss at priority=1 so it always overrides any leftover priority=0 rules
+        # Install table-miss rule at priority=1 — sends unknown flows to controller
         actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER)]
         inst    = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-        dp.send_msg(parser.OFPFlowMod(datapath=dp, priority=1, match=parser.OFPMatch(), instructions=inst))
+        dp.send_msg(parser.OFPFlowMod(
+            datapath=dp, priority=1,
+            match=parser.OFPMatch(), instructions=inst,
+        ))
+
+        # Install rate-limit meter on every switch at connect time.
+        # Meter ID=1, KBPS band, DROP excess — used by rate_limit action in Phase 1.
+        # Pre-installing avoids race condition if rate_limit fires before meter exists.
+        self._install_rate_limit_meter(dp, ofp, parser)
 
     @set_ev_cls(ofp_event.EventOFPStateChange, DEAD_DISPATCHER)
     def switch_disconnect_handler(self, ev):
@@ -145,14 +188,12 @@ class FatTreeController(app_manager.RyuApp):
         self._pkt_in_count.pop(dpid, None)
         self._port_counts.pop(dpid, None)
         self.logger.info(
-            '✘ Switch DISCONNECTED  dpid=%s  (%d switches remaining)',
+            'Switch DISCONNECTED  dpid=%s  (%d switches remaining)',
             ('%016x' % dpid) if dpid is not None else 'unknown',
-            len(self._datapaths)
+            len(self._datapaths),
         )
 
-    # ------------------------------------------------------------------
-    # PacketIn
-    # ------------------------------------------------------------------
+    # ── PacketIn ───────────────────────────────────────────────────────────
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def packet_in_handler(self, ev):
@@ -163,84 +204,64 @@ class FatTreeController(app_manager.RyuApp):
         dpid    = dp.id
         in_port = msg.match["in_port"]
 
-        # Rate limiter — must run first; drops banned IPs in throttled path
-        now_mono    = time.monotonic()
-        _rate_entry = self._pkt_in_rate.get(dpid, (0, now_mono))
-        _rate_count, _rate_start = _rate_entry
-        if now_mono - _rate_start >= 1.0:
-            self._pkt_in_rate[dpid] = (1, now_mono)
-            _throttled = False
-        else:
-            _rate_count += 1
-            self._pkt_in_rate[dpid] = (_rate_count, _rate_start)
-            _throttled = (_rate_count > self._PKT_IN_RATE_LIMIT)
-
-        if _throttled:
-            self._pkt_in_count[dpid] += 1
-            try:
-                _raw_pkt = packet.Packet(msg.data)
-                _raw_ip  = _raw_pkt.get_protocol(ipv4.ipv4)
-                if _raw_ip and _raw_ip.src in self._banned_ips:
-                    return  # drop banned IP silently
-            except Exception:
-                pass
-
-            actions = [parser.OFPActionOutput(ofp.OFPP_FLOOD)]
-            if msg.buffer_id != ofp.OFP_NO_BUFFER:
-                out = parser.OFPPacketOut(
-                    datapath=dp, buffer_id=msg.buffer_id,
-                    in_port=in_port, actions=actions, data=None)
-            else:
-                out = parser.OFPPacketOut(
-                    datapath=dp, buffer_id=ofp.OFP_NO_BUFFER,
-                    in_port=in_port, actions=actions, data=msg.data)
-            dp.send_msg(out)
+        # Rate limiter — must run first; drops banned IPs in the throttled path
+        if self._is_throttled(dpid, dp, ofp, parser, msg, in_port):
             return
 
-        # Full processing path
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocol(ethernet.ethernet)
         if eth is None:
             return
 
-        # ARP — flood and return
+        # ARP — learn MAC and flood
         if eth.ethertype == 0x0806:
             self._mac_to_port[dpid][eth.src] = in_port
-            actions = [parser.OFPActionOutput(ofp.OFPP_FLOOD)]
-            if msg.buffer_id != ofp.OFP_NO_BUFFER:
-                out = parser.OFPPacketOut(
-                    datapath=dp, buffer_id=msg.buffer_id,
-                    in_port=in_port, actions=actions, data=None)
-            else:
-                out = parser.OFPPacketOut(
-                    datapath=dp, buffer_id=ofp.OFP_NO_BUFFER,
-                    in_port=in_port, actions=actions, data=msg.data)
-            dp.send_msg(out)
+            self._flood(dp, ofp, parser, msg, in_port)
             return
 
-        # Non-IPv4 (LLDP, IPv6 etc.)
+        # Non-IPv4 (LLDP, IPv6, etc.) — learn MAC and flood if unknown dst
         ip4 = pkt.get_protocol(ipv4.ipv4)
         if ip4 is None:
             self._mac_to_port[dpid][eth.src] = in_port
             if eth.dst not in self._mac_to_port[dpid]:
-                actions = [parser.OFPActionOutput(ofp.OFPP_FLOOD)]
-                if msg.buffer_id != ofp.OFP_NO_BUFFER:
-                    out = parser.OFPPacketOut(
-                        datapath=dp, buffer_id=msg.buffer_id,
-                        in_port=in_port, actions=actions, data=None)
-                else:
-                    out = parser.OFPPacketOut(
-                        datapath=dp, buffer_id=ofp.OFP_NO_BUFFER,
-                        in_port=in_port, actions=actions, data=msg.data)
-                dp.send_msg(out)
+                self._flood(dp, ofp, parser, msg, in_port)
             return
 
         # IPv4 full processing
+        self._handle_ipv4(dp, ofp, parser, dpid, in_port, msg, eth, ip4, pkt)
+
+    def _is_throttled(self, dpid, dp, ofp, parser, msg, in_port) -> bool:
+        # Track per-switch packet-in rate — reset counter every 1 second
+        now_mono            = time.monotonic()
+        _rate_count, _start = self._pkt_in_rate.get(dpid, (0, now_mono))
+
+        if now_mono - _start >= 1.0:
+            self._pkt_in_rate[dpid] = (1, now_mono)
+            return False
+
+        _rate_count += 1
+        self._pkt_in_rate[dpid] = (_rate_count, _start)
+
+        if _rate_count <= self._PKT_IN_RATE_LIMIT:
+            return False
+
+        # Over limit — drop banned IPs silently, flood the rest
+        self._pkt_in_count[dpid] += 1
+        try:
+            _raw_ip = packet.Packet(msg.data).get_protocol(ipv4.ipv4)
+            if _raw_ip and _raw_ip.src in self._banned_ips:
+                return True
+        except Exception:
+            pass
+
+        self._flood(dp, ofp, parser, msg, in_port)
+        return True
+
+    def _handle_ipv4(self, dp, ofp, parser, dpid, in_port, msg, eth, ip4, pkt) -> None:
         src_ip = ip4.src
         dst_ip = ip4.dst
 
-        # Record which switch last saw this src_ip — scopes block rules
-        # to this switch only instead of broadcasting to all switches
+        # Record which switch last saw this IP — scopes block rules to one switch
         self._ip_to_dpid[src_ip] = dpid
 
         tcp_pkt  = pkt.get_protocol(tcp.tcp)
@@ -252,27 +273,8 @@ class FatTreeController(app_manager.RyuApp):
         tcp_flags_ack = bool(tcp_pkt and (tcp_pkt.bits & 0x10))
 
         self._pkt_in_count[dpid] += 1
-
-        # Track per-IP protocol for RF classification
-        if ip4.proto:
-            self._switch_proto[dpid][ip4.proto] += 1
-            # TCP(6)/UDP(17) take priority over ICMP(1) — prevents warmup ping overwriting real proto
-            cur = self._src_proto[dpid].get(src_ip, 0)
-            if ip4.proto in (6, 17) or cur == 0:
-                self._src_proto[dpid][src_ip] = ip4.proto
-            # global fallback — survives dpid mismatch
-            gcur = self._src_proto_global.get(src_ip, 0)
-            if ip4.proto in (6, 17) or gcur == 0:
-                self._src_proto_global[src_ip] = ip4.proto
-
-        # Cache tp_src, tp_dst per src_ip for IF features
-        _tp_src = _tp_dst = 0
-        if tcp_pkt:
-            _tp_src, _tp_dst = tcp_pkt.src_port, tcp_pkt.dst_port
-        elif udp_pkt:
-            _tp_src, _tp_dst = udp_pkt.src_port, udp_pkt.dst_port
-        if _tp_src or _tp_dst:
-            self._src_ports[src_ip] = (_tp_src, _tp_dst)
+        self._update_proto_cache(dpid, src_ip, ip4.proto)
+        self._update_port_cache(src_ip, tcp_pkt, udp_pkt)
 
         self._push({
             "type":          "packet_in",
@@ -286,72 +288,63 @@ class FatTreeController(app_manager.RyuApp):
         })
 
         self._mac_to_port[dpid][eth.src] = in_port
+        out_port = self._mac_to_port[dpid].get(eth.dst, ofp.OFPP_FLOOD)
+        actions  = [parser.OFPActionOutput(out_port)]
 
-        if eth.dst in self._mac_to_port[dpid]:
-            out_port = self._mac_to_port[dpid][eth.dst]
-        else:
-            out_port = ofp.OFPP_FLOOD
-
-        actions = [parser.OFPActionOutput(out_port)]
-
-        # Install forwarding rule — ipv4_src only match, priority=10.
-        # Why ipv4_src only: old match (in_port+ip_proto+eth_dst) caused rule
-        # misses when MAC aged -> n_packets=0, and same-port loops on edge switches.
-        # Why priority=10: at priority=1 forwarding tied with table-miss wildcard.
-        # OVS hit table-miss first (installed earlier) so forwarding never fired.
-        # priority=10 beats table-miss (1), stays below block rules (80/90/100).
+        # Install forwarding rule at priority=10 — ipv4_src only match.
+        # Priority=10 beats table-miss (1) and stays below block rules (80+).
         if out_port != ofp.OFPP_FLOOD:
-            match = parser.OFPMatch(
-                eth_type=0x0800,
-                ipv4_src=src_ip,
-            )
-            inst = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+            match  = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
+            inst   = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+            buf_id = msg.buffer_id if msg.buffer_id != ofp.OFP_NO_BUFFER else ofp.OFP_NO_BUFFER
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, priority=10,
+                idle_timeout=60, hard_timeout=0,
+                buffer_id=buf_id, match=match, instructions=inst,
+            ))
             if msg.buffer_id != ofp.OFP_NO_BUFFER:
-                mod = parser.OFPFlowMod(
-                    datapath=dp, priority=10,
-                    idle_timeout=60, hard_timeout=0,
-                    buffer_id=msg.buffer_id,
-                    match=match, instructions=inst)
-                dp.send_msg(mod)
-                return
-            else:
-                mod = parser.OFPFlowMod(
-                    datapath=dp, priority=10,
-                    idle_timeout=60, hard_timeout=0,
-                    match=match, instructions=inst)
-                dp.send_msg(mod)
+                return  # buffer already consumed by FlowMod
 
-        if msg.buffer_id != ofp.OFP_NO_BUFFER:
-            out = parser.OFPPacketOut(
-                datapath=dp, buffer_id=msg.buffer_id,
-                in_port=in_port, actions=actions, data=None)
-        else:
-            out = parser.OFPPacketOut(
-                datapath=dp, buffer_id=ofp.OFP_NO_BUFFER,
-                in_port=in_port, actions=actions, data=msg.data)
-        dp.send_msg(out)
+        self._send_packet_out(dp, ofp, parser, msg, in_port, actions)
 
-    # ------------------------------------------------------------------
-    # FlowStats reply
-    # ------------------------------------------------------------------
+    def _update_proto_cache(self, dpid: int, src_ip: str, proto: int) -> None:
+        # Track dominant protocol per switch and per IP for RF classification.
+        # TCP(6)/UDP(17) take priority over ICMP(1) to avoid warmup pings
+        # overwriting the real attack protocol.
+        if not proto:
+            return
+        self._switch_proto[dpid][proto] += 1
+
+        cur = self._src_proto[dpid].get(src_ip, 0)
+        if proto in (6, 17) or cur == 0:
+            self._src_proto[dpid][src_ip] = proto
+
+        gcur = self._src_proto_global.get(src_ip, 0)
+        if proto in (6, 17) or gcur == 0:
+            self._src_proto_global[src_ip] = proto
+
+    def _update_port_cache(self, src_ip: str, tcp_pkt, udp_pkt) -> None:
+        # Cache transport ports per src_ip — used as IF features (tp_src, tp_dst)
+        if tcp_pkt:
+            self._src_ports[src_ip] = (tcp_pkt.src_port, tcp_pkt.dst_port)
+        elif udp_pkt:
+            self._src_ports[src_ip] = (udp_pkt.src_port, udp_pkt.dst_port)
+
+    # ── FlowStats reply ────────────────────────────────────────────────────
 
     @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
     def flow_stats_reply_handler(self, ev):
-        dpid  = ev.msg.datapath.id
-        body  = ev.msg.body
-        now   = time.time()
+        dpid = ev.msg.datapath.id
+        body = ev.msg.body
+        now  = time.time()
 
         agg      = self._switch_agg[dpid]
-        prev_ts  = agg["last_reply_ts"]
-        interval = (now - prev_ts) if prev_ts else 1.0
+        interval = (now - agg["last_reply_ts"]) if agg["last_reply_ts"] else 1.0
         agg["last_reply_ts"] = now
         agg["disp_interval"] = max(interval, 0.001)
 
-        # First poll cycle for this switch — all flows have duration_sec=0
-        # because they were just installed. Bypass the young-flow gate this
-        # cycle only so fresh flows after restart reach the ML pipeline.
-        # After this poll, mark the switch as seen so normal gating resumes.
-        _is_first_poll = dpid not in self._switch_first_poll
+        # First poll after connect — all flows have duration_sec=0, bypass gate once
+        is_first_poll = dpid not in self._switch_first_poll
         self._switch_first_poll.add(dpid)
 
         # Reset per-interval switch proto tally
@@ -366,30 +359,19 @@ class FatTreeController(app_manager.RyuApp):
         durations  = []
         dst_ips    = set()
         src_ips    = set()
-        # Count flows per src_ip for flow_count_per_src feature
         _flow_count_per_src: dict[str, int] = collections.defaultdict(int)
 
-        # Compute pkt_in rate then reset counter
-        _rate_pkt_in_now = self._pkt_in_count.get(dpid, 0) / max(interval, 0.001)
+        # Compute packet-in rate and reset counter for next interval
+        _rate_pkt_in = self._pkt_in_count.get(dpid, 0) / max(interval, 0.001)
         self._pkt_in_count[dpid] = 0
 
-        # Compute switch-wide delta pps
-        _sw_total_now = sum(s.packet_count for s in body)
-        _prev_entry   = self._switch_prev_total.get(dpid)
-        if _prev_entry is None:
-            self._switch_prev_total[dpid] = _sw_total_now
-            agg["switch_delta_pps"] = 0.0
-        else:
-            _sw_delta = max(_sw_total_now - _prev_entry, 0)
-            self._switch_prev_total[dpid] = _sw_total_now
-            _flow_based_delta_pps = _sw_delta / max(interval, 0.1)
-            agg["switch_delta_pps"] = max(_flow_based_delta_pps, _rate_pkt_in_now)
+        # Compute switch-wide delta pps from cumulative flow packet counts
+        self._update_switch_delta(dpid, agg, body, interval, _rate_pkt_in)
 
         for stat in body:
             total_pkt  += stat.packet_count
             total_byte += stat.byte_count
-            dur_us = stat.duration_sec * 1e6 + stat.duration_nsec / 1000
-            durations.append(dur_us)
+            durations.append(stat.duration_sec * 1e6 + stat.duration_nsec / 1000)
 
             match = stat.match
             if "ipv4_src" in match:
@@ -397,279 +379,385 @@ class FatTreeController(app_manager.RyuApp):
             if "ipv4_dst" in match:
                 dst_ips.add(match["ipv4_dst"])
 
-            # Send real drop delta for blocked flow entries (priority 80/90/100)
-            if stat.priority in (80, 90, 100):
-                _blocked_src = match.get("ipv4_src")
-                if _blocked_src:
-                    _prev_pkts = self._blocked_prev_pkts.get(_blocked_src, 0)
-                    _delta     = max(stat.packet_count - _prev_pkts, 0)
-                    self._blocked_prev_pkts[_blocked_src] = stat.packet_count
-                    if _delta > 0:
-                        self._push({
-                            "type":   "dropped_delta",
-                            "src_ip": _blocked_src,
-                            "delta":  _delta,
-                        })
-
-            _total_s = stat.duration_sec + stat.duration_nsec / 1e9
-            _total_s = max(_total_s, 1e-9)
-            pps  = stat.packet_count / _total_s
-            bps  = stat.byte_count   / _total_s
-            ppns = pps / 1e9
-            bpns = bps / 1e9
+            # Report drop delta for all drop rules to backend via ZMQ.
+            # priority 80/90/100 — per-IP block rules (quarantine/time ban/blackhole)
+            # priority 50        — proto drop rule installed by resource guard at CRIT
+            self._report_drop_delta(stat, match)
 
             src_ip = match.get("ipv4_src")
-            if not src_ip or src_ip == "0.0.0.0":
+            if not src_ip or src_ip == "0.0.0.0" or src_ip in _SKIP_SRC:
                 continue
-            if src_ip in _SKIP_SRC:  # skip server/sinkhole reply traffic
-                continue
-            _flow_count_per_src[src_ip] += 1
             if stat.packet_count == 0:
-                # no traffic yet -- avoids eps-division blowup in
-                # duration_pkt_ratio (IF feature), always-anomaly bug
+                # Skip zero-packet flows — avoids division blowup in IF features
                 continue
 
-            # is_flood_switch gate removed.
-            # It submitted ALL hosts on a flooded switch to the worker queue,
-            # causing innocent hosts on the same switch to be scored or
-            # timeout-blocked even though IF never confirmed them as attackers.
-            # IF scores every host independently per-poll -- it does not need
-            # a switch-wide flood gate to detect the real attacker.
-            # switch_delta_pps still computed in agg for display/logging only.
-            _cooldown_left = self._cooldown_intervals.get(dpid, 0)
+            _flow_count_per_src[src_ip] += 1
 
-            if _is_first_poll:
-                # First poll after restart -- bypass young-flow gate so baseline
-                # traffic is not silently dropped on topology restart.
-                pass
-            else:
-                # Normal mode -- skip flows younger than 10ms (not yet reliable)
+            # Skip flows younger than 10ms — not yet reliable for ML scoring
+            if not is_first_poll:
                 if stat.duration_sec == 0 and stat.duration_nsec < 10_000_000:
                     continue
 
-            # Resolve protocol: flow match first, then per-IP cache
-            _flow_ip_proto = int(match.get("ip_proto", 0))
-            if not _flow_ip_proto:
-                _flow_ip_proto = int(self._src_proto[dpid].get(src_ip, 0))
-            if not _flow_ip_proto:
-                _flow_ip_proto = int(self._src_proto_global.get(src_ip, 0))
-
-            _ports = self._src_ports.get(src_ip, (0, 0))
-            self._push({
-                "type":       "flow_stats",
-                "dpid":       dpid,
-                "src_ip":     src_ip,
-                "flow_stats": {
-                    "flow_duration_sec":        stat.duration_sec,
-                    "flow_duration_nsec":       stat.duration_nsec,
-                    "idle_timeout":             stat.idle_timeout,
-                    "hard_timeout":             stat.hard_timeout,
-                    "flags":                    stat.flags,
-                    "packet_count":             stat.packet_count,
-                    "byte_count":               stat.byte_count,
-                    "packet_count_per_second":  pps,
-                    "packet_count_per_nsecond": ppns,
-                    "byte_count_per_second":    bps,
-                    "byte_count_per_nsecond":   bpns,
-                    "ip_proto":                 _flow_ip_proto,
-                    "tp_src":                   _ports[0],
-                    "tp_dst":                   _ports[1],
-                    "flow_count_per_src":       _flow_count_per_src[src_ip],
-                },
-                "switch_stats": self._build_switch_stats(dpid),
-            })
+            self._push_flow_stats(dpid, src_ip, stat, match, _flow_count_per_src)
 
         n_flows = max(len(body), 1)
-        agg["disp_pakt"]    = total_pkt
-        agg["disp_byte"]    = total_byte
-        agg["gfe"]          = n_flows
-        agg["g_usip"]       = src_ips
-        agg["avg_flow_dst"] = len(dst_ips)
-        agg["avg_durat"]    = (sum(durations) / n_flows) if durations else 0.0
-        agg["rate_pkt_in"]  = _rate_pkt_in_now
+        agg.update({
+            "disp_pakt":    total_pkt,
+            "disp_byte":    total_byte,
+            "gfe":          n_flows,
+            "g_usip":       src_ips,
+            "avg_flow_dst": len(dst_ips),
+            "avg_durat":    (sum(durations) / n_flows) if durations else 0.0,
+            "rate_pkt_in":  _rate_pkt_in,
+        })
 
-    # ------------------------------------------------------------------
-    # PortStats reply
-    # ------------------------------------------------------------------
+    def _update_switch_delta(self, dpid, agg, body, interval, rate_pkt_in) -> None:
+        # Compute delta pps from cumulative flow packet counts across all flows
+        sw_total = sum(s.packet_count for s in body)
+        prev     = self._switch_prev_total.get(dpid)
+        if prev is None:
+            self._switch_prev_total[dpid] = sw_total
+            agg["switch_delta_pps"] = 0.0
+        else:
+            delta = max(sw_total - prev, 0)
+            self._switch_prev_total[dpid] = sw_total
+            agg["switch_delta_pps"] = max(delta / max(interval, 0.1), rate_pkt_in)
+
+    def _report_drop_delta(self, stat, match) -> None:
+        # Send drop delta to backend for per-IP and proto-level drop rules.
+        # Key: src_ip for per-IP rules, "__proto__" for protocol-level rule.
+        if stat.priority not in _ALL_DROP_PRIORITIES:
+            return
+
+        drop_key = (
+            match.get("ipv4_src")
+            if stat.priority in (80, 90, 100)
+            else "__proto__"
+        )
+        if not drop_key:
+            return
+
+        prev  = self._blocked_prev_pkts.get(drop_key, 0)
+        delta = max(stat.packet_count - prev, 0)
+        self._blocked_prev_pkts[drop_key] = stat.packet_count
+
+        if delta > 0:
+            self._push({"type": "dropped_delta", "src_ip": drop_key, "delta": delta})
+
+    def _push_flow_stats(self, dpid, src_ip, stat, match, flow_count_per_src) -> None:
+        # Resolve protocol: flow match first, then per-IP cache, then global fallback
+        ip_proto = (
+            int(match.get("ip_proto", 0))
+            or int(self._src_proto[dpid].get(src_ip, 0))
+            or int(self._src_proto_global.get(src_ip, 0))
+        )
+
+        total_s = max(stat.duration_sec + stat.duration_nsec / 1e9, 1e-9)
+        pps     = stat.packet_count / total_s
+        bps     = stat.byte_count   / total_s
+        ports   = self._src_ports.get(src_ip, (0, 0))
+
+        self._push({
+            "type":       "flow_stats",
+            "dpid":       dpid,
+            "src_ip":     src_ip,
+            "flow_stats": {
+                "flow_duration_sec":        stat.duration_sec,
+                "flow_duration_nsec":       stat.duration_nsec,
+                "idle_timeout":             stat.idle_timeout,
+                "hard_timeout":             stat.hard_timeout,
+                "flags":                    stat.flags,
+                "packet_count":             stat.packet_count,
+                "byte_count":               stat.byte_count,
+                "packet_count_per_second":  pps,
+                "packet_count_per_nsecond": pps / 1e9,
+                "byte_count_per_second":    bps,
+                "byte_count_per_nsecond":   bps / 1e9,
+                "ip_proto":                 ip_proto,
+                "tp_src":                   ports[0],
+                "tp_dst":                   ports[1],
+                "flow_count_per_src":       flow_count_per_src[src_ip],
+            },
+            "switch_stats": self._build_switch_stats(dpid),
+        })
+
+    # ── PortStats reply ────────────────────────────────────────────────────
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def port_stats_reply_handler(self, ev):
-        dpid   = ev.msg.datapath.id
-        active = sum(1 for p in ev.msg.body if p.rx_packets > 0)
-        self._port_counts[dpid] = active
+        dpid = ev.msg.datapath.id
+        self._port_counts[dpid] = sum(
+            1 for p in ev.msg.body if p.rx_packets > 0
+        )
 
-    # ------------------------------------------------------------------
-    # Stats polling loop
-    # ------------------------------------------------------------------
+    # ── Stats polling loop ─────────────────────────────────────────────────
 
-    def _stats_poll_loop(self):
+    def _stats_poll_loop(self) -> None:
+        # Poll flow and port stats from every switch every STATS_INTERVAL seconds.
+        # Staggered 40ms per switch to avoid burst load on VMware.
         while True:
             hub.sleep(STATS_INTERVAL)
             for dpid, dp in list(self._datapaths.items()):
                 self._request_flow_stats(dp)
                 self._request_port_stats(dp)
-                hub.sleep(0.04)  # stagger per switch to avoid VMware burst
+                hub.sleep(0.04)
 
-    def _request_flow_stats(self, dp):
-        parser = dp.ofproto_parser
-        dp.send_msg(parser.OFPFlowStatsRequest(dp))
+    def _request_flow_stats(self, dp) -> None:
+        dp.send_msg(dp.ofproto_parser.OFPFlowStatsRequest(dp))
 
-    def _request_port_stats(self, dp):
-        parser = dp.ofproto_parser
-        ofp    = dp.ofproto
-        dp.send_msg(parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY))
+    def _request_port_stats(self, dp) -> None:
+        ofp = dp.ofproto
+        dp.send_msg(dp.ofproto_parser.OFPPortStatsRequest(dp, 0, ofp.OFPP_ANY))
 
-    # ------------------------------------------------------------------
-    # Command listener
-    # ------------------------------------------------------------------
+    # ── Command listener ───────────────────────────────────────────────────
 
-    def _command_listener(self):
+    def _command_listener(self) -> None:
+        # Listen for ZMQ commands from backend — block/clear/reset/proto_block
         self._cmd_sock.setsockopt(zmq.RCVTIMEO, 0)
         while True:
             try:
                 raw = self._cmd_sock.recv(zmq.NOBLOCK)
-                cmd = json.loads(raw)
-                self._apply_command(cmd)
+                self._apply_command(json.loads(raw))
             except zmq.Again:
                 hub.sleep(0.05)
             except Exception as e:
                 self.logger.warning("Command error: %s", e)
                 hub.sleep(0.05)
 
-    def _apply_command(self, cmd: dict):
+    def _apply_command(self, cmd: dict) -> None:
         action = cmd.get("action")
         src_ip = cmd.get("src_ip")
         ttl    = cmd.get("ttl")
 
-        # ── reset: wipe ALL Ryu in-memory state ───────────────────────────────
-        # Called by topology.py on startup via ZMQ before baseline starts.
-        # Clears stale banned_ips, ip->dpid map, mac table, counters from
-        # previous session so old block rules don't affect new baseline traffic.
         if action == "reset":
-            self._banned_ips.clear()
-            self._ip_to_dpid.clear()
-            self._mac_to_port.clear()
-            self._blocked_prev_pkts.clear()
-            self._switch_prev_total.clear()
-            self._pkt_in_count.clear()
-            self._cooldown_intervals.clear()
-            self._switch_proto.clear()
-            self._src_proto.clear()
-            self._src_proto_global.clear()
-            self._src_ports.clear()
-            self._pkt_in_rate.clear()
-            # Re-arm first-poll bypass so fresh flows pass young-flow gate on restart
-            self._switch_first_poll.clear()
-            self.logger.info("*** Ryu state reset — all in-memory state cleared")
+            self._reset_state()
             return
 
-        # Update banned IP set for throttled fast-path
+        # Update banned IP set for the throttled fast-path check
         if action in ("block", "rate_limit", "quarantine"):
             self._banned_ips.add(src_ip)
         elif action == "clear":
-            self._banned_ips.discard(src_ip)
-            # Reset drop counter for this IP
-            self._blocked_prev_pkts.pop(src_ip, None)
-            # Clear stale cached protocol so next legit flow isn't misclassified
-            for dpid_key in list(self._src_proto.keys()):
-                self._src_proto[dpid_key].pop(src_ip, None)
-            # Reset switch delta counters to avoid stale pps spike after attack stops
-            for dpid_key in list(self._switch_prev_total.keys()):
-                self._switch_prev_total.pop(dpid_key, None)
-            # Reset pkt_in counters
-            for dpid_key in list(self._pkt_in_count.keys()):
-                self._pkt_in_count[dpid_key] = 0
-            # Start cooldown on all switches
-            for dpid_key in list(self._datapaths.keys()):
-                self._cooldown_intervals[dpid_key] = self._COOLDOWN_INTERVALS
+            self._on_clear(src_ip)
 
-        # ── Scope rules to attacker's switch only ─────────────────────────────
-        # _ip_to_dpid is updated on every packet-in — tells us which switch
-        # the src_ip was last seen on. Install block/clear only on that switch.
-        # If dpid unknown (e.g. clear after restart), broadcast to all switches
-        # so stale rules are guaranteed to be removed everywhere.
-        target_dpid = self._ip_to_dpid.get(src_ip) if src_ip else None
-        if target_dpid is not None and target_dpid in self._datapaths:
-            # Known switch — install on this switch only
-            target_dps = [(target_dpid, self._datapaths[target_dpid])]
-        else:
-            # Unknown switch — broadcast to all (safe fallback for clear ops)
-            target_dps = list(self._datapaths.items())
+        # Resolve target switches — all switches for mitigation, scoped for clear
+        target_dps = self._resolve_target_switches(src_ip, action)
 
         for dpid, dp in target_dps:
             parser = dp.ofproto_parser
             ofp    = dp.ofproto
+            match  = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
 
-            # Base match: src IP only — scoped to this attacker's IP address
-            match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
-
-            # Map action → drop priority
-            _DROP_PRI = {"block": 100, "quarantine": 90, "rate_limit": 80}
-
-            if action in _DROP_PRI:
-                drop_pri = _DROP_PRI[action]
-
-                # Step 1: delete existing forwarding rule (priority=1) for this IP
-                # STRICT delete — only removes this IP's entry, not other hosts
-                dp.send_msg(parser.OFPFlowMod(
-                    datapath=dp,
-                    command=ofp.OFPFC_DELETE_STRICT,
-                    priority=1,
-                    out_port=ofp.OFPP_ANY,
-                    out_group=ofp.OFPG_ANY,
-                    match=match,
-                ))
-
-                # Step 2: delete any stale drop rule at this priority for this IP
-                dp.send_msg(parser.OFPFlowMod(
-                    datapath=dp,
-                    command=ofp.OFPFC_DELETE_STRICT,
-                    priority=drop_pri,
-                    out_port=ofp.OFPP_ANY,
-                    out_group=ofp.OFPG_ANY,
-                    match=match,
-                ))
-
-                # Step 3: install drop rule — hard_timeout only for timed blocks
-                hard_timeout = int(ttl) if (action == "block" and ttl is not None) else 0
-                dp.send_msg(parser.OFPFlowMod(
-                    datapath=dp, priority=drop_pri,
-                    idle_timeout=0, hard_timeout=hard_timeout,
-                    match=match, instructions=[]))
-
+            if action in _DROP_PRIORITY:
+                self._install_drop_rule(dp, ofp, parser, match, action, ttl)
+            elif action == "proto_block":
+                self._apply_proto_block(dp, ofp, parser, cmd, dpid)
             elif action == "clear":
-                # Delete drop rules at all block priorities — STRICT so only this IP
-                for _pri in (100, 90, 80):
-                    dp.send_msg(parser.OFPFlowMod(
-                        datapath=dp,
-                        command=ofp.OFPFC_DELETE_STRICT,
-                        priority=_pri,
-                        out_port=ofp.OFPP_ANY,
-                        out_group=ofp.OFPG_ANY,
-                        match=match,
-                    ))
+                self._install_clear_rules(dp, ofp, parser, match)
 
-                # Push explicit permit rule so released IP forwards immediately
-                # Priority 5 — above table-miss (1), below any future block (80+)
-                # TTL 10s — expires after MAC table re-learns naturally
-                permit_inst = [parser.OFPInstructionActions(
+    def _reset_state(self) -> None:
+        # Wipe all Ryu in-memory state — called by topology.py on startup.
+        # Clears stale bans, MAC table, counters from previous session.
+        self._banned_ips.clear()
+        self._ip_to_dpid.clear()
+        self._mac_to_port.clear()
+        self._blocked_prev_pkts.clear()
+        self._switch_prev_total.clear()
+        self._pkt_in_count.clear()
+        self._cooldown_intervals.clear()
+        self._switch_proto.clear()
+        self._src_proto.clear()
+        self._src_proto_global.clear()
+        self._src_ports.clear()
+        self._pkt_in_rate.clear()
+        self._switch_first_poll.clear()
+        self.logger.info("*** Ryu state reset — all in-memory state cleared")
+
+    def _on_clear(self, src_ip: str) -> None:
+        # Clean up all per-IP state when an IP is unblocked
+        self._banned_ips.discard(src_ip)
+        self._blocked_prev_pkts.pop(src_ip, None)
+
+        # Remove stale cached protocol so next legit flow is not misclassified
+        for dpid_key in list(self._src_proto.keys()):
+            self._src_proto[dpid_key].pop(src_ip, None)
+
+        # Reset delta counters to avoid stale pps spike after attack stops
+        self._switch_prev_total.clear()
+
+        # Reset packet-in counters on all switches
+        for dpid_key in self._pkt_in_count:
+            self._pkt_in_count[dpid_key] = 0
+
+        # Start post-clear cooldown on all switches
+        for dpid_key in self._datapaths:
+            self._cooldown_intervals[dpid_key] = self._COOLDOWN_INTERVALS
+
+    def _resolve_target_switches(self, src_ip: str, action: str = "") -> list:
+        # Block/rate_limit/quarantine — install on ALL switches.
+        # Attacker can enter from any edge switch; scoping to one switch
+        # leaves other switches unprotected.
+        # Clear — scoped to last-seen switch only to avoid unnecessary rule deletion.
+        if action in ("block", "rate_limit", "quarantine"):
+            return list(self._datapaths.items())
+
+        # Clear / fallback — scoped to last-seen switch if known
+        target_dpid = self._ip_to_dpid.get(src_ip) if src_ip else None
+        if target_dpid is not None and target_dpid in self._datapaths:
+            return [(target_dpid, self._datapaths[target_dpid])]
+        return list(self._datapaths.items())
+
+    def _install_rate_limit_meter(self, dp, ofp, parser) -> None:
+        # Install OpenFlow Meter ID=1 on this switch — DROP excess above RATE_LIMIT_PPS.
+        # PKTPS band = packets per second, matches research baseline (1000 pps sim).
+        # Replaces existing meter if present — safe to call on reconnect.
+        bands = [parser.OFPMeterBandDrop(
+            type_=ofp.OFPMBT_DROP,
+            rate=RATE_LIMIT_PPS,
+            burst_size=RATE_LIMIT_PPS // 10,  # 10% burst allowance
+        )]
+        dp.send_msg(parser.OFPMeterMod(
+            datapath=dp,
+            command=ofp.OFPMC_ADD,
+            flags=ofp.OFPMF_PKTPS,           # rate unit = packets per second
+            meter_id=_RATE_LIMIT_METER_ID,
+            bands=bands,
+        ))
+
+    def _delete_rate_limit_meter(self, dp, ofp, parser) -> None:
+        # Remove meter ID=1 from switch — called on clear to fully release IP.
+        dp.send_msg(parser.OFPMeterMod(
+            datapath=dp,
+            command=ofp.OFPMC_DELETE,
+            flags=ofp.OFPMF_PKTPS,
+            meter_id=_RATE_LIMIT_METER_ID,
+            bands=[],
+        ))
+
+    def _install_drop_rule(self, dp, ofp, parser, match, action: str, ttl) -> None:
+        # Install mitigation rule for a flagged IP.
+        # rate_limit → OpenFlow Meter flow rule (throttle, not full drop).
+        # block/quarantine → DROP rule at respective priority.
+        #
+        # Step 1 — delete stale forward rule (p10), table-miss override (p1),
+        #           and any existing rule at the same drop priority.
+        # Step 2 — install new rule.
+        drop_pri     = _DROP_PRIORITY[action]
+        hard_timeout = int(ttl) if (action == "block" and ttl is not None) else 0
+
+        for cmd_type, pri in [
+            (ofp.OFPFC_DELETE_STRICT, 10),       # delete stale forward rule
+            (ofp.OFPFC_DELETE_STRICT, 1),        # delete table-miss override
+            (ofp.OFPFC_DELETE_STRICT, drop_pri), # delete stale rule at same priority
+        ]:
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, command=cmd_type,
+                priority=pri,
+                out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
+                match=match,
+            ))
+
+        if action == "rate_limit":
+            # Apply meter action — throttles to RATE_LIMIT_PPS, excess dropped by meter.
+            # Traffic below limit still reaches server — correct Phase 1 behaviour.
+            meter_inst = [
+                parser.OFPInstructionMeter(_RATE_LIMIT_METER_ID),
+                parser.OFPInstructionActions(
                     ofp.OFPIT_APPLY_ACTIONS,
-                    [parser.OFPActionOutput(ofp.OFPP_FLOOD)]
-                )]
-                dp.send_msg(parser.OFPFlowMod(
-                    datapath=dp, priority=5,
-                    idle_timeout=10, hard_timeout=10,
-                    match=match, instructions=permit_inst))
+                    [parser.OFPActionOutput(ofp.OFPP_NORMAL)],
+                ),
+            ]
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, priority=drop_pri,
+                idle_timeout=0, hard_timeout=0,
+                match=match, instructions=meter_inst,
+            ))
+        else:
+            # block / quarantine — full DROP
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, priority=drop_pri,
+                idle_timeout=0, hard_timeout=hard_timeout,
+                match=match, instructions=[],
+            ))
 
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
+    def _apply_proto_block(self, dp, ofp, parser, cmd: dict, dpid: int) -> None:
+        # Install or remove a protocol-level drop rule at priority=50.
+        # Catches rand-source floods that rotate IPs too fast for per-IP rules.
+        # Priority 50 — above table-miss (1), below per-IP block rules (80+).
+        proto  = cmd.get("proto")
+        remove = cmd.get("remove", False)
+        if proto is None:
+            return
+
+        proto_match = parser.OFPMatch(eth_type=0x0800, ip_proto=proto)
+
+        if remove:
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp,
+                command=ofp.OFPFC_DELETE_STRICT,
+                priority=50,
+                out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
+                match=proto_match,
+            ))
+            self.logger.debug("Proto drop removed: nw_proto=%d on dpid=%016x", proto, dpid)
+        else:
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, priority=50,
+                idle_timeout=0, hard_timeout=0,
+                match=proto_match, instructions=[],
+            ))
+            self.logger.debug("Proto drop installed: nw_proto=%d on dpid=%016x", proto, dpid)
+
+    def _install_clear_rules(self, dp, ofp, parser, match) -> None:
+        # Remove all drop rules AND the forward rule for this IP.
+        # Also deletes priority=10 forward rule so next packet hits packet_in.
+        # This forces ML to re-evaluate the IP — critical for probation scoring.
+        # Permit at priority=5 lets the released IP forward immediately
+        # before the MAC table re-learns naturally (expires in 10s).
+        for pri in (100, 90, 80, 10):
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp,
+                command=ofp.OFPFC_DELETE_STRICT,
+                priority=pri,
+                out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
+                match=match,
+            ))
+
+        permit_inst = [parser.OFPInstructionActions(
+            ofp.OFPIT_APPLY_ACTIONS,
+            [parser.OFPActionOutput(ofp.OFPP_FLOOD)],
+        )]
+        dp.send_msg(parser.OFPFlowMod(
+            datapath=dp, priority=5,
+            idle_timeout=10, hard_timeout=10,
+            match=match, instructions=permit_inst,
+        ))
+
+    # ── Helpers ────────────────────────────────────────────────────────────
+
+    def _flood(self, dp, ofp, parser, msg, in_port) -> None:
+        # Send packet out on all ports — used for ARP and unknown destinations
+        buf_id = msg.buffer_id if msg.buffer_id != ofp.OFP_NO_BUFFER else ofp.OFP_NO_BUFFER
+        data   = None if msg.buffer_id != ofp.OFP_NO_BUFFER else msg.data
+        dp.send_msg(parser.OFPPacketOut(
+            datapath=dp, buffer_id=buf_id,
+            in_port=in_port,
+            actions=[parser.OFPActionOutput(ofp.OFPP_FLOOD)],
+            data=data,
+        ))
+
+    def _send_packet_out(self, dp, ofp, parser, msg, in_port, actions) -> None:
+        # Send packet out with given actions — used after forwarding rule install
+        buf_id = msg.buffer_id if msg.buffer_id != ofp.OFP_NO_BUFFER else ofp.OFP_NO_BUFFER
+        data   = None if msg.buffer_id != ofp.OFP_NO_BUFFER else msg.data
+        dp.send_msg(parser.OFPPacketOut(
+            datapath=dp, buffer_id=buf_id,
+            in_port=in_port, actions=actions, data=data,
+        ))
 
     def _build_switch_stats(self, dpid: int) -> dict:
-        agg = self._switch_agg[dpid]
-        n   = max(agg["gfe"], 1)
-
-        # Pick dominant protocol this interval
+        # Build the switch-level stats dict sent with every flow_stats telemetry message
+        agg            = self._switch_agg[dpid]
+        n              = max(agg["gfe"], 1)
         proto_counts   = self._switch_proto.get(dpid, {})
         dominant_proto = max(proto_counts, key=proto_counts.get) if proto_counts else 0
 
@@ -690,7 +778,7 @@ class FatTreeController(app_manager.RyuApp):
         }
 
     def _count_rfip(self, dpid: int) -> int:
-        import ipaddress
+        # Estimate number of remote-facing IPs — used as a switch-level ML feature
         agg    = self._switch_agg[dpid]
         sample = next(iter(agg["g_usip"]), None)
         if not sample:
@@ -702,6 +790,7 @@ class FatTreeController(app_manager.RyuApp):
         return max(0, agg["avg_flow_dst"] - 1)
 
     def _push(self, msg: dict) -> None:
+        # Non-blocking ZMQ push — drops silently if send buffer is full
         try:
             self._tel_sock.send_json(msg, zmq.NOBLOCK)
         except zmq.Again:

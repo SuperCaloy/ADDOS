@@ -201,11 +201,13 @@ def _parse_and_route(raw: bytes) -> None:
         if pkt_count_cumulative < 1:
             return
 
-        # Skip if this IP is already in Phase 2 or 3 — block rule is active
+        # Skip if this IP is in Phase 2 or 3 — block rule is active, no need to score.
+        # Phase 4 (probation) is ALLOWED through — we want ML to observe it.
+        # If IF still flags it during probation, state_machine escalates to Phase 2.
         try:
             from backend.mitigation.state_machine import state_machine as _sm
             _ip_state = _sm._states.get(src_ip)
-            if _ip_state is not None and _ip_state.phase >= 2:
+            if _ip_state is not None and _ip_state.phase in (2, 3):
                 return
         except Exception:
             pass

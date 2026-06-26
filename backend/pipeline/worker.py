@@ -5,7 +5,6 @@ import logging
 from backend.config import (
     WORKER_QUEUE_MAXSIZE, WORKER_ITEM_TIMEOUT_S,
     EXTRACTION_TRIGGER_PKTS, EXTRACTION_TRIGGER_S,
-    IF_SCORE_THRESHOLD_OVERRIDE,
 )
 from backend.models import if_pipeline, rf_pipeline, loader
 from backend.pipeline.flow_tracker import tracker
@@ -143,12 +142,8 @@ def _process_item(src_ip: str, flow_stats: dict,
             return
         if_score, is_anomaly = if_pipeline.run_if_inference(if_vec)
 
-        # Threshold: use config override if set, else use model contract value
-        _effective_threshold = (
-            IF_SCORE_THRESHOLD_OVERRIDE
-            if IF_SCORE_THRESHOLD_OVERRIDE is not None
-            else loader.if_threshold
-        )
+        # Threshold: use model contract value
+        _effective_threshold = loader.if_threshold
         is_anomaly = (if_score >= _effective_threshold)
 
         # --- TEA feedback — teach entropy analyzer confirmed normal vs attack ---
