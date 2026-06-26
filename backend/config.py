@@ -49,8 +49,7 @@ FLOOD_UDP_WINDOW_S  = 1.0
 
 # --- Temporal Entropy Analysis (TEA) ---
 # Rolling window size per switch — adaptive thresholds learned from traffic
-TEA_WINDOW_SIZE = 5
-# All other TEA constants are adaptive — defined in entropy_analyzer.py
+TEA_WINDOW_SIZE = 10
 
 # --- API ---
 FLASK_HOST = "0.0.0.0"
