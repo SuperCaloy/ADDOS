@@ -216,11 +216,24 @@ def on_result(src_ip: str, if_score, is_anomaly,
         _stats["total_packets"] += 1
 
     # --- ML OFF — count packet as normal, skip all detection and mitigation ---
+    # ML OFF — show traffic visually but take NO action
     if not ML_ENABLED:
         _pkt_count = max(int((flow_stats or {}).get("packet_count", 1)), 1)
+        _pps       = float((flow_stats or {}).get("packet_count_per_second", 0.0))
+        _is_attack = src_ip in _ATTACKER_IPS
+
         with _lock:
             _stats["normal_packets"]   += 1
             _stats["normal_forwarded"] += _pkt_count
+
+        # Write to traffic_summary so graph history shows traffic.
+        # Attack IPs counted as incoming threats (visible on graph, no action).
+        writer.log_traffic_summary(
+            total=_pkt_count,
+            threats=(_pkt_count if _is_attack else 0),
+            true_neg=(0 if _is_attack else _pkt_count),
+            fp=0,
+        )
         return
 
     if timed_out:
