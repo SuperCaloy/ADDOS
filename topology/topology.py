@@ -485,14 +485,21 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
     atype, _, _, _ = _ATTACKER_VARIANTS.get(num, ("SYN", "", 5000, 0.20))
     cmd = _hping_cmd(num, SERVER_IP)
 
-    # Start continuous flood — runs until killed
-    h.cmd(f"{cmd} > /dev/null 2>&1 &")
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
 
-    # Hold until stop signal
+    # Restart loop — restarts hping3 if it dies unexpectedly
     while not stop_event.is_set():
-        time.sleep(1)
+        h.cmd(f"{cmd} > /dev/null 2>&1 &")
+        # Poll every second — use real system pgrep, not Mininet namespace
+        while not stop_event.is_set():
+            time.sleep(1)
+            alive = subprocess.run(
+                ["pgrep", "-f", "hping3"],
+                capture_output=True
+            ).stdout.strip()
+            if not alive:
+                break  # hping3 died — outer loop restarts it
 
     # Stop flood and notify backend
     h.cmd("pkill -9 -f hping3 2>/dev/null; true")
@@ -500,18 +507,32 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
 
 
 def launch_attack(sustained: bool = True) -> None:
-    # launch all attackers at once, no stagger, no cycles
-    # use start_mixed_campaign() for staggered cyclic behavior
+    # Launch all attackers using worker threads — threads monitor hping3
+    # and keep flood running until stop_all_attacks() is called.
+    # sustained flag kept for API compatibility but always runs continuous flood.
     global _mixed_stop_event, _campaign_threads
     _mixed_stop_event.clear()
-    count = None if sustained else ATTACK_PKT_COUNT
-    info(f"*** {'Sustained' if sustained else 'Burst'} DDoS, all attackers -> {SERVER_IP}\n\n")
-    for a in _attack_assignments:
-        num      = int(a["attacker"][1:])
-        attacker = net.get(a["attacker"])
-        cmd      = _hping_cmd(num, SERVER_IP, count)
-        info(f"    {a['attacker']} ({attacker.IP()})  [{a['attack_type']}] {a['flags']}\n")
-        _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
+    _campaign_threads.clear()
+
+    info(f"*** Sustained DDoS (thread-managed), all attackers -> {SERVER_IP}\n\n")
+
+    for num in sorted(_ATTACKER_VARIANTS.keys()):
+        atype, flags, _, _ = _ATTACKER_VARIANTS[num]
+        info(f"    h{num} [{atype}] {flags}\n")
+
+        # Thread watches hping3 — restarts if it dies unexpectedly
+        t = threading.Thread(
+            target=_attacker_cycle_worker,
+            args=(num, _mixed_stop_event),
+            name=f"attacker-h{num}",
+            daemon=True,
+        )
+        _campaign_threads.append(t)
+        t.start()
+
+        # 100ms stagger — prevents OVS from being hit simultaneously
+        time.sleep(0.1)
+
     info("\n    -> Use  py stop_all_attacks()  to stop.\n")
 
 
@@ -563,6 +584,8 @@ def start_syn_flood_campaign() -> None:
         h = net.get(f"h{num}")
         _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+        # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
+        time.sleep(0.1)
     info("=" * 55 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 55 + "\n\n")
@@ -577,6 +600,8 @@ def start_icmp_flood_campaign() -> None:
         h = net.get(f"h{num}")
         _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+        # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
+        time.sleep(0.1)
     info("=" * 55 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 55 + "\n\n")
@@ -591,6 +616,8 @@ def start_udp_flood_campaign() -> None:
         h = net.get(f"h{num}")
         _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+        # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
+        time.sleep(0.1)
     info("=" * 55 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 55 + "\n\n")
