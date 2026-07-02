@@ -26,7 +26,7 @@ def submit(src_ip: str, flow_stats: dict, switch_stats: dict) -> None:
     try:
         _queue.put_nowait((src_ip, flow_stats, switch_stats, time.monotonic()))
     except queue.Full:
-        pass
+        log.warning("Worker queue full, dropped submission for %s", src_ip)
 
 
 def _process_item(src_ip: str, flow_stats: dict,
@@ -244,7 +244,8 @@ def _worker_loop() -> None:
             flood_filter.purge_stale()
 
 
-def start() -> None:
-    t = threading.Thread(target=_worker_loop, name="pipeline-worker", daemon=True)
-    t.start()
-    log.info("Pipeline worker started (queue maxsize=%d)", WORKER_QUEUE_MAXSIZE)
+def start(num_workers: int = 4) -> None:
+    for i in range(num_workers):
+        t = threading.Thread(target=_worker_loop, name=f"pipeline-worker-{i}", daemon=True)
+        t.start()
+    log.info("Pipeline worker started (%d threads, queue maxsize=%d)", num_workers, WORKER_QUEUE_MAXSIZE)
