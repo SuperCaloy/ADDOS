@@ -83,7 +83,25 @@ def start() -> None:
         _get_ctrl_metrics()
 
         while True:
-            time.sleep(1)
+            # --- Poll hping3 across the FULL 1s window, not one instant ---
+            # CPU below is an average over the past 1s (interval=None).
+            # Checking hping3 once, after the fact, misses attack traffic
+            # that ran during the window but stopped by the exact moment
+            # of the check — causing high CPU to log as baseline.
+            # Polling 5x across the same 1s window fixes this mismatch.
+            attack_seen_in_window = False
+            for _ in range(5):
+                time.sleep(0.2)
+                try:
+                    if any(
+                        'hping3' in ' '.join(p.info.get('cmdline') or [])
+                        or p.info.get('name') == 'hping3'
+                        for p in psutil.process_iter(['name', 'cmdline'])
+                    ):
+                        attack_seen_in_window = True
+                except Exception:
+                    pass
+
             try:
                 cpu = psutil.cpu_percent(interval=None)
                 mem = proc.memory_info().rss / (1024 * 1024)
@@ -94,20 +112,16 @@ def start() -> None:
 
                 # --- Tag as attack or baseline using live ground truth ---
                 try:
-                    # Check if hping3 is running anywhere in the process tree.
-                    # Covers rand-source floods where IPs cycle fast and
-                    # active_attacks() may return 0 between quarantine windows.
-                    hping3_running = any(
-                        'hping3' in ' '.join(p.info.get('cmdline') or [])
-                        or p.info.get('name') == 'hping3'
-                        for p in psutil.process_iter(['name', 'cmdline'])
-                    )
+                    hping3_running = attack_seen_in_window
 
                     if ML_ENABLED:
                         from backend.api.stats import get_active_attacks
                         from backend.mitigation.state_machine import state_machine
                         _active_gt = get_active_attacks()
-                        # Mark as attack if ML detects active threats OR hping3 is running
+                        # Ground truth (topology reports start/stop directly) is
+                        # the primary signal — accurate to the exact attack
+                        # window. hping3 process scan is only a fallback for
+                        # gaps ground truth doesn't cover.
                         is_attack = len(_active_gt) > 0 or hping3_running
                         # Mitigating = state machine currently has IPs under an
                         # active quarantine/ban response. Distinct from is_attack
@@ -115,9 +129,13 @@ def start() -> None:
                         # the state machine actually takes action on an IP.
                         is_mitigating = len(state_machine.get_active_list()) > 0
                     else:
-                        # ML OFF — rely on hping3 process detection only.
-                        # No mitigation logic runs when ML is OFF, so always False.
-                        is_attack = hping3_running
+                        # ML OFF — no mitigation logic runs, so is_mitigating
+                        # stays False. But ground truth is still reported by
+                        # topology.py regardless of ML state, so use it here
+                        # too for accurate attack labeling.
+                        from backend.api.stats import get_active_attacks
+                        _active_gt = get_active_attacks()
+                        is_attack = len(_active_gt) > 0 or hping3_running
                         is_mitigating = False
                 except Exception:
                     is_attack = False

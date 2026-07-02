@@ -54,9 +54,9 @@ _ATTACKER_VARIANTS = {
 
 # Stagger order: SYN, then ICMP, then UDP, then MIXED
 _ATTACKER_START_DELAYS = {
-    6: 0, 7: 2, 8: 4, 9: 6, 10: 8,
-    11: 15, 12: 18, 13: 21, 14: 24, 15: 27,
-    16: 32, 17: 35, 18: 38, 19: 41,
+    6: 0.0, 7: 0.1, 8: 0.2, 9: 0.3, 10: 0.4,
+    11: 0.5, 12: 0.6, 13: 0.7, 14: 0.8, 15: 0.9,
+    16: 1.0, 17: 1.1, 18: 1.2, 19: 1.3,
 }
 
 # attack_min, attack_max, rest_min, rest_max in seconds
@@ -82,23 +82,23 @@ _campaign_threads: list = []
 
 # size_min, size_max, sleep_min, sleep_max
 _ICMP_CONTINUOUS = {
-    0: (42, 56, 4.5, 6.0),
-    1: (42, 56, 3.5, 4.5),
-    3: (42, 56, 3.5, 4.5),
+    0: (56, 56,  4.5,  6.0),
+    1: (56, 56, 10.0, 15.0),
+    3: (56, 56,  3.5,  4.5),
 }
 
 # port: size_min, size_max, sleep_min, sleep_max
 _TCP_PROFILES = {
-    80:   (64, 512, 2.0, 5.0),
-    443:  (64, 512, 2.0, 5.0),
-    8080: (64, 512, 2.0, 5.0),
+    80:   (64, 256, 3.0, 6.0),
+    443:  (64, 256, 3.0, 6.0),
+    8080: (64, 256, 3.0, 6.0),
 }
 
 # port: size_min, size_max, sleep_min, sleep_max
 _UDP_PROFILES = {
-    53:   (64, 512, 2.0, 5.0),
-    123:  (64, 512, 2.0, 5.0),
-    1900: (64, 512, 2.0, 5.0),
+    53:   (64, 256, 3.0, 6.0),
+    123:  (64, 256, 4.0, 8.0),
+    1900: (64, 256, 3.0, 6.0),
 }
 
 # host slot pools, picked randomly each active cycle
@@ -119,8 +119,8 @@ _ALL_SLOTS = [
 ]
 
 _DEFAULT_DURATIONS = {
-    "idle":   (3, 5),
-    "active": (60, 60),
+    "idle":   (5, 15),
+    "active": (45, 45),
 }
 
 # Runtime state, set at startup
@@ -245,12 +245,18 @@ def _kill_baseline_procs(host) -> None:
 
 
 def _nsrun(host, cmd: str, wait: bool = False) -> None:
-    # run a command inside host netns
-    full = f"nsenter -t {host.pid} -n -- bash -c {cmd!r}"
+    # run a command inside host netns + pid namespace
+    # start_new_session=True detaches child from our process group,
+    # so Ctrl+C / SIGINT to this script does not kill the flood too.
+    full = f"nsenter -t {host.pid} -n -p -- bash -c {cmd!r}"
     if wait:
         subprocess.run(full, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     else:
-        subprocess.Popen(full, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen(
+            full, shell=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
 
 
 _HOST_START_STATE = {1: "active", 2: "active", 3: "active", 4: "active", 5: "active"}
@@ -477,10 +483,14 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
     ip    = h.IP()
 
     # Wait for stagger delay before starting
-    for _ in range(delay):
+    # Wait for stagger delay before starting — checks stop_event every
+    # 0.1s so short decimal delays (e.g. 0.5s) work and stop is still fast
+    waited = 0.0
+    while waited < delay:
         if stop_event.is_set():
             return
-        time.sleep(1)
+        time.sleep(0.1)
+        waited += 0.1
 
     atype, _, _, _ = _ATTACKER_VARIANTS.get(num, ("SYN", "", 5000, 0.20))
     cmd = _hping_cmd(num, SERVER_IP)
@@ -488,17 +498,15 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
 
-    # Restart loop — restarts hping3 if it dies unexpectedly.
-    # Use _nsrun() not h.cmd() — h.cmd() closes the shell after the call,
-    # sending SIGHUP to all backgrounded children and silently killing hping3.
+    # Restart loop — restarts hping3 if it dies unexpectedly
     while not stop_event.is_set():
-        _nsrun(h, f"{cmd}")
-        # Poll every second inside the namespace — confirms hping3 is alive
+        _nsrun(h, cmd)
+        # Poll every second — check inside host netns, not system-wide
         while not stop_event.is_set():
             time.sleep(1)
             alive = subprocess.run(
                 f"nsenter -t {h.pid} -n -p -- pgrep -x hping3",
-                shell=True, capture_output=True,
+                shell=True, capture_output=True
             ).stdout.strip()
             if not alive:
                 break  # hping3 died — outer loop restarts it
@@ -542,6 +550,7 @@ def launch_syn_flood(attacker_name="h6") -> None:
     attacker = net.get(attacker_name)
     cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, ATTACK_PKT_COUNT)
     info(f"*** SYN burst ({ATTACK_PKT_COUNT:,} pkts): {attacker_name} -> {SERVER_IP}\n")
+    _notify_attack_start(attacker.IP(), "SYN")
     _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
 
 
@@ -549,6 +558,7 @@ def launch_icmp_flood(attacker_name="h11") -> None:
     attacker = net.get(attacker_name)
     cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, ATTACK_PKT_COUNT)
     info(f"*** ICMP burst ({ATTACK_PKT_COUNT:,} pkts): {attacker_name} -> {SERVER_IP}\n")
+    _notify_attack_start(attacker.IP(), "ICMP")
     _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
 
 
@@ -556,35 +566,64 @@ def launch_udp_flood(attacker_name="h16") -> None:
     attacker = net.get(attacker_name)
     cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, ATTACK_PKT_COUNT)
     info(f"*** UDP burst ({ATTACK_PKT_COUNT:,} pkts): {attacker_name} -> {SERVER_IP}\n")
+    _notify_attack_start(attacker.IP(), "UDP")
     _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
 
 
 def launch_syn_flood_sustained(attacker_name="h6") -> None:
-    attacker = net.get(attacker_name)
+    global _mixed_stop_event, _campaign_threads
+    _mixed_stop_event.clear()
+    num = int(attacker_name[1:])
     info(f"*** SYN sustained: {attacker_name} -> {SERVER_IP}\n")
-    _nsrun(attacker, f"{_hping_cmd(int(attacker_name[1:]), SERVER_IP)} > /dev/null 2>&1")
+    t = threading.Thread(
+        target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
+        name=f"attacker-{attacker_name}", daemon=True,
+    )
+    _campaign_threads.append(t)
+    t.start()
 
 
 def launch_icmp_flood_sustained(attacker_name="h11") -> None:
-    attacker = net.get(attacker_name)
+    global _mixed_stop_event, _campaign_threads
+    _mixed_stop_event.clear()
+    num = int(attacker_name[1:])
     info(f"*** ICMP sustained: {attacker_name} -> {SERVER_IP}\n")
-    _nsrun(attacker, f"{_hping_cmd(int(attacker_name[1:]), SERVER_IP)} > /dev/null 2>&1")
+    t = threading.Thread(
+        target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
+        name=f"attacker-{attacker_name}", daemon=True,
+    )
+    _campaign_threads.append(t)
+    t.start()
 
 
 def launch_udp_flood_sustained(attacker_name="h16") -> None:
-    attacker = net.get(attacker_name)
+    global _mixed_stop_event, _campaign_threads
+    _mixed_stop_event.clear()
+    num = int(attacker_name[1:])
     info(f"*** UDP sustained: {attacker_name} -> {SERVER_IP}\n")
-    _nsrun(attacker, f"{_hping_cmd(int(attacker_name[1:]), SERVER_IP)} > /dev/null 2>&1")
+    t = threading.Thread(
+        target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
+        name=f"attacker-{attacker_name}", daemon=True,
+    )
+    _campaign_threads.append(t)
+    t.start()
 
 
 def start_syn_flood_campaign() -> None:
-    # SYN flood — h6, h7, h8 continuous
+    # SYN flood — h6, h7, h8 continuous, watchdog auto-restarts if killed
+    global _mixed_stop_event, _campaign_threads
+    _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
     info("  [SYN CAMPAIGN]  h6 h7 h8  |  Continuous flood\n")
     info("=" * 55 + "\n")
     for num in [6, 7, 8]:
         h = net.get(f"h{num}")
-        _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
+        t = threading.Thread(
+            target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
+            name=f"attacker-h{num}", daemon=True,
+        )
+        _campaign_threads.append(t)
+        t.start()
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
         # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
@@ -594,13 +633,20 @@ def start_syn_flood_campaign() -> None:
 
 
 def start_icmp_flood_campaign() -> None:
-    # ICMP flood — h11, h12, h13 continuous
+    # ICMP flood — h11, h12, h13 continuous, watchdog auto-restarts if killed
+    global _mixed_stop_event, _campaign_threads
+    _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
     info("  [ICMP CAMPAIGN]  h11 h12 h13  |  Continuous flood\n")
     info("=" * 55 + "\n")
     for num in [11, 12, 13]:
         h = net.get(f"h{num}")
-        _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
+        t = threading.Thread(
+            target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
+            name=f"attacker-h{num}", daemon=True,
+        )
+        _campaign_threads.append(t)
+        t.start()
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
         # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
@@ -610,13 +656,20 @@ def start_icmp_flood_campaign() -> None:
 
 
 def start_udp_flood_campaign() -> None:
-    # UDP flood — h16, h17, h18 continuous
+    # UDP flood — h16, h17, h18 continuous, watchdog auto-restarts if killed
+    global _mixed_stop_event, _campaign_threads
+    _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
     info("  [UDP CAMPAIGN]  h16 h17 h18  |  Continuous flood\n")
     info("=" * 55 + "\n")
     for num in [16, 17, 18]:
         h = net.get(f"h{num}")
-        _nsrun(h, f"{_hping_cmd(num, SERVER_IP)} > /dev/null 2>&1")
+        t = threading.Thread(
+            target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
+            name=f"attacker-h{num}", daemon=True,
+        )
+        _campaign_threads.append(t)
+        t.start()
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
         # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
@@ -679,13 +732,13 @@ def start_stress_test() -> None:
         8:  "hping3 -S -p 22   --flood --rand-source {t} > /dev/null 2>&1",
         9:  "hping3 -S -p 3306 --flood --rand-source {t} > /dev/null 2>&1",
         10: "hping3 -S -p 8080 --flood --rand-source {t} > /dev/null 2>&1",
-        11: "hping3 --icmp --flood --rand-source --data 1400 {t} > /dev/null 2>&1",
-        12: "hping3 --icmp --flood --rand-source --data 64   {t} > /dev/null 2>&1",
-        13: "hping3 --icmp --flood --rand-source --data 256  {t} > /dev/null 2>&1",
-        14: "hping3 --icmp --flood --rand-source --data 512  {t} > /dev/null 2>&1",
-        15: "hping3 --icmp --flood --rand-source --data 128  {t} > /dev/null 2>&1",
-        16: "hping3 --udp -p 53    --flood --rand-source --data 1400 {t} > /dev/null 2>&1",
-        17: "hping3 --udp -p 123   --flood --rand-source --data 512  {t} > /dev/null 2>&1",
+        11: "hping3 --icmp --flood --rand-source --data 64 {t} > /dev/null 2>&1",
+        12: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
+        13: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
+        14: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
+        15: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
+        16: "hping3 --udp -p 53    --flood --rand-source --data 32 {t} > /dev/null 2>&1",
+        17: "hping3 --udp -p 123   --flood --rand-source --data 32 {t} > /dev/null 2>&1",
         18: "hping3 -S -p 1900   --flood --rand-source {t} > /dev/null 2>&1 & hping3 --udp -p 11211 --flood --rand-source {t} > /dev/null 2>&1 & wait",
         19: "hping3 --udp -p 11211 --flood --rand-source {t} > /dev/null 2>&1 & hping3 -S -p 1900 --flood --rand-source {t} > /dev/null 2>&1 & wait",
     }
@@ -698,9 +751,28 @@ def start_stress_test() -> None:
     def _stress_worker(num: int) -> None:
         h   = net.get(f"h{num}")
         cmd = _STRESS_CMDS[num].format(t=SERVER_IP)
-        # use host.cmd — proven to work, no nsenter needed
-        h.cmd(f"{cmd} &")
+        atype, _, _, _ = _ATTACKER_VARIANTS[num]
+        _notify_attack_start(h.IP(), atype)
+        # _nsrun uses Popen, survives after this call returns.
+        # h.cmd() closes its shell after return, killing any &
+        # backgrounded process with it — do not use h.cmd() here.
+        _nsrun(h, cmd)
         info(f"    h{num} ({h.IP()}): stress flood started\n")
+
+        # Watchdog: check every 5s if hping3 died on its own.
+        # If dead and stop was not requested, relaunch it.
+        # Loop only exits when stop_stress_test() sets the stop event.
+        while not _stress_stop_event.is_set():
+            time.sleep(5)
+            if _stress_stop_event.is_set():
+                break
+            check = subprocess.run(
+                f"nsenter -t {h.pid} -n -p -- pgrep -x hping3",
+                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            if check.returncode != 0:
+                info(f"    h{num}: hping3 died, restarting\n")
+                _nsrun(h, cmd)
 
     for i, num in enumerate(sorted(_ATTACKER_NUMS)):
         t = threading.Thread(target=_stress_worker, args=(num,), daemon=True)
@@ -711,44 +783,52 @@ def start_stress_test() -> None:
 
 
 def stop_stress_test() -> None:
-    # stop all rand-source stress flood processes
-    # use host.cmd — proven to work, no nsenter needed
+    # stop all rand-source stress flood processes, inside each host netns
     info("*** Stopping stress test...\n")
     _stress_stop_event.set()
     for h in net.hosts:
         if int(h.name[1:]) in _ATTACKER_NUMS:
-            h.cmd("pkill -9 -f hping3 2>/dev/null; true")
+            _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
+            _notify_attack_stop(h.IP())
     info("*** Stress test stopped.\n")
 
 
 def stop_all_attacks() -> None:
     global _mixed_stop_event, _campaign_threads
 
-    # stop stress test first — covers rand-source floods
-    stop_stress_test()
+    info("*** Stopping all attacks...\n")
 
-    # signal mixed campaign threads to stop
+    # Set stop_event FIRST — before killing anything. Watchdog threads
+    # check this flag before restarting hping3. If we kill first and
+    # set the flag after, a watchdog can see hping3 dead and restart
+    # it in that gap (race condition).
     _mixed_stop_event.set()
 
-    # wait for threads to exit before killing hping3
-    # prevents threads from restarting hping3 after we kill it
-    info("*** Waiting for campaign threads to exit...\n")
+    # Now kill hping3 — instant, watchdogs will not restart it.
+    info("*** Killing hping3 on all attackers...\n")
+    for h in net.hosts:
+        if int(h.name[1:]) in _ATTACKER_NUMS:
+            _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
+
+    # stop stress test — sets its own stop event + pkill again for safety
+    stop_stress_test()
+
+    info("*** Waiting for attack threads to exit...\n")
     for t in _campaign_threads:
         t.join(timeout=5)
     _campaign_threads.clear()
 
-    # kill hping3 inside each host namespace — h.cmd() loses the process
-    # since _nsrun() launched it via Popen outside the Mininet shell.
-    info("*** Killing hping3 on all attackers...\n")
-    for h in net.hosts:
-        if int(h.name[1:]) in _ATTACKER_NUMS:
-            _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
-
-    # force kill any stragglers
+    # force kill any stragglers spawned during the join window
     time.sleep(0.3)
     for h in net.hosts:
         if int(h.name[1:]) in _ATTACKER_NUMS:
             _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
+
+    # notify ground truth stop for every attacker — covers burst/campaign
+    # functions that don't track their own stop event individually
+    for h in net.hosts:
+        if int(h.name[1:]) in _ATTACKER_NUMS:
+            _notify_attack_stop(h.IP())
 
     info("*** Flushing OVS block rules...\n")
     for sw in net.switches:
