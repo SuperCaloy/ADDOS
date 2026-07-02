@@ -8,6 +8,7 @@ from backend.mitigation.deception import deception
 from backend.database import writer
 from backend.pipeline import worker
 from backend.models import loader
+from backend.config import ML_ENABLED
 
 log = logging.getLogger(__name__)
 
@@ -208,11 +209,36 @@ def _assign_priority(if_score: float, confidence: float) -> str:
 def on_result(src_ip: str, if_score, is_anomaly,
               attack_class, confidence, *,
               flow_stats: dict = None, switch_stats: dict = None,
-              timed_out: bool) -> None:
+              timed_out: bool, enqueued_at: float = None) -> None:
     t_start = time.monotonic()
+
+    # Detection Time — flow queued (worker.submit) → IF/RF result ready here.
+    # None when not provided (e.g. timeout fallback path) — left as None in DB.
+    detection_ms = ((t_start - enqueued_at) * 1000.0) if enqueued_at is not None else None
 
     with _lock:
         _stats["total_packets"] += 1
+
+    # --- ML OFF — count packet as normal, skip all detection and mitigation ---
+    # ML OFF — show traffic visually but take NO action
+    if not ML_ENABLED:
+        _pkt_count = max(int((flow_stats or {}).get("packet_count", 1)), 1)
+        _pps       = float((flow_stats or {}).get("packet_count_per_second", 0.0))
+        _is_attack = src_ip in _ATTACKER_IPS
+
+        with _lock:
+            _stats["normal_packets"]   += 1
+            _stats["normal_forwarded"] += _pkt_count
+
+        # Write to traffic_summary so graph history shows traffic.
+        # Attack IPs counted as incoming threats (visible on graph, no action).
+        writer.log_traffic_summary(
+            total=_pkt_count,
+            threats=(_pkt_count if _is_attack else 0),
+            true_neg=(0 if _is_attack else _pkt_count),
+            fp=0,
+        )
+        return
 
     if timed_out:
         state_machine.manual_block(src_ip)
@@ -275,6 +301,12 @@ def on_result(src_ip: str, if_score, is_anomaly,
     log.debug("Anomaly confirmed: %s  IF=%.4f  RF=%s  conf=%.1f%%",
               src_ip, if_score, attack_class, (confidence or 0)*100)
 
+    # Inform resource_guard of the current attack protocol.
+    # Allows CRIT tier to install protocol-specific OVS drop rules
+    # that catch rand-source floods bypassing per-IP block rules.
+    from backend.mitigation.resource_guard import resource_guard
+    resource_guard.set_attack_proto(attack_class)
+
     # F4 fix: update recent_pps on the state so _evaluate_phase1 can check
     # whether traffic is still active before escalating to a time ban.
     _recent_pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
@@ -305,6 +337,11 @@ def on_result(src_ip: str, if_score, is_anomaly,
     predicted_class = "DDoS" if attack_class != "Uncertain" else "Anomaly"
     priority        = _assign_priority(if_score, confidence)
 
+    # Mitigation Response Time — IF/RF result ready (t_start) → FlowMod dispatched.
+    # on_detection()/on_reoffence() are synchronous, so by the time they return
+    # the command has already been pushed to the commander.
+    t_mitigate_start = time.monotonic()
+
     # Check if IP was previously banned and is re-offending
     existing = state_machine._states.get(src_ip)
     if existing is None:
@@ -327,6 +364,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
     else:
         action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
 
+    mitigation_ms = (time.monotonic() - t_mitigate_start) * 1000.0
+
     with _lock:
         _stats["malicious_dropped"] += 1
 
@@ -335,10 +374,11 @@ def on_result(src_ip: str, if_score, is_anomaly,
     ip_state    = state_machine._states.get(src_ip)
     phase_label = ip_state.phase_label() if ip_state else None
 
-    # Always INSERT a new row — never upsert/overwrite.
-    # This ensures re-offences and phase escalations each get their own
-    # audit log entry so the operator sees the full history per IP.
-    writer.log_mitigation_event({
+    # Skip DB mitigation write for known legit hosts.
+    # FP is already counted above — writing a "DDoS" row here would
+    # corrupt ground truth. Only real attackers get a mitigation record.
+    if not is_known_legit:
+        writer.log_mitigation_event({
         "timestamp":       ts,
         "src_ip":          src_ip,
         "predicted_class": predicted_class,
@@ -350,7 +390,10 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "phase":           phase_label,
         "is_manual":       0,
         "force_insert":    True,   # never overwrite existing rows
-    })
+        "detection_ms":    detection_ms,
+        "mitigation_ms":   mitigation_ms,
+        })
+
     _threat_pps = max(int(float((flow_stats or {}).get("packet_count_per_second", 1.0))), 1)
     _is_tp      = src_ip in _ATTACKER_IPS
     _is_legit   = src_ip in _LEGIT_HOST_IPS
