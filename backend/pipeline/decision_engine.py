@@ -12,6 +12,24 @@ from backend.config import ML_ENABLED
 
 log = logging.getLogger(__name__)
 
+
+def _estimate_pkt_count(flow_stats: dict) -> int:
+    """Real packet_count from the OVS flow-stats poll, when present.
+
+    Falls back to packet_count_per_second (this worker cycle is ~1s, so
+    pps approximates the packet count for that window) when flow_stats
+    is missing or stale — e.g. during a switch reconnect. Previously
+    this fell back to a hardcoded 1, which massively undercounts real
+    traffic during a flood.
+    """
+    fs  = flow_stats or {}
+    raw = fs.get("packet_count")
+    if raw is not None:
+        return max(int(raw), 1)
+    pps = float(fs.get("packet_count_per_second", 0.0))
+    return max(int(round(pps)), 1)
+
+
 _lock = threading.Lock()
 
 # Confidence lock — keeps highest seen confidence+attack_class per IP
@@ -222,7 +240,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     # --- ML OFF — count packet as normal, skip all detection and mitigation ---
     # ML OFF — show traffic visually but take NO action
     if not ML_ENABLED:
-        _pkt_count = max(int((flow_stats or {}).get("packet_count", 1)), 1)
+        _pkt_count = _estimate_pkt_count(flow_stats)
         _pps       = float((flow_stats or {}).get("packet_count_per_second", 0.0))
         _is_attack = src_ip in _ATTACKER_IPS
 
@@ -279,8 +297,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     })
 
     if not is_anomaly:
-        _pkt_count = int((flow_stats or {}).get("packet_count", 1))
-        _pkt_count = max(_pkt_count, 1)
+        _pkt_count = _estimate_pkt_count(flow_stats)
         with _lock:
             _stats["normal_packets"]  += 1
             _stats["normal_forwarded"] += _pkt_count
@@ -394,7 +411,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "mitigation_ms":   mitigation_ms,
         })
 
-    _threat_pps = max(int(float((flow_stats or {}).get("packet_count_per_second", 1.0))), 1)
+    _threat_pps = _estimate_pkt_count(flow_stats)
     _is_tp      = src_ip in _ATTACKER_IPS
     _is_legit   = src_ip in _LEGIT_HOST_IPS
 
