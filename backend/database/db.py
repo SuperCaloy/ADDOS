@@ -36,7 +36,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             action_taken    TEXT    NOT NULL,
             if_score        REAL,
             phase           TEXT,
-            is_manual       INTEGER DEFAULT 0
+            is_manual       INTEGER DEFAULT 0,
+            detection_ms    REAL,
+            mitigation_ms   REAL
         );
 
         CREATE TABLE IF NOT EXISTS mitigation_events_archive (
@@ -216,7 +218,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             pps_processed   REAL    NOT NULL DEFAULT 0,
             is_attack       INTEGER NOT NULL DEFAULT 0,
             ctrl_cpu_percent REAL   NOT NULL DEFAULT 0,
-            ctrl_mem_mb     REAL    NOT NULL DEFAULT 0
+            ctrl_mem_mb     REAL    NOT NULL DEFAULT 0,
+            is_mitigating   INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_sysmetrics_ts
@@ -261,7 +264,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     # controller metrics columns
     for col, typ in [("ctrl_cpu_percent", "REAL NOT NULL DEFAULT 0"),
-                     ("ctrl_mem_mb",      "REAL NOT NULL DEFAULT 0")]:
+                     ("ctrl_mem_mb",      "REAL NOT NULL DEFAULT 0"),
+                     ("is_mitigating",    "INTEGER NOT NULL DEFAULT 0")]:
         try:
             conn.execute(f"ALTER TABLE system_metrics ADD COLUMN {col} {typ}")
             conn.commit()
@@ -284,12 +288,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.commit()
         except sqlite3.OperationalError:
             pass
+
+
+    # latency tracking columns (Detection Time / Mitigation Response Time)
+    for col in ("detection_ms", "mitigation_ms"):
         try:
-            conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.execute(f"ALTER TABLE mitigation_events ADD COLUMN {col} REAL")
             conn.commit()
         except sqlite3.OperationalError:
             pass
-
 
     # IF/RF contract feature columns
     df_new_cols = [

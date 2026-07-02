@@ -35,10 +35,10 @@ EXTRACTION_TRIGGER_S    = 0.05
 SIMULATION_MODE = False
 
 # --- ML Engine toggle ---
-ML_ENABLED = True
+ML_ENABLED = False
 
 # --- Flood pre-filter
-FLOOD_SYN_LIMIT     = 1000
+FLOOD_SYN_LIMIT     = 100
 FLOOD_SYN_WINDOW_S  = 1.0
 
 FLOOD_ICMP_LIMIT    = 50

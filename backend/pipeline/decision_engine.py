@@ -209,8 +209,12 @@ def _assign_priority(if_score: float, confidence: float) -> str:
 def on_result(src_ip: str, if_score, is_anomaly,
               attack_class, confidence, *,
               flow_stats: dict = None, switch_stats: dict = None,
-              timed_out: bool) -> None:
+              timed_out: bool, enqueued_at: float = None) -> None:
     t_start = time.monotonic()
+
+    # Detection Time — flow queued (worker.submit) → IF/RF result ready here.
+    # None when not provided (e.g. timeout fallback path) — left as None in DB.
+    detection_ms = ((t_start - enqueued_at) * 1000.0) if enqueued_at is not None else None
 
     with _lock:
         _stats["total_packets"] += 1
@@ -333,6 +337,11 @@ def on_result(src_ip: str, if_score, is_anomaly,
     predicted_class = "DDoS" if attack_class != "Uncertain" else "Anomaly"
     priority        = _assign_priority(if_score, confidence)
 
+    # Mitigation Response Time — IF/RF result ready (t_start) → FlowMod dispatched.
+    # on_detection()/on_reoffence() are synchronous, so by the time they return
+    # the command has already been pushed to the commander.
+    t_mitigate_start = time.monotonic()
+
     # Check if IP was previously banned and is re-offending
     existing = state_machine._states.get(src_ip)
     if existing is None:
@@ -354,6 +363,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
             action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
     else:
         action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
+
+    mitigation_ms = (time.monotonic() - t_mitigate_start) * 1000.0
 
     with _lock:
         _stats["malicious_dropped"] += 1
@@ -379,6 +390,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "phase":           phase_label,
         "is_manual":       0,
         "force_insert":    True,   # never overwrite existing rows
+        "detection_ms":    detection_ms,
+        "mitigation_ms":   mitigation_ms,
         })
 
     _threat_pps = max(int(float((flow_stats or {}).get("packet_count_per_second", 1.0))), 1)

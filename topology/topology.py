@@ -488,21 +488,23 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
 
-    # Restart loop — restarts hping3 if it dies unexpectedly
+    # Restart loop — restarts hping3 if it dies unexpectedly.
+    # Use _nsrun() not h.cmd() — h.cmd() closes the shell after the call,
+    # sending SIGHUP to all backgrounded children and silently killing hping3.
     while not stop_event.is_set():
-        h.cmd(f"{cmd} > /dev/null 2>&1 &")
-        # Poll every second — use real system pgrep, not Mininet namespace
+        _nsrun(h, f"{cmd}")
+        # Poll every second inside the namespace — confirms hping3 is alive
         while not stop_event.is_set():
             time.sleep(1)
             alive = subprocess.run(
-                ["pgrep", "-f", "hping3"],
-                capture_output=True
+                f"nsenter -t {h.pid} -n -p -- pgrep -x hping3",
+                shell=True, capture_output=True,
             ).stdout.strip()
             if not alive:
                 break  # hping3 died — outer loop restarts it
 
     # Stop flood and notify backend
-    h.cmd("pkill -9 -f hping3 2>/dev/null; true")
+    _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
     _notify_attack_stop(ip)
 
 
@@ -735,17 +737,18 @@ def stop_all_attacks() -> None:
         t.join(timeout=5)
     _campaign_threads.clear()
 
-    # kill hping3 using host.cmd — proven to work, no nsenter needed
+    # kill hping3 inside each host namespace — h.cmd() loses the process
+    # since _nsrun() launched it via Popen outside the Mininet shell.
     info("*** Killing hping3 on all attackers...\n")
     for h in net.hosts:
         if int(h.name[1:]) in _ATTACKER_NUMS:
-            h.cmd("pkill -f hping3 2>/dev/null; true")
+            _nsrun(h, "pkill -f hping3 2>/dev/null; true", wait=True)
 
     # force kill any stragglers
     time.sleep(0.3)
     for h in net.hosts:
         if int(h.name[1:]) in _ATTACKER_NUMS:
-            h.cmd("pkill -9 -f hping3 2>/dev/null; true")
+            _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
 
     info("*** Flushing OVS block rules...\n")
     for sw in net.switches:
