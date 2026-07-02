@@ -2,6 +2,7 @@ import datetime
 import threading
 import logging
 from backend.database.db import execute, executemany, query
+from backend.config import ML_ENABLED
 
 log = logging.getLogger(__name__)
 
@@ -62,8 +63,9 @@ def log_mitigation_event(event: dict) -> None:
         execute("""
             INSERT INTO mitigation_events
                 (timestamp, src_ip, predicted_class, attack_vector,
-                 confidence, priority, action_taken, if_score, phase, is_manual)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 confidence, priority, action_taken, if_score, phase, is_manual,
+                 detection_ms, mitigation_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             event["timestamp"],
             event["src_ip"],
@@ -75,6 +77,8 @@ def log_mitigation_event(event: dict) -> None:
             event.get("if_score"),
             event.get("phase"),
             int(event.get("is_manual", 0)),
+            event.get("detection_ms"),
+            event.get("mitigation_ms"),
         ))
     except Exception:
         log.exception("Failed to write mitigation event for %s", event.get("src_ip"))
@@ -118,6 +122,9 @@ def log_detection_features(src_ip: str, if_score: float,
                             confidence: float,
                             flow_stats: dict,
                             switch_stats: dict) -> None:
+    # --- ML OFF — skip DB write to avoid polluting dataset ---
+    if not ML_ENABLED:
+        return
     try:
         fs  = flow_stats  or {}
         ts  = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -275,6 +282,9 @@ def log_traffic_summary(total: int, threats: int,
                         rf_syn_as_icmp: int = 0, rf_syn_as_udp: int = 0,
                         rf_icmp_as_syn: int = 0, rf_icmp_as_udp: int = 0,
                         rf_udp_as_syn:  int = 0, rf_udp_as_icmp: int = 0) -> None:
+    # --- ML OFF — skip metric writes to keep dataset clean ---
+    if not ML_ENABLED:
+        return
     with _summary_lock:
         _summary_buffer["total"]    += total
         _summary_buffer["threats"]  += threats
@@ -630,18 +640,40 @@ def get_rf_metrics(start: str, end: str) -> dict:
         return {}
 
 
+def get_latency_metrics(start: str, end: str) -> dict:
+    """Avg Detection Time and Mitigation Response Time, in milliseconds."""
+    try:
+        rows = query("""
+            SELECT AVG(detection_ms) as avg_detect, AVG(mitigation_ms) as avg_mitigate
+            FROM mitigation_events
+            WHERE timestamp >= ? AND timestamp <= ?
+              AND detection_ms IS NOT NULL AND mitigation_ms IS NOT NULL
+        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        r = rows[0] if rows else {}
+        return {
+            "detection_ms":  round(float(r.get("avg_detect")   or 0), 2),
+            "mitigation_ms": round(float(r.get("avg_mitigate") or 0), 2),
+        }
+    except Exception:
+        log.exception("Failed to compute latency metrics")
+        return {}
+
+
 # system_metrics
 def log_system_metrics(cpu: float, mem_mb: float, pps: float,
                        is_attack: bool = False,
-                       ctrl_cpu: float = 0.0, ctrl_mem: float = 0.0) -> None:
+                       ctrl_cpu: float = 0.0, ctrl_mem: float = 0.0,
+                       is_mitigating: bool = False) -> None:
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         execute("""
             INSERT INTO system_metrics
-                (timestamp, cpu_percent, mem_mb, pps_processed, is_attack, ctrl_cpu_percent, ctrl_mem_mb)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (timestamp, cpu_percent, mem_mb, pps_processed, is_attack,
+                 ctrl_cpu_percent, ctrl_mem_mb, is_mitigating)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (ts, round(cpu, 2), round(mem_mb, 2), round(pps, 2),
-              int(is_attack), round(ctrl_cpu, 2), round(ctrl_mem, 2)))
+              int(is_attack), round(ctrl_cpu, 2), round(ctrl_mem, 2),
+              int(is_mitigating)))
     except Exception:
         log.exception("Failed to log system metrics")
 
@@ -666,39 +698,33 @@ def get_system_metrics_avg(start: str, end: str) -> dict:
 
 
 def get_system_metrics_attack_vs_baseline(start: str, end: str) -> dict:
-    """Returns avg and peak CPU/mem (system + controller) during attack vs baseline."""
+    """Returns avg Controller CPU during attack, baseline, and active mitigation."""
     try:
         attack = query("""
-            SELECT AVG(cpu_percent) as cpu, AVG(mem_mb) as mem,
-                   AVG(ctrl_cpu_percent) as ctrl_cpu, AVG(ctrl_mem_mb) as ctrl_mem,
-                   MAX(cpu_percent) as cpu_peak, MAX(mem_mb) as mem_peak,
-                   MAX(ctrl_cpu_percent) as ctrl_cpu_peak, MAX(ctrl_mem_mb) as ctrl_mem_peak
+            SELECT AVG(ctrl_cpu_percent) as ctrl_cpu
             FROM system_metrics
             WHERE timestamp >= ? AND timestamp <= ? AND is_attack = 1
         """, (f"{start} 00:00:00", f"{end} 23:59:59"))
 
         baseline = query("""
-            SELECT AVG(cpu_percent) as cpu, AVG(mem_mb) as mem,
-                   AVG(ctrl_cpu_percent) as ctrl_cpu, AVG(ctrl_mem_mb) as ctrl_mem
+            SELECT AVG(ctrl_cpu_percent) as ctrl_cpu
             FROM system_metrics
             WHERE timestamp >= ? AND timestamp <= ? AND is_attack = 0
         """, (f"{start} 00:00:00", f"{end} 23:59:59"))
 
-        a = attack[0]   if attack   else {}
-        b = baseline[0] if baseline else {}
+        mitigating = query("""
+            SELECT AVG(ctrl_cpu_percent) as ctrl_cpu
+            FROM system_metrics
+            WHERE timestamp >= ? AND timestamp <= ? AND is_mitigating = 1
+        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+
+        a = attack[0]     if attack     else {}
+        b = baseline[0]   if baseline   else {}
+        m = mitigating[0] if mitigating else {}
         return {
-            "attack_cpu":        round(float(a.get("cpu")      or 0), 2),
-            "attack_mem":        round(float(a.get("mem")      or 0), 2),
-            "attack_ctrl_cpu":   round(float(a.get("ctrl_cpu") or 0), 2),
-            "attack_ctrl_mem":   round(float(a.get("ctrl_mem") or 0), 2),
-            "attack_cpu_peak":      round(float(a.get("cpu_peak")      or 0), 2),
-            "attack_mem_peak":      round(float(a.get("mem_peak")      or 0), 2),
-            "attack_ctrl_cpu_peak": round(float(a.get("ctrl_cpu_peak") or 0), 2),
-            "attack_ctrl_mem_peak": round(float(a.get("ctrl_mem_peak") or 0), 2),
-            "baseline_cpu":      round(float(b.get("cpu")      or 0), 2),
-            "baseline_mem":      round(float(b.get("mem")      or 0), 2),
-            "baseline_ctrl_cpu": round(float(b.get("ctrl_cpu") or 0), 2),
-            "baseline_ctrl_mem": round(float(b.get("ctrl_mem") or 0), 2),
+            "attack_ctrl_cpu":     round(float(a.get("ctrl_cpu") or 0), 2),
+            "baseline_ctrl_cpu":   round(float(b.get("ctrl_cpu") or 0), 2),
+            "mitigation_ctrl_cpu": round(float(m.get("ctrl_cpu") or 0), 2),
         }
     except Exception:
         log.exception("Failed to get attack vs baseline metrics")

@@ -1,8 +1,6 @@
-models/isolation_forest/isolation_forest.pkl
-*.pkl
-*.joblib
+/**/*.db
+/**/*.db-shm
+/**/*.db-wal
+/**/*.pyc
+**/__pycache__/
 logs/
-*.db
-*.db-shm
-*.db-wal
-*.pyc

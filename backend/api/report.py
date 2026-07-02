@@ -11,6 +11,7 @@ from reportlab.platypus import (
 )
 from backend.database.db import query
 from backend.database import writer
+from backend.config import ML_ENABLED
 
 bp = Blueprint("report", __name__)
 
@@ -74,8 +75,12 @@ def generate_report():
         ORDER BY timestamp ASC
     """, (start_sql, end_sql, start_sql, end_sql))
 
-    if not rows:
+    if not rows and ML_ENABLED:
         return jsonify({"error": "No data found for the selected date range."}), 404
+
+    # --- ML OFF — generate report with only system/controller metrics ---
+    if not ML_ENABLED:
+        rows = []
 
     pdf_bytes = _build_pdf(start_str, end_str, rows)
     buf = io.BytesIO(pdf_bytes)
@@ -254,15 +259,10 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     # ── Section 2: Performance Benchmark ─────────────────────────────────────
     story += _section_header("2.  Performance Benchmark", styles)
 
-    if_m = writer.get_if_metrics(start_str, end_str)
-    rf_m = writer.get_rf_metrics(start_str, end_str)
-    sys  = writer.get_system_metrics_attack_vs_baseline(start_str, end_str)
-    lat  = query("""
-        SELECT AVG(duration_sec) as avg_dur
-        FROM ip_attack_history
-        WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
-    """, (start_str, end_str))
-    avg_dur = float((lat[0].get("avg_dur") or 0)) if lat else 0.0
+    if_m  = writer.get_if_metrics(start_str, end_str)
+    rf_m  = writer.get_rf_metrics(start_str, end_str)
+    sys   = writer.get_system_metrics_attack_vs_baseline(start_str, end_str)
+    lat_m = writer.get_latency_metrics(start_str, end_str)
 
     def _bench_table(data):
         tbl = Table(data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
@@ -419,46 +419,47 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(rf_cm_wrap)
     story.append(Spacer(1, 0.4*cm))
 
-    # ── 2c: System Resource Overhead ─────────────────────────────────────────
-    story.append(Paragraph("2c.  Controller Resource Overhead",
+    # ── 2c: Response Latency ──────────────────────────────────────────────────
+    story.append(Paragraph("2c.  Response Latency",
+        ParagraphStyle("sub3a", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                       textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
+
+    # Helper: show N/A when ML is OFF or value is zero (no data collected)
+    def _ms(val):
+        if not ML_ENABLED or val == 0:
+            return "N/A"
+        return f"{val:.1f} ms"
+
+    def _cpu(val):
+        if not ML_ENABLED:
+            return "N/A"
+        return f"{val:.2f}%"
+
+    lat_data = [
+        ["Metric", "Value", "Description"],
+        ["Detection Time",           _ms(lat_m.get("detection_ms", 0)),
+         "Interval between attack traffic arrival and the IF anomaly flag"],
+        ["Mitigation Response Time", _ms(lat_m.get("mitigation_ms", 0)),
+         "Interval between the anomaly flag and the FlowMod blocking rule install"],
+    ]
+    story.append(_bench_table(lat_data))
+    story.append(Spacer(1, 0.4*cm))
+
+    # ── 2d: Controller Resource Overhead ───────────────────────────────────────
+    story.append(Paragraph("2d.  Controller Resource Overhead",
         ParagraphStyle("sub3", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
 
     res_data = [
         ["Metric", "Value", "Description"],
-        ["Avg Session Duration",                    f"{avg_dur:.1f}s",
-         "Avg time from detection to release"],
-        # System
-        ["System CPU (Baseline)",                   f"{sys.get('baseline_cpu',0):.2f}%",
-         "Detection system CPU usage under normal traffic"],
-        ["System CPU (Attack Avg)",          f"{sys.get('attack_cpu',0):.2f}%",
-         "Detection system average CPU usage during a DDoS simulation"],
-        ["System CPU (Attack Peak)",         f"{sys.get('attack_cpu_peak',0):.2f}%",
-         "Detection system peak CPU usage during a DDoS simulation"],
-        ["System Memory (Baseline)",                f"{sys.get('baseline_mem',0):.1f} MB",
-         "Detection system memory usage under normal traffic"],
-        ["System Memory (Attack Avg)",       f"{sys.get('attack_mem',0):.1f} MB",
-         "Detection system average memory usage during a DDoS simulation"],
-        ["System Memory (Attack Peak)",      f"{sys.get('attack_mem_peak',0):.1f} MB",
-         "Detection system peak memory usage during a DDoS simulation"],
-        # Controller
-        ["Controller CPU (Baseline)",               f"{sys.get('baseline_ctrl_cpu',0):.2f}%",
+        ["Controller CPU (Baseline)",      f"{sys.get('baseline_ctrl_cpu',0):.2f}%",
          "Ryu controller CPU usage under normal traffic"],
-        ["Controller CPU (Attack Avg)",      f"{sys.get('attack_ctrl_cpu',0):.2f}%",
+        ["Controller CPU (Active Attack)", f"{sys.get('attack_ctrl_cpu',0):.2f}%",
          "Ryu controller average CPU usage during a DDoS simulation"],
-        ["Controller CPU (Attack Peak)",     f"{sys.get('attack_ctrl_cpu_peak',0):.2f}%",
-         "Ryu controller peak CPU usage during a DDoS simulation"],
-        ["Controller Memory (Baseline)",            f"{sys.get('baseline_ctrl_mem',0):.1f} MB",
-         "Ryu controller memory usage under normal traffic"],
-        ["Controller Memory (Attack Avg)",   f"{sys.get('attack_ctrl_mem',0):.1f} MB",
-         "Ryu controller average memory usage during a DDoS simulation"],
-        ["Controller Memory (Attack Peak)",  f"{sys.get('attack_ctrl_mem_peak',0):.1f} MB",
-         "Ryu controller peak memory usage during a DDoS simulation"],
-        # Combined
-        ["Combined Memory (Attack Avg)",
-         f"{sys.get('attack_mem',0) + sys.get('attack_ctrl_mem',0):.1f} MB",
-         "System + Controller average during attack"],
+        ["Controller CPU (Mitigation)",    _cpu(sys.get("mitigation_ctrl_cpu", 0)),
+         "Ryu controller CPU usage during simultaneous detection and mitigation"],
     ]
     story.append(_bench_table(res_data))
     story.append(Spacer(1, 0.6*cm))
