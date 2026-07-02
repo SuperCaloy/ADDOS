@@ -11,35 +11,60 @@ _pps_counter = 0
 _pps_lock    = threading.Lock()
 
 
+# Cached ryu process list — avoids re-discovering on every call.
+# cpu_percent(interval=None) needs the same object to be called twice
+# with time in between, so we must reuse the same psutil.Process instances.
+_ctrl_procs: list = []
+_ctrl_procs_lock = threading.Lock()
+
+
 def _get_ctrl_metrics() -> tuple:
     """Find ryu-manager process + all children, return (cpu%, mem_mb).
-    Includes child processes (eventlet workers, ZMQ threads spawned by Ryu).
+    Reuses cached process objects so cpu_percent(interval=None) is accurate.
     Returns (0,0) if not found."""
-    for proc in psutil.process_iter(['name', 'cmdline']):
+    global _ctrl_procs
+
+    with _ctrl_procs_lock:
+        # Refresh proc list if empty or any proc died
+        if not _ctrl_procs or not any(p.is_running() for p in _ctrl_procs):
+            _ctrl_procs = []
+            for proc in psutil.process_iter(['name', 'cmdline']):
+                try:
+                    if 'ryu-manager' in (proc.info['name'] or '') or \
+                       any('ryu-manager' in c for c in (proc.info['cmdline'] or [])):
+                        _ctrl_procs = [proc] + proc.children(recursive=True)
+                        # Prime cpu_percent on first discovery -- first call returns 0.0
+                        for p in _ctrl_procs:
+                            try:
+                                p.cpu_percent(interval=None)
+                            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                                pass
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+
+        if not _ctrl_procs:
+            return (0.0, 0.0)
+
         try:
-            if 'ryu-manager' in (proc.info['name'] or '') or \
-               any('ryu-manager' in c for c in (proc.info['cmdline'] or [])):
+            # interval=None uses time elapsed since last call -- accurate when
+            # called on the same cached objects every ~1s from the monitor loop.
+            total_cpu = min(sum(
+                p.cpu_percent(interval=None)
+                for p in _ctrl_procs
+                if p.is_running()
+            ), 100.0)
 
-                # --- Collect ryu-manager + all its children ---
-                all_procs = [proc] + proc.children(recursive=True)
+            total_mem = sum(
+                p.memory_info().rss
+                for p in _ctrl_procs
+                if p.is_running()
+            ) / (1024 * 1024)
 
-                total_cpu = min(sum(
-                    p.cpu_percent(interval=0.1)
-                    for p in all_procs
-                    if p.is_running()
-                ), 100.0)
-
-                # --- Sum RSS memory across all processes ---
-                total_mem = sum(
-                    p.memory_info().rss
-                    for p in all_procs
-                    if p.is_running()
-                ) / (1024 * 1024)
-
-                return (total_cpu, total_mem)
+            return (total_cpu, total_mem)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
-            pass
-    return (0.0, 0.0)
+            _ctrl_procs = []
+            return (0.0, 0.0)
 
 
 def record_packet() -> None:
@@ -80,16 +105,27 @@ def start() -> None:
 
                     if ML_ENABLED:
                         from backend.api.stats import get_active_attacks
+                        from backend.mitigation.state_machine import state_machine
+                        _active_gt = get_active_attacks()
                         # Mark as attack if ML detects active threats OR hping3 is running
-                        is_attack = len(get_active_attacks()) > 0 or hping3_running
+                        is_attack = len(_active_gt) > 0 or hping3_running
+                        # Mitigating = state machine currently has IPs under an
+                        # active quarantine/ban response. Distinct from is_attack
+                        # (attack traffic present) — mitigation only starts after
+                        # the state machine actually takes action on an IP.
+                        is_mitigating = len(state_machine.get_active_list()) > 0
                     else:
-                        # ML OFF — rely on hping3 process detection only
+                        # ML OFF — rely on hping3 process detection only.
+                        # No mitigation logic runs when ML is OFF, so always False.
                         is_attack = hping3_running
+                        is_mitigating = False
                 except Exception:
                     is_attack = False
+                    is_mitigating = False
 
                 writer.log_system_metrics(cpu, mem, pps, is_attack=is_attack,
-                                          ctrl_cpu=ctrl_cpu, ctrl_mem=ctrl_mem)
+                                          ctrl_cpu=ctrl_cpu, ctrl_mem=ctrl_mem,
+                                          is_mitigating=is_mitigating)
             except Exception:
                 log.exception("monitor: failed to log metrics")
 

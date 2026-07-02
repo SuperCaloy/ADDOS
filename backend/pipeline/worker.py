@@ -88,7 +88,7 @@ def _process_item(src_ip: str, flow_stats: dict,
             if _result_callback:
                 _result_callback(src_ip, 0.0, False, "Normal", 0.0,
                                  flow_stats=flow_stats, switch_stats=switch_stats,
-                                 timed_out=False)
+                                 timed_out=False, enqueued_at=enqueued_at)
             return
 
     # --- Drop stale queue items ---
@@ -132,7 +132,7 @@ def _process_item(src_ip: str, flow_stats: dict,
                     cached.if_score, cached.is_anomaly,
                     cached.attack_class, cached.confidence,
                     flow_stats=flow_stats, switch_stats=switch_stats,
-                    timed_out=False,
+                    timed_out=False, enqueued_at=enqueued_at,
                 )
             return
 
@@ -225,7 +225,7 @@ def _process_item(src_ip: str, flow_stats: dict,
                 src_ip, if_score, is_anomaly,
                 attack_class, confidence,
                 flow_stats=flow_stats, switch_stats=switch_stats,
-                timed_out=False,
+                timed_out=False, enqueued_at=enqueued_at,
             )
 
     except Exception:
