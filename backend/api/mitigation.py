@@ -1,14 +1,29 @@
+import logging
 from flask import Blueprint, jsonify, request
 from backend.mitigation.state_machine import state_machine
+from backend.mitigation.deception import deception
 from backend.pipeline.decision_engine import record_false_positive, drain_pending_restores
 from backend.pipeline.flow_tracker import tracker
 
+log = logging.getLogger(__name__)
 bp = Blueprint("quarantine", __name__)
 
 
 @bp.get("/api/quarantine_list")
 def quarantine_list():
-    return jsonify(state_machine.get_active_list())
+    rows = state_machine.get_active_list()
+    for e in deception.get_active_list():
+        rows.append({
+            "src_ip":            e["src_ip"],
+            "phase":             e["phase"],
+            "attack_vector":     e["attack_vector"],
+            "if_score":          e["if_score"],
+            "confidence":        e["confidence"],
+            "time_in_phase_sec": e.get("elapsed_sec", 0),
+            "priority":          "Low",
+            "offence_count":     0,
+        })
+    return jsonify(rows)
 
 
 @bp.post("/api/quarantine/release")
@@ -17,15 +32,18 @@ def release():
     if not src_ip:
         return jsonify({"error": "src_ip required"}), 400
 
+    # --- Try state machine first ---
     released = state_machine.manual_release(src_ip)
+
+    # --- If not in state machine, check sinkhole ---
+    if not released and deception.is_sinkholes(src_ip):
+        deception.emergency_clear_one(src_ip)
+        released = True
+
     if not released:
         return jsonify({"error": f"{src_ip} not found in active list"}), 404
 
-    # FP rate fix: manual release = operator ground truth that this was a FP.
-    # Increments in-memory fp counter and buffers fp=1 into traffic_summary
-    # (for PDF report).  Also queues IP for auto baseline restoration.
     record_false_positive(src_ip)
-
     return jsonify({"status": "released", "src_ip": src_ip})
 
 
@@ -41,37 +59,18 @@ def block():
 
 @bp.post("/api/quarantine/clear_all")
 def clear_all():
-    """Flush all non-permanent quarantine entries immediately."""
     cleared = state_machine.clear_all_non_permanent()
     return jsonify({"status": "ok", "cleared": cleared})
 
 
-# ── Feature 2: Auto-restoration polling endpoint ──────────────────────────────
-
 @bp.get("/api/pending_restores")
 def pending_restores():
-    """Returns and clears IPs that need baseline traffic restarted.
-
-    Polled by topology.py restore-poller thread every 5 seconds.
-    When an IP appears here, Mininet restarts its baseline ping at 0.33 pps.
-    """
     ips = drain_pending_restores()
     return jsonify({"ips": ips})
 
 
-# ── Bug fix: inference cache invalidation ─────────────────────────────────────
-
 @bp.post("/api/cache/invalidate")
 def invalidate_cache():
-    """Invalidate the inference cache entry for a specific IP.
-
-    Called by topology.py stop_all_attacks() after the 4s cooldown so the
-    backend re-runs Isolation Forest on fresh normal-traffic features instead
-    of serving the stale attack-time score — which was causing legit baseline
-    traffic to be quarantined after an attack stopped.
-
-    Body: {"src_ip": "10.x.x.x"}
-    """
     src_ip = (request.get_json(silent=True) or {}).get("src_ip", "").strip()
     if not src_ip:
         return jsonify({"error": "src_ip required"}), 400

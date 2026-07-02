@@ -4,39 +4,31 @@ import threading
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
+
 from backend.database import writer
+from backend.mitigation.traffic_filter import (
+    resolve_phase1_actions, resolve_ban_action, resolve_blackhole_action,
+    resolve_release_action, should_sinkhole,
+    get_ban_duration, get_blackhole_ttl, MAX_BAN_LEVEL,
+)
+from backend.mitigation import behavioral
 from backend.config import SIMULATION_MODE
 
 log = logging.getLogger(__name__)
 
-# ── Phase durations ────────────────────────────────────────────────────────────
-# Phase 1 — Quarantine + Rate Limit:
-#   15s for Low severity, 30s for High severity — faster response
-PHASE1_DURATION_LOW  = 1.0   # Lowered from 3s → 1s for SIMULATION_MODE instant demo
-PHASE1_DURATION_HIGH = 2.0   # Lowered from 5s → 2s for SIMULATION_MODE instant demo
+# ── Phase 1 observation durations ─────────────────────────────────────────
+PHASE1_DURATION_LOW  = 10.0
+PHASE1_DURATION_HIGH = 20.0
 
-# Phase 2 — Time Ban: escalating bans
-# BUG 2 FIX: use short durations in SIMULATION_MODE so testers see full
-# attack-detect-ban-release cycles without waiting 30 minutes.
-if SIMULATION_MODE:
-    BAN_LEVELS = [30, 60, 120, 300]   # seconds — short for simulation/demo
-    log.warning("SIMULATION_MODE is ON — using short ban durations for testing: %s", BAN_LEVELS)
-else:
-    BAN_LEVELS = [120, 300, 600, 1800]  # seconds — production (2min→5min→10min→30min)
-MAX_BAN_LEVEL  = len(BAN_LEVELS) - 1
-
-# Phase 3 — Blackhole: full drop, 1hr TTL then auto-release
-BLACKHOLE_TTL_SECONDS = 3600
-
-PROBATION_DURATION = 120.0
-
-MIN_QUARANTINE_CONFIDENCE = 0.60
-CONFIDENCE_LOCK_THRESHOLD = 0.70   # attack_vector locked once confidence >= this
+# Simulation: 30s watch. Production: 5 min watch.
+PROBATION_DURATION = 30.0 if SIMULATION_MODE else 300.0
+MIN_QUARANTINE_CONFIDENCE = 0.70
+CONFIDENCE_LOCK_THRESHOLD = 0.80
 
 PHASE_LABELS = {
-    1: "Phase 1 — Quarantined",
-    2: "Phase 2 — Time Ban",
-    3: "Phase 3 — Blackhole",
+    1: "Quarantined",
+    2: "Time Ban",
+    3: "Blackhole",
     4: "Probation",
 }
 
@@ -53,14 +45,13 @@ class IpState:
     action_taken:   str   = "Quarantined"
     permanent:      bool  = False
     ttl_expires_at: Optional[float] = None
-    first_seen:     str   = field(default_factory=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    # Escalation level for Phase 2 time bans (0-3)
+    first_seen:     str   = field(
+        default_factory=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    )
     ban_level:      int   = 0
-    # Track how many times IP has been through phase 1 (for escalation)
     offence_count:  int   = 0
-    # F4 fix: most recent packets-per-second observed for this IP.
-    # Updated on every result callback so _evaluate_phase1 can check
-    # whether traffic is still active before escalating to time ban.
+    # Updated by decision_engine on each flow result
+    # _evaluate_phase1 checks this to avoid escalating a stopped attacker
     recent_pps:     float = 0.0
 
     def phase_label(self) -> str:
@@ -70,7 +61,7 @@ class IpState:
         return time.monotonic() - self.phase_entered
 
     def phase1_duration(self) -> float:
-        """10s Low, 15s High, 30s Uncertain."""
+        # 30s for Uncertain vector, PHASE1_DURATION_HIGH/LOW for known vectors
         if self.attack_vector == "Uncertain":
             return 30.0
         return PHASE1_DURATION_HIGH if self.priority == "High" else PHASE1_DURATION_LOW
@@ -97,44 +88,51 @@ class StateMachine:
         self._lock      = threading.Lock()
         self._states: dict[str, IpState] = {}
         self._commander = None
+        # Injected by main.py after deception module starts
+        self._deception = None
+        # Sentinel used to pass sinkhole data out of the lock block
+        self._pending_sinkhole = None
 
     def set_commander(self, commander) -> None:
         self._commander = commander
 
-    # ------------------------------------------------------------------
-    # Startup restore
-    # ------------------------------------------------------------------
+    def set_deception(self, deception_module) -> None:
+        self._deception = deception_module
+
+    # ── Startup restore ───────────────────────────────────────────────
 
     def restore_from_db(self) -> None:
         rows = writer.load_quarantine_states()
         if not rows:
             return
 
-        log.info("Restoring quarantine entries from DB (%d total)...", len(rows))
+        log.info("Restoring %d quarantine entries from DB...", len(rows))
         restored = purged = expired = 0
         now_wall = datetime.datetime.now()
 
         with self._lock:
             for r in rows:
-                src_ip           = r["src_ip"]
-                permanent        = bool(r.get("permanent", False))
-                block_expires_at = r.get("block_expires_at")
+                src_ip       = r["src_ip"]
+                permanent    = bool(r.get("permanent", False))
+                expires_at   = r.get("block_expires_at")
 
                 if not permanent:
+                    # Non-permanent entries are stale after restart — purge
                     self._push_command(src_ip, "clear")
                     writer.delete_quarantine_state(src_ip)
-                    log.info("Purged stale entry on restore: %s", src_ip)
+                    log.info("Purged stale entry: %s", src_ip)
                     purged += 1
                     continue
 
-                if block_expires_at is not None:
+                if expires_at is not None:
                     try:
-                        exp_dt      = datetime.datetime.strptime(block_expires_at, "%Y-%m-%d %H:%M:%S")
+                        exp_dt      = datetime.datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
                         remaining_s = (exp_dt - now_wall).total_seconds()
                     except ValueError:
                         remaining_s = 0
 
                     if remaining_s <= 0:
+                        # TTL expired while backend was down — release
                         self._push_command(src_ip, "clear")
                         writer.delete_quarantine_state(src_ip)
                         log.info("TTL expired during downtime, released: %s", src_ip)
@@ -159,17 +157,21 @@ class StateMachine:
                 )
                 self._states[src_ip] = state
                 _action_map = {1: "rate_limit", 2: "rate_limit", 3: "block"}
-                self._push_command(src_ip, _action_map.get(r["phase"], "rate_limit"), ttl=ttl_for_cmd)
+                self._push_command(src_ip, _action_map.get(r["phase"], "rate_limit"),
+                                   ttl=ttl_for_cmd)
                 restored += 1
 
-        log.info("Quarantine restore — %d restored, %d purged, %d TTL-expired", restored, purged, expired)
+        log.info("Restore complete — %d restored  %d purged  %d TTL-expired",
+                 restored, purged, expired)
 
-    # ------------------------------------------------------------------
-    # Detection entry point
-    # ------------------------------------------------------------------
+    # ── Detection entry point ─────────────────────────────────────────
 
     def on_detection(self, src_ip: str, if_score: float,
                      attack_class: str, confidence: float) -> str:
+        # Local variables for post-lock re-offence routing
+        _prior_offense = 0
+        _prior_ban     = 0
+
         with self._lock:
             state = self._states.get(src_ip)
 
@@ -178,123 +180,165 @@ class StateMachine:
                 return state.action_taken
 
             if state is None:
-                # Never skip — IF score > threshold means anomaly confirmed.
-                # Uncertain just means RF couldn't classify the attack type.
-                # Quarantine and observe for 1 minute regardless.
-                from backend.pipeline.decision_engine import _assign_priority as _ap
-                _prio = _ap(if_score, confidence)
+                # Check behavioral DB history for priority and prior offenses
+                _prio          = behavioral.assign_priority(if_score, confidence, src_ip)
+                _prior_offense = behavioral.get_offences(src_ip)
+                _prior_ban     = behavioral.get_ban_level(src_ip)
 
-                # Phase 1: Quarantine + Rate Limit simultaneously
-                # Rate limit immediately so attacker can't flood during observation
-                state = IpState(
-                    src_ip        = src_ip,
-                    phase         = 1,
-                    attack_vector = attack_class,
-                    if_score      = if_score,
-                    confidence    = confidence,
-                    action_taken  = "Quarantined",
-                    priority      = _prio,
-                    offence_count = 1,
-                )
-                self._states[src_ip] = state
-                # Apply BOTH quarantine (priority 90) AND rate_limit (priority 80)
-                # simultaneously on Phase 1 entry.
-                # SLIP-THROUGH FIX: previously only rate_limit (priority 80) was sent.
-                # Priority 80 is the weakest drop rule — most attacker packets still
-                # slipped through. Quarantine (priority 90) is stronger and drops
-                # more aggressively. Sending both ensures maximum coverage across
-                # all switches from the moment of first detection.
-                self._push_command(src_ip, "quarantine")
-                self._push_command(src_ip, "rate_limit")
-                log.info("Phase 1 Quarantine+RateLimit: %s  (conf=%.1f%%  vector=%s  priority=%s  duration=%.0fs)",
-                         src_ip, confidence * 100, attack_class, _prio, state.phase1_duration())
-                self._persist(state)
+                if _prior_ban > 0:
+                    # Known offender — handle via on_reoffence() outside the lock
+                    pass
+
+                elif should_sinkhole(attack_class, confidence, phase=0):
+                    log.info("Sinkhole: %s  vector=%s  conf=%.1f%%",
+                             src_ip, attack_class, confidence * 100)
+                    self._pending_sinkhole = (src_ip, attack_class, if_score, confidence)
+                    # fall through to post-lock dispatch
+
+                else:
+                    if _prio == "High":
+                        # High priority — skip observation, immediate Time Ban
+                        ban_lvl  = min(1, MAX_BAN_LEVEL)
+                        ban_secs = get_ban_duration(ban_lvl)
+                        state = IpState(
+                            src_ip        = src_ip,
+                            phase         = 2,
+                            attack_vector = attack_class,
+                            if_score      = if_score,
+                            confidence    = confidence,
+                            action_taken  = "Time Ban",
+                            priority      = _prio,
+                            offence_count = 1,
+                            ban_level     = ban_lvl,
+                            permanent     = True,
+                            ttl_expires_at= time.monotonic() + ban_secs,
+                        )
+                        self._states[src_ip] = state
+                        _ban_action, _ban_ttl = resolve_ban_action(ban_secs)
+                        self._push_command(src_ip, _ban_action, ttl=_ban_ttl)
+                        log.info("High Priority → Immediate Time Ban: %s  conf=%.1f%%  "
+                                 "vector=%s  duration=%ds",
+                                 src_ip, confidence * 100, attack_class, ban_secs)
+                        self._persist(state)
+                    else:
+                        # Low priority — Phase 1 observation (quarantine)
+                        state = IpState(
+                            src_ip        = src_ip,
+                            phase         = 1,
+                            attack_vector = attack_class,
+                            if_score      = if_score,
+                            confidence    = confidence,
+                            action_taken  = "Quarantined",
+                            priority      = _prio,
+                            offence_count = 0,
+                        )
+                        self._states[src_ip] = state
+                        for _action in resolve_phase1_actions(_prio):
+                            self._push_command(src_ip, _action)
+                        log.info("Phase 1 Quarantine: %s  conf=%.1f%%  "
+                                 "vector=%s  duration=%.0fs",
+                                 src_ip, confidence * 100, attack_class,
+                                 state.phase1_duration())
+                        self._persist(state)
+
             else:
-                # Already tracked — update scores.
-                # Lock attack_vector if:
-                #   - IP is already in Phase 2/3 (Time Ban / Blackhole) — never
-                #     let a new RF result flip the vector on a mid-ban IP.
-                #   - OR previously classified with high confidence (>=70%, real class).
-                # Prevents mixed-campaign switch stats from overwriting a confirmed type.
-                _vector_locked = (
-                    state.phase >= 2
-                    or (
-                        state.attack_vector != "Uncertain"
-                        and state.confidence >= CONFIDENCE_LOCK_THRESHOLD
-                    )
-                )
-                state.if_score   = if_score
-                state.confidence = confidence
-                if not _vector_locked:
+                # Phase 4 probation — re-attack detected.
+                # Skip Phase 1, go straight to next ban level.
+                if state.phase == 4:
+                    log.info("Probation re-attack: %s — escalating ban", src_ip)
+                    state.if_score      = if_score
                     state.attack_vector = attack_class
-                self._persist(state)
+                    state.confidence    = confidence
+                    state.permanent     = True
+                    self._advance_to_ban(state)
 
-            return state.action_taken
+                else:
+                    # Update vector only if new confidence beats prior — best evidence wins
+                    _better_evidence = confidence > state.confidence
+                    state.if_score   = if_score
+                    if _better_evidence:
+                        state.attack_vector = attack_class
+                        state.confidence     = confidence
+                    else:
+                        state.confidence = confidence
+                    self._persist(state)
 
-    # ------------------------------------------------------------------
-    # Tick — automatic phase progression
-    # ------------------------------------------------------------------
+            if state is not None:
+                return state.action_taken
+
+        # ── Post-lock: sinkhole dispatch ──────────────────────────────
+        pending = getattr(self, "_pending_sinkhole", None)
+        if pending:
+            self._pending_sinkhole = None
+            _ip, _vec, _ifs, _conf = pending
+            if self._deception:
+                self._deception.enter_sinkhole(_ip, _vec, _ifs, _conf)
+            return "Sinkhole"
+
+        # ── Post-lock: re-offence routing ─────────────────────────────
+        if _prior_ban > 0:
+            self.on_reoffence(
+                src_ip             = src_ip,
+                if_score           = if_score,
+                attack_class       = attack_class,
+                confidence         = confidence,
+                prev_ban_level     = _prior_ban,
+                prev_offence_count = _prior_offense,
+            )
+            with self._lock:
+                s = self._states.get(src_ip)
+                return s.action_taken if s else "Re-offence"
+
+        return "Unknown"
+
+    # ── Tick — automatic phase progression ───────────────────────────
 
     def tick(self) -> None:
         now = time.monotonic()
         with self._lock:
             for src_ip, state in list(self._states.items()):
-                # Permanent manual blackhole never auto-expires
+                # Permanent manual blackhole — never auto-expires
                 if state.permanent and state.ttl_expires_at is None:
                     continue
 
                 elapsed = now - state.phase_entered
 
                 if state.phase == 1 and elapsed >= state.phase1_duration():
-                    # Phase 1 complete — check if attack persisted
-                    # If IF score is still elevated → escalate to time ban
-                    # If score dropped → release (attacker gave up)
                     self._evaluate_phase1(src_ip, state)
 
                 elif state.phase == 2:
-                    # Time ban — wait for TTL
                     if state.ttl_expires_at and now >= state.ttl_expires_at:
-                        log.info("Time ban expired for %s (level %d) — releasing to probation",
+                        # Ban expired — move to probation, unblock traffic.
+                        # IP is still watched; re-attack skips Phase 1.
+                        log.info("Time ban expired: %s (level %d) → probation",
                                  src_ip, state.ban_level)
-                        self._clear(src_ip, reason="Ban Expired")
+                        self._advance_to_probation(src_ip, state)
 
                 elif state.phase == 3:
-                    # Blackhole TTL
                     if state.ttl_expires_at and now >= state.ttl_expires_at:
-                        log.info("Blackhole TTL expired for %s — auto-releasing", src_ip)
+                        log.info("Blackhole TTL expired: %s → releasing", src_ip)
                         self._clear(src_ip, reason="Blackhole TTL Expired")
 
                 elif state.phase == 4 and elapsed >= PROBATION_DURATION:
                     self._clear(src_ip, reason="Probation Complete")
 
+        # Also tick the deception module observation windows
+        if self._deception:
+            self._deception.tick()
+
     def _evaluate_phase1(self, src_ip: str, state: IpState) -> None:
-        """After phase1 observation window: escalate to time ban or release.
-
-        F4 fix: previously only checked IF score, which stays elevated in cache
-        even after an attacker stops — the score is frozen at the last inference.
-        Now also checks recent_pps (injected by worker on each result callback)
-        so an IP that genuinely stopped attacking gets released instead of
-        being escalated to a time ban based on a stale cached score.
-
-        Decision logic:
-          - IF score still >= threshold AND recent pps still elevated → escalate
-          - IF score dropped OR recent pps near-zero → release (attack stopped)
-        """
+        # After Phase 1 window: escalate to time ban or release.
+        # Checks both IF score AND recent_pps to avoid escalating a stopped attacker.
+        # recent_pps is None if no recent flow data → treat as stopped (release)
         from backend.models import loader
         thr = loader.if_threshold if loader._loaded else 0.6004
 
-        # recent_pps is set by on_detection/on_result — zero if no recent flow data
-        recent_pps = getattr(state, "recent_pps", None)
-
+        recent_pps     = getattr(state, "recent_pps", None)
         score_elevated = state.if_score >= thr
-        # BUG FIX: was (recent_pps is None) or (recent_pps > 1.0) — this treated
-        # a missing pps reading as "still elevated", escalating IPs that had already
-        # stopped attacking to a time ban. None means no recent flow data = traffic
-        # stopped, so default to NOT elevated (False), causing a clean release.
         pps_elevated   = (recent_pps is not None) and (recent_pps > 1.0)
 
         if score_elevated and pps_elevated:
-            # Both signals agree: attack persisted — escalate
+            # Both signals elevated — attack persisted → escalate
             self._advance_to_ban(state)
         else:
             reason = (
@@ -306,20 +350,19 @@ class StateMachine:
             self._clear(src_ip, reason="Attack Stopped")
 
     def _advance_to_ban(self, state: IpState) -> None:
-        """Escalate to Phase 2 time ban with escalating duration."""
-        # Clear SSE dedup for this IP so the phase-change event is never
-        # silently dropped by the 30s dedup window in decision_engine.
+        # Escalate to Phase 2 time ban.
+        # Clear SSE dedup so phase-change event is never silently dropped.
         try:
             from backend.pipeline.decision_engine import _sse_dedup, _sse_lock
             with _sse_lock:
                 _sse_dedup.pop(state.src_ip, None)
         except Exception:
             pass
-        # Bug fix: increment ban_level BEFORE lookup so each ban is longer
-        # than the last. Previously ban_level was never incremented here,
-        # so every ban always used the same level → always same duration.
-        state.ban_level = min(state.ban_level + 1, MAX_BAN_LEVEL)
-        ban_secs = BAN_LEVELS[state.ban_level]
+
+        # Increment ban_level BEFORE lookup — each ban longer than the last
+        state.ban_level      = min(state.ban_level + 1, MAX_BAN_LEVEL)
+        ban_secs             = get_ban_duration(state.ban_level)
+        state.offence_count  = min(state.offence_count + 1, 5)  # offence on escalation
         state.phase          = 2
         state.phase_entered  = time.monotonic()
         state.action_taken   = "Time Ban"
@@ -329,15 +372,13 @@ class StateMachine:
         exp_dt  = datetime.datetime.now() + datetime.timedelta(seconds=ban_secs)
         exp_str = exp_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        # Full block during time ban
-        self._push_command(state.src_ip, "block", ttl=ban_secs)
+        _ban_action, _ban_ttl = resolve_ban_action(ban_secs)
+        self._push_command(state.src_ip, _ban_action, ttl=_ban_ttl)
         log.info("Phase 2 Time Ban: %s  level=%d  duration=%ds  expires=%s",
                  state.src_ip, state.ban_level, ban_secs, exp_str)
         self._persist(state, block_expires_at=exp_str)
 
-        # Audit log — phase transition entry (always written, never deduped)
-        ban_mins = ban_secs // 60
-        ban_label = f"{ban_mins}m" if ban_mins >= 1 else f"{ban_secs}s"
+        ban_label = f"{ban_secs // 60}m" if ban_secs >= 60 else f"{ban_secs}s"
         writer.log_mitigation_event({
             "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "src_ip":          state.src_ip,
@@ -347,34 +388,68 @@ class StateMachine:
             "priority":        state.priority,
             "action_taken":    f"Time Ban ({ban_label})",
             "if_score":        state.if_score,
-            "phase":           "Phase 2 — Time Ban",
+            "phase":           "Time Ban",
+            "is_manual":       False,
+        })
+
+    def _advance_to_probation(self, src_ip: str, state: IpState) -> None:
+        # Move IP from Phase 2 to Phase 4 Probation.
+        # Install rate_limit so ML can observe traffic without flood risk.
+        # If ML flags re-attack during probation, jumps straight to Phase 2.
+        state.phase         = 4
+        state.phase_entered = time.monotonic()
+        state.action_taken  = "Probation"
+        state.permanent     = False
+        state.ttl_expires_at = None
+
+        # Remove block rule first, then rate_limit for throttled observation.
+        # rate_limit allows traffic so zmq_receiver can score it via ML.
+        self._push_command(src_ip, resolve_release_action())
+        self._push_command(src_ip, "rate_limit")
+        writer.delete_quarantine_state(src_ip)
+
+        log.info("Phase 4 Probation: %s  ban_level=%d  watch=%.0fs",
+                 src_ip, state.ban_level, PROBATION_DURATION)
+
+        writer.log_mitigation_event({
+            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "src_ip":          src_ip,
+            "predicted_class": "DDoS",
+            "attack_vector":   state.attack_vector,
+            "confidence":      state.confidence,
+            "priority":        state.priority,
+            "action_taken":    "Probation",
+            "if_score":        state.if_score,
+            "phase":           "Probation",
             "is_manual":       False,
         })
 
     def _advance_to_blackhole(self, state: IpState) -> None:
-        """Escalate to Phase 3 Blackhole — max severity, 1hr TTL."""
-        # Clear SSE dedup so the blackhole event always reaches the audit log.
+        # Escalate to Phase 3 Blackhole — max severity, 1hr TTL.
+        # Clear SSE dedup so blackhole event always reaches the audit log.
         try:
             from backend.pipeline.decision_engine import _sse_dedup, _sse_lock
             with _sse_lock:
                 _sse_dedup.pop(state.src_ip, None)
         except Exception:
             pass
+
+        state.offence_count  = min(state.offence_count + 1, 5)  # offence on blackhole
         state.phase          = 3
         state.phase_entered  = time.monotonic()
         state.action_taken   = "Blackhole"
         state.permanent      = True
-        state.ttl_expires_at = time.monotonic() + BLACKHOLE_TTL_SECONDS
+        state.ttl_expires_at = time.monotonic() + get_blackhole_ttl()
 
-        exp_dt  = datetime.datetime.now() + datetime.timedelta(seconds=BLACKHOLE_TTL_SECONDS)
+        exp_dt  = datetime.datetime.now() + datetime.timedelta(seconds=get_blackhole_ttl())
         exp_str = exp_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-        self._push_command(state.src_ip, "block", ttl=BLACKHOLE_TTL_SECONDS)
+        _bh_action, _bh_ttl = resolve_blackhole_action(get_blackhole_ttl())
+        self._push_command(state.src_ip, _bh_action, ttl=_bh_ttl)
         log.info("Phase 3 Blackhole: %s  TTL=%ds  expires=%s",
                  state.src_ip, BLACKHOLE_TTL_SECONDS, exp_str)
         self._persist(state, block_expires_at=exp_str)
 
-        # Audit log — blackhole transition entry
         writer.log_mitigation_event({
             "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "src_ip":          state.src_ip,
@@ -384,16 +459,17 @@ class StateMachine:
             "priority":        state.priority,
             "action_taken":    "Blackhole",
             "if_score":        state.if_score,
-            "phase":           "Phase 3 — Blackhole",
+            "phase":           "Blackhole",
             "is_manual":       False,
         })
 
     def _clear(self, src_ip: str, reason: str = "Released") -> None:
         state = self._states.pop(src_ip, None)
-        self._push_command(src_ip, "clear")
+        self._push_command(src_ip, resolve_release_action())
         writer.delete_quarantine_state(src_ip)
         if state is not None:
-            writer.log_attack_history(
+            # behavioral.record_offense writes to DB so reputation survives restarts
+            behavioral.record_offense(
                 src_ip         = src_ip,
                 attack_vector  = state.attack_vector,
                 if_score       = state.if_score,
@@ -402,27 +478,25 @@ class StateMachine:
                 phase_reached  = state.phase,
                 first_seen     = state.first_seen,
                 unblock_reason = reason,
+                ban_level      = state.ban_level,
+                offence_count  = state.offence_count,
             )
         log.info("Cleared: %s  reason=%s", src_ip, reason)
 
-    # ------------------------------------------------------------------
-    # Re-offence: IP re-detected after ban expired
-    # ------------------------------------------------------------------
+    # ── Re-offence ────────────────────────────────────────────────────
 
     def on_reoffence(self, src_ip: str, if_score: float,
                      attack_class: str, confidence: float,
                      prev_ban_level: int, prev_offence_count: int) -> None:
-        """Called when a previously banned IP is detected again.
-
-        Escalates ban level. If already at max ban level → blackhole.
-        """
+        # Previously banned IP detected again.
+        # Checks weighted offense score first — if >= threshold → blackhole directly.
+        # Otherwise escalates ban level by +1.
         with self._lock:
-            from backend.pipeline.decision_engine import _assign_priority as _ap
-            _prio       = _ap(if_score, confidence)
-            new_ban_lvl = prev_ban_level + 1
+            _prio       = behavioral.assign_priority(if_score, confidence, src_ip)
+            new_ban_lvl = min(prev_ban_level + 1, MAX_BAN_LEVEL)
 
-            if new_ban_lvl > MAX_BAN_LEVEL:
-                # Already at max ban → blackhole
+            # Weighted score >= 5.0 → skip ban, go straight to blackhole
+            if behavioral.should_blackhole(src_ip, new_ban_lvl):
                 state = IpState(
                     src_ip        = src_ip,
                     phase         = 3,
@@ -436,9 +510,27 @@ class StateMachine:
                 )
                 self._states[src_ip] = state
                 self._advance_to_blackhole(state)
-                log.info("Re-offence → Blackhole: %s  offences=%d", src_ip, state.offence_count)            
+                log.info("Re-offence → Blackhole (score threshold): %s  offences=%d",
+                         src_ip, state.offence_count)
+            elif new_ban_lvl > MAX_BAN_LEVEL:
+                # Max ban level exceeded → blackhole
+                state = IpState(
+                    src_ip        = src_ip,
+                    phase         = 3,
+                    attack_vector = attack_class,
+                    if_score      = if_score,
+                    confidence    = confidence,
+                    priority      = _prio,
+                    action_taken  = "Blackhole",
+                    ban_level     = new_ban_lvl,
+                    offence_count = prev_offence_count + 1,
+                )
+                self._states[src_ip] = state
+                self._advance_to_blackhole(state)
+                log.info("Re-offence → Blackhole (max ban level): %s  offences=%d",
+                         src_ip, state.offence_count)
             else:
-                # Escalate to next ban level via phase 1 observation first
+                # Escalate to next ban level via Phase 1 observation first
                 state = IpState(
                     src_ip        = src_ip,
                     phase         = 1,
@@ -452,10 +544,9 @@ class StateMachine:
                 )
                 self._states[src_ip] = state
                 self._push_command(src_ip, "rate_limit")
-                log.info("Re-offence → Phase1 (ban_level=%d next): %s  offences=%d",
+                log.info("Re-offence → Phase 1 (ban_level=%d next): %s  offences=%d",
                          new_ban_lvl, src_ip, state.offence_count)
                 self._persist(state)
-                # Audit log — re-offence re-entry into Phase 1
                 writer.log_mitigation_event({
                     "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "src_ip":          src_ip,
@@ -469,9 +560,7 @@ class StateMachine:
                     "is_manual":       False,
                 })
 
-    # ------------------------------------------------------------------
-    # Manual operator actions
-    # ------------------------------------------------------------------
+    # ── Manual operator actions ───────────────────────────────────────
 
     def manual_release(self, src_ip: str) -> bool:
         with self._lock:
@@ -519,7 +608,7 @@ class StateMachine:
         return cleared
 
     def manual_block(self, src_ip: str) -> bool:
-        """Permanent manual blackhole — no TTL."""
+        # Permanent manual blackhole — no TTL
         with self._lock:
             state = self._states.get(src_ip)
             if state is None:
@@ -551,9 +640,7 @@ class StateMachine:
         log.info("Manual blackhole (permanent): %s", src_ip)
         return True
 
-    # ------------------------------------------------------------------
-    # API helpers
-    # ------------------------------------------------------------------
+    # ── API helpers ───────────────────────────────────────────────────
 
     def get_active_list(self) -> list[dict]:
         with self._lock:
@@ -565,12 +652,9 @@ class StateMachine:
         with self._lock:
             return src_ip in self._states
 
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
+    # ── Internal ─────────────────────────────────────────────────────
 
-    def _persist(self, state: IpState,
-                 block_expires_at: Optional[str] = None) -> None:
+    def _persist(self, state: IpState, block_expires_at: Optional[str] = None) -> None:
         writer.save_quarantine_state(
             src_ip           = state.src_ip,
             phase            = state.phase,

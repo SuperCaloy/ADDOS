@@ -6,13 +6,14 @@ _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 IF_DIR  = os.path.join(_ROOT, "models", "isolation_forest")
 RF_DIR  = os.path.join(_ROOT, "models", "random_forest")
 
-IF_MODEL_PATH    = os.path.join(IF_DIR, "isolation_forest.pkl")
-IF_SCALER_PATH   = os.path.join(IF_DIR, "scaler.pkl")
-IF_CONTRACT_PATH = os.path.join(IF_DIR, "feature_contract.json")
+IF_MODEL_PATH     = os.path.join(IF_DIR, "isolation_forest.pkl")
+IF_SCALER_PATH    = os.path.join(IF_DIR, "scaler.pkl")
+IF_QUANTILER_PATH = os.path.join(IF_DIR, "quantiler.pkl")
+IF_CONTRACT_PATH  = os.path.join(IF_DIR, "feature_contract.json")
 
-RF_MODEL_PATH    = os.path.join(RF_DIR, "random_forest_sdn_final.pkl")
+RF_MODEL_PATH    = os.path.join(RF_DIR, "random_forest_final.pkl")
 RF_SCALER_PATH   = os.path.join(RF_DIR, "scaler.pkl")
-RF_CONTRACT_PATH = os.path.join(RF_DIR, "rf_sdn_feature_contract.json")
+RF_CONTRACT_PATH = os.path.join(RF_DIR, "rf_feature_contract.json")
 RF_ENCODER_PATH  = os.path.join(RF_DIR, "label_encoder.pkl")
 
 # --- Database ---
@@ -24,30 +25,35 @@ ZMQ_COMMAND_ADDR   = "tcp://127.0.0.1:5556"   # Backend PUSH → Ryu PULL
 
 # --- Pipeline tuning ---
 FLOW_TRACKER_CAP        = 500
-INFERENCE_CACHE_TTL_S   = 1.0  # Lowered from 3s → 1s for SIMULATION_MODE —
-                               # faster re-evaluation so normal traffic is scored
-                               # correctly within 1s of attack stopping.
+INFERENCE_CACHE_TTL_S   = 1.0
 WORKER_QUEUE_MAXSIZE    = 1000
 WORKER_ITEM_TIMEOUT_S   = 3.0
-EXTRACTION_TRIGGER_PKTS = 1    # BUG 3 FIX: lowered from 2 — single-packet flows reach inference
-EXTRACTION_TRIGGER_S    = 0.05 # BUG 3 FIX: lowered from 0.1 — faster early-attack detection
+EXTRACTION_TRIGGER_PKTS = 1
+EXTRACTION_TRIGGER_S    = 0.05
 
 # --- Simulation mode ---
-# BUG 2 FIX: set True for demo/testing so ban durations are short and
-# SSE dedup is fast. Set False for production.
-SIMULATION_MODE = True
+SIMULATION_MODE = False
 
-# --- SYN pre-filter ---
-SYN_HALFOPEN_LIMIT  = 100
-SYN_WINDOW_S        = 2.0
+# --- ML Engine toggle ---
+ML_ENABLED = False
+
+# --- Flood pre-filter
+FLOOD_SYN_LIMIT     = 100
+FLOOD_SYN_WINDOW_S  = 1.0
+
+FLOOD_ICMP_LIMIT    = 50
+FLOOD_ICMP_WINDOW_S = 1.0
+
+FLOOD_UDP_LIMIT     = 50
+FLOOD_UDP_WINDOW_S  = 1.0
+
+# --- Temporal Entropy Analysis (TEA) ---
+# Rolling window size per switch — adaptive thresholds learned from traffic
+TEA_WINDOW_SIZE = 10
 
 # --- API ---
 FLASK_HOST = "0.0.0.0"
 FLASK_PORT = 5000
-IF_SCORE_THRESHOLD_OVERRIDE = None # Intentional: safe-zone threshold above Mininet baseline ping scores (0.65-0.70)
-
-# Minimum packet count — zero-packet flows are always dropped.
-MIN_FLOW_PKTS_FOR_INFERENCE = 0
 
 # --- UI batching ---
 UI_BATCH_INTERVAL_S = 0.5
