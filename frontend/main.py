@@ -1,8 +1,3 @@
-"""
-frontend/main.py — Entry point
-Run: python3 -m frontend.main
-  OR: python3 frontend/main.py
-"""
 import threading
 import time
 import webbrowser

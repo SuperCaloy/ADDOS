@@ -1,4 +1,3 @@
-// Plain-language explanations — no jargon, for non-technical users
 const _FEAT_TOOLTIPS = {
   "Flow Rate (pps)": "Packets transmitted per second for this flow. Flood attacks are characterized by abnormally high packet rates compared to legitimate traffic baselines.",
   "Byte Rate":       "Volume of data transmitted per second. A sharp increase indicates potential bandwidth exhaustion, a primary goal of volumetric DDoS attacks.",
@@ -9,7 +8,6 @@ const _FEAT_TOOLTIPS = {
   "Byte Count":      "Cumulative data volume observed in this flow, in bytes.",
 };
 
-// ── Attack summaries — plain language, per attack type ─────
 const _ATTACK_CONTEXT = {
   "ICMP Flood": {
     color: 'var(--red,#ff3d5a)',

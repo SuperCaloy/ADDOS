@@ -3,7 +3,7 @@ import json
 import time
 import threading
 import logging
-from backend.config import ZMQ_TELEMETRY_ADDR
+from backend.config import ZMQ_TELEMETRY_ADDR, ML_ENABLED
 
 # Whitelisted IPs — never flood-filtered or submitted to ML pipeline.
 # h20 = victim server, h21 = sinkhole dummy.
@@ -99,6 +99,10 @@ def _parse_and_route(raw: bytes) -> None:
         if src_ip in _WHITELIST_IPS:
             return
 
+        # --- ML OFF — skip all flood prefilter processing ---
+        if not ML_ENABLED:
+            return
+
         # Map Ryu proto strings to our prefilter keys
         # SYN is a special case — only pure SYN packets (no ACK) count
         if proto == "TCP":
@@ -175,6 +179,18 @@ def _parse_and_route(raw: bytes) -> None:
         with _raw_lock:
             _raw_total_pkts += delta_pkts
 
+        # --- ML OFF — skip TEA and ML inference, count packet directly ---
+        # Calls on_result() directly so dashboard counters still update.
+        if not ML_ENABLED:
+            try:
+                from backend.pipeline.decision_engine import on_result
+                on_result(src_ip, 0.0, False, "Normal", 0.0,
+                          flow_stats=flow_stats, switch_stats=switch_stats,
+                          timed_out=False)
+            except Exception:
+                pass
+            return
+
         # --- Gate check: should this flow go to the ML worker? ---
         # Dynamic gate — no hardcoded MIN_PPS.
         # Only skip truly dead flows (zero packets).
@@ -185,11 +201,13 @@ def _parse_and_route(raw: bytes) -> None:
         if pkt_count_cumulative < 1:
             return
 
-        # Skip if this IP is already in Phase 2 or 3 — block rule is active
+        # Skip if this IP is in Phase 2 or 3 — block rule is active, no need to score.
+        # Phase 4 (probation) is ALLOWED through — we want ML to observe it.
+        # If IF still flags it during probation, state_machine escalates to Phase 2.
         try:
             from backend.mitigation.state_machine import state_machine as _sm
             _ip_state = _sm._states.get(src_ip)
-            if _ip_state is not None and _ip_state.phase >= 2:
+            if _ip_state is not None and _ip_state.phase in (2, 3):
                 return
         except Exception:
             pass
