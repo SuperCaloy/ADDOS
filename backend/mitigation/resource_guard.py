@@ -1,66 +1,78 @@
 import time
 import threading
 import logging
+from backend.config import ML_ENABLED
 
 log = logging.getLogger(__name__)
 
-# ── Thresholds (%) ─────────────────────────────────────────────────────────
-CPU_WARN  = 70.0
-CPU_HIGH  = 85.0
-CPU_CRIT  = 95.0
+# Thresholds (%)
+CPU_WARN  = 85.0   # log warning only
+CPU_HIGH  = 95.0   # throttle packet-in evaluation rate
+CPU_CRIT  = 99.0   # install OVS rate-limit rule to shed excess packet-in
 
-MEM_WARN  = 75.0
-MEM_HIGH  = 85.0
-MEM_CRIT  = 95.0
+MEM_WARN  = 70.0   # log warning only
+MEM_HIGH  = 85.0   # log + monitor closely
+MEM_CRIT  = 95.0   # log critical — memory ceiling reached
 
 # Poll interval in seconds
-GUARD_POLL_INTERVAL = 5.0
+GUARD_POLL_INTERVAL = 2.0
 
-# Consecutive HIGH readings before triggering action (avoids reacting to spikes)
-HIGH_CONSECUTIVE_THRESHOLD = 3
+# Consecutive HIGH readings before throttling (avoids reacting to brief spikes)
+HIGH_CONSECUTIVE_THRESHOLD = 2
 
 
 class ResourceGuard:
-    # Monitors host CPU and memory.
-    # Levels:
-    #   WARN  (CPU>=70 or MEM>=75): log only
-    #   HIGH  (CPU>=85 or MEM>=85): clear non-permanent entries after 3 consecutive reads
-    #   CRIT  (CPU>=95 or MEM>=95): emergency clear all entries + sinkhole, pause detections
-
     def __init__(self):
-        self._running          = False
-        self._thread           = None
-        self._state_machine    = None
-        self._deception        = None
-        self._consecutive_high = 0
-        self._paused           = False
+        self._running           = False
+        self._thread            = None
+        self._consecutive_high  = 0
+        self._crit_rules_active = False
+        self._throttle_delay    = 0.0
+        self._attack_proto      = None  # nw_proto of current attack (1=ICMP, 6=TCP, 17=UDP)
 
-    def set_state_machine(self, sm) -> None:
-        self._state_machine = sm
-
-    def set_deception(self, dec) -> None:
-        self._deception = dec
+    @property
+    def throttle_delay(self) -> float:
+        # Read by decision_engine between flow evaluations when HIGH.
+        return self._throttle_delay
 
     @property
     def is_paused(self) -> bool:
-        # True during CRIT — decision_engine checks this before new detections
-        return self._paused
+        # Always False — ML is never paused under this design.
+        return False
+
+    def set_attack_proto(self, attack_class: str) -> None:
+        # Map ML attack class to IP protocol number.
+        # Called by decision_engine on every confirmed anomaly.
+        _proto_map = {
+            "ICMP Flood": 1,
+            "SYN Flood":  6,
+            "UDP Flood":  17,
+        }
+        proto = _proto_map.get(attack_class)
+        if proto is not None:
+            self._attack_proto = proto
 
     def start(self) -> None:
         if self._running:
             return
         self._running = True
-        self._thread  = threading.Thread(target=self._loop, name="resource-guard", daemon=True)
+        self._thread  = threading.Thread(
+            target=self._loop, name="resource-guard", daemon=True
+        )
         self._thread.start()
-        log.info("ResourceGuard started — poll=%.0fs  CPU warn/high/crit=%.0f/%.0f/%.0f%%"
-                 "  MEM warn/high/crit=%.0f/%.0f/%.0f%%",
-                 GUARD_POLL_INTERVAL, CPU_WARN, CPU_HIGH, CPU_CRIT,
-                 MEM_WARN, MEM_HIGH, MEM_CRIT)
+        log.info(
+            "ResourceGuard started — poll=%.0fs  "
+            "CPU warn/high/crit=%.0f/%.0f/%.0f%%  "
+            "MEM warn/high/crit=%.0f/%.0f/%.0f%%",
+            GUARD_POLL_INTERVAL,
+            CPU_WARN, CPU_HIGH, CPU_CRIT,
+            MEM_WARN, MEM_HIGH, MEM_CRIT,
+        )
 
     def stop(self) -> None:
         self._running = False
 
-    # ── Internal ───────────────────────────────────────────────────────
+    # Internal
 
     def _loop(self) -> None:
         while self._running:
@@ -71,74 +83,124 @@ class ResourceGuard:
             time.sleep(GUARD_POLL_INTERVAL)
 
     def _check(self) -> None:
+        # ML OFF — no detection or mitigation running, nothing to protect.
+        if not ML_ENABLED:
+            return
+
         cpu_pct, mem_pct = self._sample()
         level = self._classify(cpu_pct, mem_pct)
 
         if level == "CRIT":
+            # Tier 3 — install OVS packet-in rate-limit rules.
             self._consecutive_high += 1
-            if not self._paused:
-                log.critical("ResourceGuard CRIT: CPU=%.1f%%  MEM=%.1f%% — "
-                             "pausing detections, emergency clear", cpu_pct, mem_pct)
-                self._paused = True
-                self._emergency_clear_all()
+            self._throttle_delay = 0.05
+            if not self._crit_rules_active:
+                log.critical(
+                    "ResourceGuard CRIT: CPU=%.1f%% MEM=%.1f%% -- "
+                    "installing OVS packet-in rate-limit rules",
+                    cpu_pct, mem_pct,
+                )
+                self._install_rate_limit_rules()
+                self._crit_rules_active = True
 
         elif level == "HIGH":
-            self._consecutive_high += 1
-            self._paused = False
-            if self._consecutive_high >= HIGH_CONSECUTIVE_THRESHOLD:
-                log.warning("ResourceGuard HIGH (%dx): CPU=%.1f%%  MEM=%.1f%% — "
-                            "clearing non-permanent entries",
-                            self._consecutive_high, cpu_pct, mem_pct)
-                self._clear_non_permanent()
+            # Tier 2 — throttle detection poll rate only.
+            # If dropping from CRIT: remove rules, reset counters immediately.
+            if self._crit_rules_active:
+                self._remove_rate_limit_rules()
+                self._crit_rules_active = False
+                self._consecutive_high  = 0
+                self._throttle_delay    = 0.02
+                log.warning(
+                    "ResourceGuard HIGH (drop from CRIT): CPU=%.1f%% MEM=%.1f%% -- "
+                    "rules removed, throttle reduced to 20ms",
+                    cpu_pct, mem_pct,
+                )
+            else:
+                self._consecutive_high += 1
+                if self._consecutive_high >= HIGH_CONSECUTIVE_THRESHOLD:
+                    self._throttle_delay = 0.02
+                    log.warning(
+                        "ResourceGuard HIGH (%dx): CPU=%.1f%% MEM=%.1f%% -- "
+                        "throttling detection rate (delay=%.0fms)",
+                        self._consecutive_high, cpu_pct, mem_pct,
+                        self._throttle_delay * 1000,
+                    )
 
         elif level == "WARN":
+            # Tier 1 — log only, reset all throttles and rules.
             self._consecutive_high = 0
-            self._paused = False
-            log.warning("ResourceGuard WARN: CPU=%.1f%%  MEM=%.1f%%", cpu_pct, mem_pct)
+            self._throttle_delay   = 0.0
+            if self._crit_rules_active:
+                self._remove_rate_limit_rules()
+                self._crit_rules_active = False
+            log.warning(
+                "ResourceGuard WARN: CPU=%.1f%% MEM=%.1f%%",
+                cpu_pct, mem_pct,
+            )
 
         else:
-            # NORMAL — reset counters
-            if self._consecutive_high > 0 or self._paused:
-                log.info("ResourceGuard NORMAL: CPU=%.1f%%  MEM=%.1f%% — resuming",
-                         cpu_pct, mem_pct)
-            self._consecutive_high = 0
-            self._paused = False
+            # NORMAL — reset everything, remove any active rules.
+            if self._consecutive_high > 0 or self._throttle_delay > 0 or self._crit_rules_active:
+                log.info(
+                    "ResourceGuard NORMAL: CPU=%.1f%% MEM=%.1f%% -- "
+                    "all throttles removed",
+                    cpu_pct, mem_pct,
+                )
+            self._consecutive_high  = 0
+            self._throttle_delay    = 0.0
+            if self._crit_rules_active:
+                self._remove_rate_limit_rules()
+                self._crit_rules_active = False
 
     def _classify(self, cpu: float, mem: float) -> str:
-        if cpu >= CPU_CRIT or mem >= MEM_CRIT:
-            return "CRIT"
-        if cpu >= CPU_HIGH or mem >= MEM_HIGH:
-            return "HIGH"
-        if cpu >= CPU_WARN or mem >= MEM_WARN:
-            return "WARN"
+        if cpu >= CPU_CRIT or mem >= MEM_CRIT: return "CRIT"
+        if cpu >= CPU_HIGH or mem >= MEM_HIGH: return "HIGH"
+        if cpu >= CPU_WARN or mem >= MEM_WARN: return "WARN"
         return "NORMAL"
 
     def _sample(self) -> tuple[float, float]:
+        # Use controller (Ryu) CPU and memory via monitor._get_ctrl_metrics().
         try:
-            import psutil
-            cpu = psutil.cpu_percent(interval=1.0)
-            mem = psutil.virtual_memory().percent
-            return cpu, mem
-        except ImportError:
-            log.warning("ResourceGuard: psutil not installed")
-            return 0.0, 0.0
+            from backend.mitigation.monitor import _get_ctrl_metrics
+            ctrl_cpu, ctrl_mem_mb = _get_ctrl_metrics()
+            # Convert memory MB to % of 150MB practical Ryu ceiling.
+            ctrl_mem_pct = min((ctrl_mem_mb / 150.0) * 100.0, 100.0)
+            return ctrl_cpu, ctrl_mem_pct
         except Exception as exc:
-            log.warning("ResourceGuard: sample error — %s", exc)
+            log.warning("ResourceGuard: sample error -- %s", exc)
             return 0.0, 0.0
 
-    def _clear_non_permanent(self) -> None:
-        if self._state_machine:
-            cleared = self._state_machine.clear_all_non_permanent()
-            log.info("ResourceGuard: cleared %d non-permanent entries", cleared)
+    def _install_rate_limit_rules(self) -> None:
+        # Send proto_block command to Ryu via ZMQ.
+        if self._attack_proto is None:
+            log.warning("ResourceGuard: no attack proto known -- skipping proto drop")
+            return
+        try:
+            from backend.mitigation.zmq_commander import commander
+            commander.send({"action": "proto_block", "proto": self._attack_proto, "remove": False})
+            log.info("ResourceGuard: proto_block sent to Ryu -- nw_proto=%d", self._attack_proto)
+        except Exception as exc:
+            log.warning("ResourceGuard: failed to send proto_block: %s", exc)
 
-    def _emergency_clear_all(self) -> None:
-        # Clears non-permanent state_machine entries AND all sinkhole entries.
-        # Uses public methods only — no access to private internals.
-        self._clear_non_permanent()
-        if self._deception:
-            cleared = self._deception.emergency_clear()
-            if cleared:
-                log.info("ResourceGuard: emergency cleared %d sinkhole entries", cleared)
+    def _remove_rate_limit_rules(self) -> None:
+        # Send proto_block remove command to Ryu via ZMQ.
+        if self._attack_proto is None:
+            return
+        try:
+            from backend.mitigation.zmq_commander import commander
+            commander.send({"action": "proto_block", "proto": self._attack_proto, "remove": True})
+            log.info("ResourceGuard: proto_block removed from Ryu -- nw_proto=%d", self._attack_proto)
+        except Exception as exc:
+            log.warning("ResourceGuard: failed to send proto_block remove: %s", exc)
+
+    # Kept for backward compatibility — no longer used internally
+
+    def set_state_machine(self, sm) -> None:
+        pass
+
+    def set_deception(self, dec) -> None:
+        pass
 
 
 # Module-level singleton

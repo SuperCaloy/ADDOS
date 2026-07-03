@@ -123,6 +123,17 @@ class DeceptionModule:
                 for e in self._entries.values()
             ]
 
+    def emergency_clear_one(self, src_ip: str) -> bool:
+        # Remove a single IP from sinkhole and clear its flow rule.
+        # Used by manual release from the UI.
+        with self._lock:
+            entry = self._entries.pop(src_ip, None)
+        if entry:
+            self._push_clear(src_ip)
+            log.info("Deception: manually released %s from sinkhole", src_ip)
+            return True
+        return False
+
     def emergency_clear(self) -> int:
         # Public method for resource_guard — clears all sinkhole entries.
         # Returns count of cleared IPs.

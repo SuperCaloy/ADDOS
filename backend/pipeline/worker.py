@@ -5,7 +5,7 @@ import logging
 from backend.config import (
     WORKER_QUEUE_MAXSIZE, WORKER_ITEM_TIMEOUT_S,
     EXTRACTION_TRIGGER_PKTS, EXTRACTION_TRIGGER_S,
-    IF_SCORE_THRESHOLD_OVERRIDE,
+    ML_ENABLED,
 )
 from backend.models import if_pipeline, rf_pipeline, loader
 from backend.pipeline.flow_tracker import tracker
@@ -26,11 +26,17 @@ def submit(src_ip: str, flow_stats: dict, switch_stats: dict) -> None:
     try:
         _queue.put_nowait((src_ip, flow_stats, switch_stats, time.monotonic()))
     except queue.Full:
-        pass
+        log.warning("Worker queue full, dropped submission for %s", src_ip)
 
 
 def _process_item(src_ip: str, flow_stats: dict,
                   switch_stats: dict, enqueued_at: float) -> None:
+
+    # --- Skip all inference when ML is OFF ---
+    # decision_engine.on_result() already handles ML OFF path.
+    # No point running IF+RF — result is discarded anyway.
+    if not ML_ENABLED:
+        return
 
     # --- Skip invalid/whitelisted IPs ---
     if not src_ip or src_ip in ("0.0.0.0", ""):
@@ -82,7 +88,7 @@ def _process_item(src_ip: str, flow_stats: dict,
             if _result_callback:
                 _result_callback(src_ip, 0.0, False, "Normal", 0.0,
                                  flow_stats=flow_stats, switch_stats=switch_stats,
-                                 timed_out=False)
+                                 timed_out=False, enqueued_at=enqueued_at)
             return
 
     # --- Drop stale queue items ---
@@ -126,7 +132,7 @@ def _process_item(src_ip: str, flow_stats: dict,
                     cached.if_score, cached.is_anomaly,
                     cached.attack_class, cached.confidence,
                     flow_stats=flow_stats, switch_stats=switch_stats,
-                    timed_out=False,
+                    timed_out=False, enqueued_at=enqueued_at,
                 )
             return
 
@@ -143,12 +149,8 @@ def _process_item(src_ip: str, flow_stats: dict,
             return
         if_score, is_anomaly = if_pipeline.run_if_inference(if_vec)
 
-        # Threshold: use config override if set, else use model contract value
-        _effective_threshold = (
-            IF_SCORE_THRESHOLD_OVERRIDE
-            if IF_SCORE_THRESHOLD_OVERRIDE is not None
-            else loader.if_threshold
-        )
+        # Threshold: use model contract value
+        _effective_threshold = loader.if_threshold
         is_anomaly = (if_score >= _effective_threshold)
 
         # --- TEA feedback — teach entropy analyzer confirmed normal vs attack ---
@@ -223,7 +225,7 @@ def _process_item(src_ip: str, flow_stats: dict,
                 src_ip, if_score, is_anomaly,
                 attack_class, confidence,
                 flow_stats=flow_stats, switch_stats=switch_stats,
-                timed_out=False,
+                timed_out=False, enqueued_at=enqueued_at,
             )
 
     except Exception:
@@ -242,7 +244,8 @@ def _worker_loop() -> None:
             flood_filter.purge_stale()
 
 
-def start() -> None:
-    t = threading.Thread(target=_worker_loop, name="pipeline-worker", daemon=True)
-    t.start()
-    log.info("Pipeline worker started (queue maxsize=%d)", WORKER_QUEUE_MAXSIZE)
+def start(num_workers: int = 4) -> None:
+    for i in range(num_workers):
+        t = threading.Thread(target=_worker_loop, name=f"pipeline-worker-{i}", daemon=True)
+        t.start()
+    log.info("Pipeline worker started (%d threads, queue maxsize=%d)", num_workers, WORKER_QUEUE_MAXSIZE)

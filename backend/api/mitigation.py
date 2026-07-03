@@ -32,7 +32,14 @@ def release():
     if not src_ip:
         return jsonify({"error": "src_ip required"}), 400
 
+    # --- Try state machine first ---
     released = state_machine.manual_release(src_ip)
+
+    # --- If not in state machine, check sinkhole ---
+    if not released and deception.is_sinkholes(src_ip):
+        deception.emergency_clear_one(src_ip)
+        released = True
+
     if not released:
         return jsonify({"error": f"{src_ip} not found in active list"}), 404
 
