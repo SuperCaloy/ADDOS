@@ -498,11 +498,8 @@ function _mkSignalCard(feat, val, isIF) {
   /* Alert: red border + red value. Normal: neutral gray border, neutral text. */
   const borderCol = isAlert ? 'var(--red,#ff3d5a)' : 'var(--border,#1e2235)';
   const valCol    = isAlert ? 'var(--red,#ff3d5a)' : 'var(--text,#e8eaf6)';
-  /* Alert: warning triangle. Normal: nothing — keep the card clean. */
-  const icon = isAlert
-    ? `<span style="font-size:17px;color:var(--red,#ff3d5a);flex-shrink:0;line-height:1"
-            title="Anomalous value">&#9651;</span>`
-    : '';
+  /* Red card border + text color is sufficient — no triangle needed. */
+  const icon = '';
   const tip = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
   return `
     <div class="idd-fc"
