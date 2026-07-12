@@ -7,7 +7,7 @@ from typing import Optional
 
 from backend.database import writer
 from backend.mitigation.traffic_filter import (
-    resolve_phase1_actions, resolve_ban_action, resolve_blackhole_action,
+    BLACKHOLE_TTL_SECONDS, resolve_phase1_actions, resolve_ban_action, resolve_blackhole_action,
     resolve_release_action,
     get_ban_duration, get_blackhole_ttl, MAX_BAN_LEVEL,
     SINKHOLE_CONFIDENCE_THRESHOLD,

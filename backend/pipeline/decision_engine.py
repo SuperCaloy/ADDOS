@@ -498,16 +498,19 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # Force-push SSE on phase upgrades (Quarantine→TimeBan, →Blackhole)
     # so the audit log always reflects the latest phase, bypassing dedup.
-    _phase_upgrade = action_taken in ("Time Ban", "Blackhole")
-    _push_sse_event({
-        "timestamp":       ts,
-        "src_ip":          src_ip,
-        "predicted_class": predicted_class,
-        "attack_vector":   attack_class,
-        "confidence":      f"{confidence * 100:.1f}%",
-        "priority":        priority,
-        "action_taken":    action_taken,
-    }, force=_phase_upgrade)
+    # Skip entirely on flash-crowd ticks — no real action happened, the
+    # Audit Log should only ever show actual mitigation outcomes.
+    if not is_known_legit and _tea_mitigate:
+        _phase_upgrade = action_taken in ("Time Ban", "Blackhole")
+        _push_sse_event({
+            "timestamp":       ts,
+            "src_ip":          src_ip,
+            "predicted_class": predicted_class,
+            "attack_vector":   attack_class,
+            "confidence":      f"{confidence * 100:.1f}%",
+            "priority":        priority,
+            "action_taken":    action_taken,
+        }, force=_phase_upgrade)
 
 
 def start() -> None:
