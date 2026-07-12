@@ -178,13 +178,11 @@ class _SwitchEntropyState:
         self.window    = deque(maxlen=window_size)
         self.div_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.pkt_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
-        self.byt_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
 
     def push(self, snapshot: dict) -> None:
         self.window.append(snapshot)
         self.div_base.push(snapshot["diversity_entropy"])
         self.pkt_base.push(snapshot["packetrate_entropy"])
-        self.byt_base.push(snapshot["byterate_entropy"])
 
     def is_ready(self) -> bool:
         return len(self.window) >= 2
@@ -213,6 +211,9 @@ class _IpEntropyProfile:
         # Rolling pps and bps samples
         self._pps_samples = deque(maxlen=IP_PROFILE_WINDOW)
         self._bps_samples = deque(maxlen=IP_PROFILE_WINDOW)
+        # Last non uncertain verdict — keeps a steady state attacker classified
+        # as attack instead of flattening back to uncertain once trend levels off
+        self._last_verdict = "uncertain"
 
     def update(self, pps: float, bps: float) -> None:
         # Add new sample
@@ -283,13 +284,22 @@ class _IpEntropyProfile:
 
         # Attack: rising trend AND repetitive pattern
         if rising and repetitive:
+            self._last_verdict = "attack"
             return "attack"
 
         # Normal: declining or mean is dropping over time
         if declining or low_mean:
+            self._last_verdict = "normal"
             return "normal"
 
-        # Mixed signals
+        # Steady state attacker: already escalated and now holding a constant
+        # repetitive rate. Trend flattens to 0 here, but pattern is still
+        # repetitive, so stay classified as attack instead of reverting.
+        if self._last_verdict == "attack" and repetitive:
+            return "attack"
+
+        # Mixed signals, no prior attack verdict to hold onto
+        self._last_verdict = "uncertain"
         return "uncertain"
 
 
@@ -320,15 +330,17 @@ class EntropyAnalyzer:
 
         diversity_entropy  = _shannon_entropy([1.0] * len(ip_pps))
         packetrate_entropy = _shannon_entropy(list(ip_pps.values()))
-        byterate_entropy   = _shannon_entropy(list(ip_bps.values()))
 
         snapshot = {
             "diversity_entropy":  diversity_entropy,
             "packetrate_entropy": packetrate_entropy,
-            "byterate_entropy":   byterate_entropy,
             "unique_ips":         len(ip_pps),
         }
 
+        # Bug 1 fix: push and read curr/prev/z-scores under one continuous
+        # lock hold, so no other thread can push a new snapshot for this
+        # dpid between the push and the read, which previously could
+        # produce a torn read of curr/prev and inconsistent z-scores.
         with self._lock:
             state.push(snapshot)
             is_learned = state.is_learned
@@ -341,6 +353,26 @@ class EntropyAnalyzer:
             curr = state.latest()
             prev = state.previous()
 
+            if not is_learned:
+                div_z  = 0.0
+                pkt_z  = 0.0
+                attack_sigma = TEA_ATTACK_SIGMA
+                crowd_sigma  = TEA_CROWD_SIGMA
+                diversity_collapsed  = False
+                packetrate_collapsed = False
+            else:
+                div_z  = div_base.z_score(curr["diversity_entropy"])
+                pkt_z  = pkt_base.z_score(curr["packetrate_entropy"])
+                attack_sigma = div_base.dynamic_attack_sigma()
+                crowd_sigma  = pkt_base.dynamic_crowd_sigma()
+                diversity_collapsed  = div_base.is_low(curr["diversity_entropy"], attack_sigma)
+                packetrate_collapsed = pkt_base.is_low(curr["packetrate_entropy"], attack_sigma)
+
+            min_crowd_div = (
+                max(TEA_MIN_CROWD_DIVERSITY, div_base.mean * 0.5)
+                if div_base.is_learned else TEA_MIN_CROWD_DIVERSITY
+            )
+
         diversity_delta  = curr["diversity_entropy"]  - prev["diversity_entropy"]
         packetrate_delta = curr["packetrate_entropy"] - prev["packetrate_entropy"]
 
@@ -352,25 +384,8 @@ class EntropyAnalyzer:
             )
             return self._neutral(diversity_entropy, packetrate_entropy, learned=False)
 
-        # === Adaptive thresholds via z-score ===
-        div_z  = div_base.z_score(curr["diversity_entropy"])
-        pkt_z  = pkt_base.z_score(curr["packetrate_entropy"])
-
-        # Dynamic sigma — scales with baseline stability
-        attack_sigma = div_base.dynamic_attack_sigma()
-        crowd_sigma  = pkt_base.dynamic_crowd_sigma()
-
-        # Dynamic crowd diversity floor — fraction of learned baseline mean
-        # Falls back to TEA_MIN_CROWD_DIVERSITY before learning completes
-        min_crowd_div = (
-            max(TEA_MIN_CROWD_DIVERSITY, div_base.mean * 0.5)
-            if div_base.is_learned else TEA_MIN_CROWD_DIVERSITY
-        )
-
         # Attack: diversity collapses AND packet rate collapses (few IPs dominating)
-        diversity_collapsed  = div_base.is_low(curr["diversity_entropy"], attack_sigma)
-        packetrate_collapsed = pkt_base.is_low(curr["packetrate_entropy"], attack_sigma)
-        is_attack_pattern    = diversity_collapsed and packetrate_collapsed
+        is_attack_pattern = diversity_collapsed and packetrate_collapsed
 
         # Flash crowd: diversity is normal/high + pkt rate is high + diversity not collapsed
         diversity_normal  = not diversity_collapsed
@@ -450,7 +465,6 @@ class EntropyAnalyzer:
             return
         state.div_base.unlock()
         state.pkt_base.unlock()
-        state.byt_base.unlock()
         log.debug("TEA [dpid=%d] IF feedback: normal — baseline unlocked", dpid)
 
     def confirm_attack(self, dpid: int) -> None:
@@ -461,7 +475,6 @@ class EntropyAnalyzer:
             return
         state.div_base.lock()
         state.pkt_base.lock()
-        state.byt_base.lock()
         log.debug("TEA [dpid=%d] IF feedback: attack — baseline locked", dpid)
 
     def update_ip(self, src_ip: str, pps: float, bps: float) -> None:

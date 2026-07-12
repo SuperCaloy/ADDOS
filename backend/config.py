@@ -32,10 +32,10 @@ EXTRACTION_TRIGGER_PKTS = 1
 EXTRACTION_TRIGGER_S    = 0.05
 
 # --- Simulation mode ---
-SIMULATION_MODE = False
+SIMULATION_MODE = True
 
 # --- ML Engine toggle ---
-ML_ENABLED = False
+ML_ENABLED = True
 
 # --- Flood pre-filter
 FLOOD_SYN_LIMIT     = 100

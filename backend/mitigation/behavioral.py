@@ -104,10 +104,18 @@ def should_blackhole(src_ip: str, current_ban_level: int) -> bool:
     return False
 
 
-def assign_priority(if_score: float, confidence: float, src_ip: str = "") -> str:
+# Tentative reputation threshold. Unconfirmed, prefilter based only.
+# Deliberately higher bar than confirmed repeat offender (2), since this
+# signal has no ML confirmation behind it.
+SINKHOLE_FLAG_HIGH_PRIORITY = 3
+
+
+def assign_priority(if_score: float, confidence: float, src_ip: str = "",
+                    prior_sinkhole_flags: int = 0) -> str:
     # High if: confirmed attack (IF>=0.75 AND conf>=0.80)
-    #          repeat offender (2+ offences)
-    #          persistent attacker (decay score >= 3.0)
+    #          repeat offender (2+ offences) — confirmed, ML backed
+    #          persistent attacker (decay score >= 3.0) — confirmed, ML backed
+    #          repeatedly unscored/sinkholed (3+ times) — unconfirmed, tentative
     if if_score >= HIGH_PRIORITY_IF_THRESHOLD and confidence >= 0.80:
         return "High"
 
@@ -117,6 +125,10 @@ def assign_priority(if_score: float, confidence: float, src_ip: str = "") -> str
             return "High"
         if get_decay_score(src_ip) >= 3.0:
             log.debug("Behavioral: %s → High (persistent, decay=%.2f)", src_ip, get_decay_score(src_ip))
+            return "High"
+        if prior_sinkhole_flags >= SINKHOLE_FLAG_HIGH_PRIORITY:
+            log.debug("Behavioral: %s → High (tentative, sinkhole_flags=%d, unconfirmed)",
+                      src_ip, prior_sinkhole_flags)
             return "High"
 
     return "Low"

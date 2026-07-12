@@ -5,14 +5,14 @@ import threading
 import logging
 from backend.config import ZMQ_TELEMETRY_ADDR, ML_ENABLED
 
-# Whitelisted IPs — never flood-filtered or submitted to ML pipeline.
-# h20 = victim server, h21 = sinkhole dummy.
-# Without this, baseline pings from 9 hosts to h20 at ~10ms interval
-# trigger the burst window (400 pkts in 0.5s) and flag h20 as attacker.
+# Whitelisted IPs, never flood-filtered or submitted to ML.
+# h20 = victim server, h21 = sinkhole dummy. Without this, baseline
+# pings to h20 trip the burst window and flag it as attacker.
 _WHITELIST_IPS = {"10.0.0.20", "10.0.0.21"}
 from backend.pipeline import worker
 from backend.pipeline.flood_prefilter import flood_filter
 from backend.pipeline.entropy_analyzer import entropy_analyzer
+from backend.mitigation.state_machine import state_machine
 
 log = logging.getLogger(__name__)
 
@@ -32,9 +32,7 @@ _connected_switches = 0
 _flow_prev_pkts: dict[tuple, int] = {}
 _flow_lock = threading.Lock()
 
-# --- Per-switch flow list buffer for TEA ---
-# Accumulates flow stats per dpid within one poll cycle
-# TEA needs the full list of flows per switch to compute entropy
+# Per-switch flow list buffer for TEA, one poll cycle at a time.
 _switch_flows: dict[int, list[dict]] = {}
 _switch_flows_lock = threading.Lock()
 
@@ -51,9 +49,7 @@ def get_switch_count() -> int:
 
 def _reset_flow_state() -> None:
     # Clear per-flow delta tracking and switch buffers on reconnect.
-    # _raw_total_pkts is NOT reset — it accumulates for the full session.
-    # Resetting it caused get_stats() to fall back to ML event count (~1/flow)
-    # instead of real raw packet count, making the chart show ~2 instead of ~100+ pps.
+    # raw_total_pkts is not reset, it accumulates for the full session.
     with _flow_lock:
         _flow_prev_pkts.clear()
     with _switch_flows_lock:
@@ -93,9 +89,7 @@ def _parse_and_route(raw: bytes) -> None:
         if not src_ip:
             return
 
-        # Skip whitelist IPs — server and sinkhole must never be flood-filtered.
-        # All legit hosts ping h20 simultaneously so its burst count easily
-        # exceeds the 400-pkt burst window and flags it as attacker.
+        # Skip whitelist IPs, server and sinkhole never get flood-filtered.
         if src_ip in _WHITELIST_IPS:
             return
 
@@ -111,6 +105,7 @@ def _parse_and_route(raw: bytes) -> None:
                 tripped = flood_filter.on_packet(src_ip, "SYN")
                 if tripped:
                     log.info("FloodPreFilter SYN tripped: %s — awaiting real flow_stats", src_ip)
+                    state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
 
             elif msg.get("tcp_flags_ack"):
                 # ACK means handshake completed — reduce half-open count
@@ -121,6 +116,7 @@ def _parse_and_route(raw: bytes) -> None:
             tripped = flood_filter.on_packet(src_ip, "ICMP")
             if tripped:
                 log.info("FloodPreFilter ICMP tripped: %s — awaiting real flow_stats", src_ip)
+                state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
 
         elif proto == "UDP":
             # UDP flood tracking — this is the key fix for slow UDP detection
@@ -128,6 +124,7 @@ def _parse_and_route(raw: bytes) -> None:
             tripped = flood_filter.on_packet(src_ip, "UDP")
             if tripped:
                 log.info("FloodPreFilter UDP tripped: %s — awaiting real flow_stats", src_ip)
+                state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
 
     # ------------------------------------------------------------------
     # dropped_delta — real physical packet drop count from OVS
@@ -191,19 +188,14 @@ def _parse_and_route(raw: bytes) -> None:
                 pass
             return
 
-        # --- Gate check: should this flow go to the ML worker? ---
-        # Dynamic gate — no hardcoded MIN_PPS.
-        # Only skip truly dead flows (zero packets).
-        # TEA + flood prefilter handle anomaly gating dynamically.
-        # Hardcoded MIN_PPS caused slow legit hosts (h16/h18 at 0.33pps) to be dropped.
+        # Gate check, only skip truly dead flows. TEA and flood
+        # prefilter handle anomaly gating dynamically, no hardcoded MIN_PPS.
         switch_delta_pps = float(flow_stats.get("switch_delta_pps", 0.0))
 
         if pkt_count_cumulative < 1:
             return
 
-        # Skip if this IP is in Phase 2 or 3 — block rule is active, no need to score.
-        # Phase 4 (probation) is ALLOWED through — we want ML to observe it.
-        # If IF still flags it during probation, state_machine escalates to Phase 2.
+        # Skip phase 2/3, block rule active. Phase 4 allowed through for ML.
         try:
             from backend.mitigation.state_machine import state_machine as _sm
             _ip_state = _sm._states.get(src_ip)
@@ -212,44 +204,31 @@ def _parse_and_route(raw: bytes) -> None:
         except Exception:
             pass
 
-        # --- TEA gate ---
-        # Run entropy analysis on the accumulated flows for this switch.
-        # We snapshot the current buffer, run TEA, then decide.
+        # TEA gate, snapshot the switch buffer and run entropy analysis.
         with _switch_flows_lock:
             switch_flow_list = list(_switch_flows.get(dpid, []))
 
         tea_result = entropy_analyzer.update(dpid, switch_flow_list)
 
-        # Check if prefilter already flagged this IP for any protocol
-        already_flagged = flood_filter.is_flagged_any(src_ip)
+        # No pre-ML gate. Every interval reaches IF/RF now, mitigation
+        # gating happens later in decision_engine.should_mitigate().
 
-        # TEA gate: should we submit to ML or skip?
-        if not entropy_analyzer.should_submit(tea_result, already_flagged):
-            log.debug(
-                "TEA gate blocked submission for %s (conf=%s, flash_crowd=%s)",
-                src_ip, tea_result["confidence"], tea_result["is_flash_crowd"]
-            )
-            return
-
-        # Attach TEA result to flow_stats so worker/decision_engine can log it
+        # Attach TEA result to flow_stats so decision_engine can gate mitigation
+        # and log it
         flow_stats["tea_attack_pattern"] = tea_result["is_attack_pattern"]
         flow_stats["tea_flash_crowd"]    = tea_result["is_flash_crowd"]
         flow_stats["tea_confidence"]     = tea_result["confidence"]
+        flow_stats["tea_is_learned"]     = tea_result["is_learned"]
         flow_stats["tea_div_entropy"]    = tea_result["diversity_entropy"]
         flow_stats["tea_pkt_entropy"]    = tea_result["packetrate_entropy"]
 
-        # Pass dpid through switch_stats so decision_engine can feed IF result back to TEA
+        # Pass dpid so decision_engine can feed IF result back to TEA
         switch_stats["dpid"] = dpid
         worker.submit(src_ip, flow_stats, switch_stats)
 
 
 def _clear_switch_flow_buffers() -> None:
-    """
-    Clear the per-switch flow accumulation buffers.
-    Call this once per polling cycle after all flow_stats for a switch
-    have been processed — prevents old flows from polluting the next window.
-    This is called from the receiver loop on a timer.
-    """
+    """Clear per-switch flow buffers, called once per poll cycle."""
     with _switch_flows_lock:
         _switch_flows.clear()
 

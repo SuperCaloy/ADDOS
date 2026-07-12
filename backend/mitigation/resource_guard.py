@@ -29,6 +29,7 @@ class ResourceGuard:
         self._crit_rules_active = False
         self._throttle_delay    = 0.0
         self._attack_proto      = None  # nw_proto of current attack (1=ICMP, 6=TCP, 17=UDP)
+        self._installed_proto   = None  # nw_proto actually installed via OVS rule
 
     @property
     def throttle_delay(self) -> float:
@@ -100,8 +101,14 @@ class ResourceGuard:
                     "installing OVS packet-in rate-limit rules",
                     cpu_pct, mem_pct,
                 )
-                self._install_rate_limit_rules()
-                self._crit_rules_active = True
+                self._crit_rules_active = self._install_rate_limit_rules()
+            elif self._attack_proto != self._installed_proto:
+                log.warning(
+                    "ResourceGuard: attack proto changed mid-CRIT, old=%s new=%s -- reinstalling",
+                    self._installed_proto, self._attack_proto,
+                )
+                self._remove_rate_limit_rules()
+                self._crit_rules_active = self._install_rate_limit_rules()
 
         elif level == "HIGH":
             # Tier 2 — throttle detection poll rate only.
@@ -171,28 +178,34 @@ class ResourceGuard:
             log.warning("ResourceGuard: sample error -- %s", exc)
             return 0.0, 0.0
 
-    def _install_rate_limit_rules(self) -> None:
+    def _install_rate_limit_rules(self) -> bool:
         # Send proto_block command to Ryu via ZMQ.
+        # Returns True only if the rule was actually installed.
         if self._attack_proto is None:
             log.warning("ResourceGuard: no attack proto known -- skipping proto drop")
-            return
+            return False
         try:
             from backend.mitigation.zmq_commander import commander
             commander.send({"action": "proto_block", "proto": self._attack_proto, "remove": False})
             log.info("ResourceGuard: proto_block sent to Ryu -- nw_proto=%d", self._attack_proto)
+            self._installed_proto = self._attack_proto
+            return True
         except Exception as exc:
             log.warning("ResourceGuard: failed to send proto_block: %s", exc)
+            return False
 
     def _remove_rate_limit_rules(self) -> None:
-        # Send proto_block remove command to Ryu via ZMQ.
-        if self._attack_proto is None:
+        # Send proto_block remove, uses _installed_proto not live _attack_proto.
+        if self._installed_proto is None:
             return
         try:
             from backend.mitigation.zmq_commander import commander
-            commander.send({"action": "proto_block", "proto": self._attack_proto, "remove": True})
-            log.info("ResourceGuard: proto_block removed from Ryu -- nw_proto=%d", self._attack_proto)
+            commander.send({"action": "proto_block", "proto": self._installed_proto, "remove": True})
+            log.info("ResourceGuard: proto_block removed from Ryu -- nw_proto=%d", self._installed_proto)
         except Exception as exc:
             log.warning("ResourceGuard: failed to send proto_block remove: %s", exc)
+        finally:
+            self._installed_proto = None
 
     # Kept for backward compatibility — no longer used internally
 
