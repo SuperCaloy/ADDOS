@@ -371,13 +371,13 @@ function _setBadge(isLive) {
 // ── Live section partial update ───────────────────────────────────────────────
 
 function _updateLiveSection(data) {
-  /* Only refresh parts that change — pipeline/history are static per session */
   const f  = data.features || {};
   const ml = data.ml       || {};
   const st = data.state    || {};
   _renderFeatureSignals(f, ml.attack_class);
   _renderMlBars(ml, data.thresholds || {});
   _renderHistoryPills(st);
+  _renderPipeline(data, ml, st, ml.is_anomaly);
 }
 
 // ── Full render ───────────────────────────────────────────────────────────────

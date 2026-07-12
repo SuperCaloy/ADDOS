@@ -1,12 +1,15 @@
+import math
 import numpy as np
 import threading
 import pandas as pd
 from backend.models import loader
 
-_median_lock     = threading.Lock()
-_feature_sums    = None
-_feature_counts  = None
-_feature_medians = None
+_median_lock       = threading.Lock()
+_feature_sums      = None
+_feature_counts    = None
+_feature_medians   = None
+_thread_local       = threading.local()
+_BATCH_FLUSH_SIZE   = 20   # flush thread-local buffer to shared state every N calls
 
 
 def _init_median_tracker(n: int) -> None:
@@ -16,14 +19,33 @@ def _init_median_tracker(n: int) -> None:
     _feature_medians = np.zeros(n, dtype=np.float64)
 
 
+def _get_local_buffer(n: int):
+    # Per-thread accumulator — avoids locking on every single flow
+    if not hasattr(_thread_local, "sums"):
+        _thread_local.sums   = np.zeros(n, dtype=np.float64)
+        _thread_local.counts = np.zeros(n, dtype=np.int64)
+        _thread_local.calls  = 0
+    return _thread_local
+
+
 def _update_medians(vec: np.ndarray) -> None:
-    # Incremental mean as stable median approximation
-    with _median_lock:
-        mask = np.isfinite(vec)
-        _feature_counts[mask] += 1
-        _feature_sums[mask]   += vec[mask]
-        np.divide(_feature_sums, np.maximum(_feature_counts, 1),
-                  out=_feature_medians)
+    # Accumulate locally, only take the lock every _BATCH_FLUSH_SIZE calls
+    n  = vec.shape[0]
+    tl = _get_local_buffer(n)
+    mask = np.isfinite(vec)
+    tl.sums[mask]   += vec[mask]
+    tl.counts[mask] += 1
+    tl.calls += 1
+
+    if tl.calls >= _BATCH_FLUSH_SIZE:
+        with _median_lock:
+            _feature_sums[:]   += tl.sums
+            _feature_counts[:] += tl.counts
+            np.divide(_feature_sums, np.maximum(_feature_counts, 1),
+                      out=_feature_medians)
+        tl.sums[:]   = 0
+        tl.counts[:] = 0
+        tl.calls = 0
 
 
 def _get_medians() -> np.ndarray:
@@ -55,24 +77,25 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     ipr  = float(s.get("ip_proto",                 0))
 
     # --- Engineered features ---
-    pkt_byte_rate_ratio = np.log1p(max(pps / (bps + eps), 0))
+    pkt_byte_rate_ratio = math.log1p(max(pps / (bps + eps), 0))
     avg_bytes_per_pkt   = byt / (pkt + eps)
-    flow_intensity      = np.log1p(max(pkt * bps, 0))          # fixed: bps not pps
-    port_entropy        = np.log1p(max(tps / (tpd + 1), 0))
-    bytes_per_duration  = np.log1p(max(byt / (fds + eps), 0))
-    pkt_size_uniformity = np.log1p(max(avg_bytes_per_pkt / (bps + 1), 0))
-    flow_src_intensity  = np.log1p(max(fcps * pps, 0))
+    flow_intensity      = math.log1p(max(pkt * bps, 0))          # fixed: bps not pps
+    port_entropy        = math.log1p(max(tps / (tpd + 1), 0))
+    bytes_per_duration  = math.log1p(max(byt / (fds + eps), 0))
+    # eps here, not +1 — matches training denominator exactly
+    pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt / (bps + eps), 0))
+    flow_src_intensity  = math.log1p(max(fcps * pps, 0))
 
     # --- Build vector in contract order ---
     vec = np.array([
-        np.log1p(max(fds,  0)),   # flow_duration_sec
-        np.log1p(max(pkt,  0)),   # packet_count
-        np.log1p(max(byt,  0)),   # byte_count
-        np.log1p(max(pps,  0)),   # packet_count_per_second
-        np.log1p(max(bps,  0)),   # byte_count_per_second
-        np.log1p(max(fcps, 0)),   # flow_count_per_src
-        np.log1p(max(tps,  0)),   # tp_src
-        np.log1p(max(tpd,  0)),   # tp_dst
+        math.log1p(max(fds,  0)),   # flow_duration_sec
+        math.log1p(max(pkt,  0)),   # packet_count
+        math.log1p(max(byt,  0)),   # byte_count
+        math.log1p(max(pps,  0)),   # packet_count_per_second
+        math.log1p(max(bps,  0)),   # byte_count_per_second
+        math.log1p(max(fcps, 0)),   # flow_count_per_src
+        math.log1p(max(tps,  0)),   # tp_src
+        math.log1p(max(tpd,  0)),   # tp_dst
         ipr,                       # ip_proto
         pkt_byte_rate_ratio,
         avg_bytes_per_pkt,

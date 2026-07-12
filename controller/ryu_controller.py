@@ -7,7 +7,6 @@ import json
 import time
 import collections
 import ipaddress
-import resource
 
 import zmq
 from ryu.base import app_manager
@@ -57,10 +56,6 @@ class FatTreeController(app_manager.RyuApp):
     def _init_system(self) -> None:
         # Pin to core 0 — simulates single-core controller, shows real saturation
         os.sched_setaffinity(0, {0})
-
-        # 512MB virtual memory cap — demonstrates OOM failure under stress without ML
-        _MEM_LIMIT = 512 * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (_MEM_LIMIT, _MEM_LIMIT))
 
     def _init_zmq(self) -> None:
         # Telemetry PUSH socket — sends flow stats and events to backend

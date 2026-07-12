@@ -94,7 +94,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             rf_icmp_as_syn        INTEGER DEFAULT 0,
             rf_icmp_as_udp        INTEGER DEFAULT 0,
             rf_udp_as_syn         INTEGER DEFAULT 0,
-            rf_udp_as_icmp        INTEGER DEFAULT 0
+            rf_udp_as_icmp        INTEGER DEFAULT 0,
+            -- hold_ip stats (unscored fallback mitigation)
+            held                  INTEGER DEFAULT 0,
+            rescored              INTEGER DEFAULT 0,
+            expired_unscored      INTEGER DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_ts    ON mitigation_events(timestamp);
@@ -283,6 +287,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "rf_udp_as_syn",  "rf_udp_as_icmp",
     ]
     for col in new_cols:
+        try:
+            conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # hold_ip stats columns
+    for col in ("held", "rescored", "expired_unscored"):
         try:
             conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
             conn.commit()

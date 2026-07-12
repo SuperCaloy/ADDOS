@@ -199,7 +199,9 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     tot_flows = sr.get("total_flows") or 0
     true_neg  = sr.get("true_neg")    or 0
     fp_count  = sr.get("fp")          or 0
-    fp_rate   = (fp_count / max(tot_flows, 1)) * 100
+
+    if_m    = writer.get_if_metrics(start_str, end_str)
+    fp_rate = if_m.get("fpr", 0)
 
     # ── Section 1: Executive Summary ─────────────────────────────────────────
     story += _section_header("1.  Executive Summary", styles)
@@ -259,7 +261,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     # ── Section 2: Performance Benchmark ─────────────────────────────────────
     story += _section_header("2.  Performance Benchmark", styles)
 
-    if_m  = writer.get_if_metrics(start_str, end_str)
     rf_m  = writer.get_rf_metrics(start_str, end_str)
     sys   = writer.get_system_metrics_attack_vs_baseline(start_str, end_str)
     lat_m = writer.get_latency_metrics(start_str, end_str)

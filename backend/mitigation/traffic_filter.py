@@ -41,8 +41,19 @@ ACTION_BLOCK      = "block"        # priority-100 full drop
 ACTION_REDIRECT   = "redirect"     # priority-85 redirect to sinkhole
 ACTION_CLEAR      = "clear"        # removes all rules for this IP
 
-# IP is sinkholes when confidence is below this threshold
+# IP is sinkholed when confidence is below this threshold
 SINKHOLE_CONFIDENCE_THRESHOLD = 0.70
+
+# After sinkhole observation, escalate to quarantine only once confidence
+# is resolved back up to this level — same bar as the sinkhole trigger,
+# so an IP can't drift below one and above the other.
+SINKHOLE_ESCALATE_CONFIDENCE = 0.70
+
+# Hard ceiling — cumulative time across sinkhole cycles. If an IP keeps
+# retripping and staying active but RF never resolves it, force escalate
+# to quarantine anyway once this total is hit, rather than looping forever.
+# 3 observation cycles worth of time.
+SINKHOLE_MAX_TOTAL_SECONDS = 90.0
 
 
 def resolve_phase1_actions(priority: str) -> list[str]:
