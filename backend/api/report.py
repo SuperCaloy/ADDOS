@@ -234,8 +234,8 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ["Released",    str(actions.get("Released",    0))],
     ]
 
-    def _kv_table(data):
-        t = Table(data, colWidths=[5.5*cm, 3.5*cm])
+    def _kv_table(data, col_widths):
+        t = Table(data, colWidths=col_widths)
         t.setStyle(TableStyle([
             ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
             ("BACKGROUND",    (0, 0), (-1, 0),  C_ACCENT),
@@ -251,8 +251,25 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ]))
         return t
 
-    side_by_side = Table([[_kv_table(sum_left), Spacer(0.5*cm, 1), _kv_table(sum_right)]],
-                         colWidths=[9*cm, 0.5*cm, 8*cm])
+    # Left/right inner-table widths must sum to exactly match their outer
+    # container cell (8.7cm / 8.0cm below) — a mismatch here is what caused
+    # the "Report Period" value to overlap the Attack Vector table next to it.
+    # Value column (4.2cm) comfortably fits the longest real value,
+    # "2026-06-23 - 2026-06-30" (measured ~3.76cm at this font/size).
+    side_by_side = Table([[_kv_table(sum_left,  [4.5*cm, 4.2*cm]),
+                            Spacer(0.3*cm, 1),
+                            _kv_table(sum_right, [5.0*cm, 3.0*cm])]],
+                         colWidths=[8.7*cm, 0.3*cm, 8*cm])
+    # Zero the outer wrapper's own cell padding — reportlab's 6pt default
+    # padding was silently eating into the 8.7cm/8.0cm allocated to each
+    # inner table, causing it to overflow its cell even though the widths
+    # matched on paper. This was the root cause of the Report Period overlap.
+    side_by_side.setStyle(TableStyle([
+        ("LEFTPADDING",   (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
+        ("TOPPADDING",    (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
     story.append(side_by_side)
     story.append(Spacer(1, 0.6*cm))
 
@@ -265,7 +282,20 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     lat_m = writer.get_latency_metrics(start_str, end_str)
 
     def _bench_table(data):
-        tbl = Table(data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
+        desc_style = ParagraphStyle(
+            "bench_desc", fontName="Helvetica", fontSize=8.5,
+            leading=11, textColor=C_DARK
+        )
+        # Wrap column 2 (Description) in Paragraph so long strings
+        # line-wrap inside the cell instead of overflowing the column.
+        # Plain strings in reportlab never wrap regardless of column width.
+        wrapped = []
+        for i, row in enumerate(data):
+            if len(row) >= 3 and i > 0:
+                wrapped.append([row[0], row[1], Paragraph(str(row[2]), desc_style)])
+            else:
+                wrapped.append(row)
+        tbl = Table(wrapped, colWidths=[5.5*cm, 2.5*cm, 9.0*cm], repeatRows=1)
         style = [
             ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
             ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
@@ -332,7 +362,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
         ("ALIGN",   (0,0),(-1,-1), "CENTER"),
     ]))
-    if_cm_wrap = Table([[if_cm_tbl]], colWidths=[17.5*cm])
+    if_cm_wrap = Table([[if_cm_tbl]], colWidths=[17.0*cm])
     if_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
     story.append(if_cm_wrap)
     story.append(Spacer(1, 0.4*cm))
@@ -353,7 +383,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ["F1-Score",   f"{rf_o.get('f1',0):.2f}%",        "Balanced measure combining Precision and Recall"],
         ["Accuracy",   f"{rf_o.get('accuracy',0):.2f}%",  "Overall proportion of correct classifications"],
     ]
-    rf_tbl = Table(rf_data, colWidths=[5.5*cm, 2.5*cm, 9.5*cm], repeatRows=1)
+    rf_tbl = Table(rf_data, colWidths=[5.5*cm, 2.5*cm, 9.0*cm], repeatRows=1)
     rf_tbl.setStyle(TableStyle([
         ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
         ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
@@ -414,7 +444,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
         ("ALIGN",   (0,0),(-1,-1), "CENTER"),
     ]))
-    rf_cm_wrap = Table([[rf_cm_tbl]], colWidths=[17.5*cm])
+    rf_cm_wrap = Table([[rf_cm_tbl]], colWidths=[17.0*cm])
     rf_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
     story.append(rf_cm_wrap)
     story.append(Spacer(1, 0.4*cm))
@@ -494,7 +524,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
                 r["last_seen"],
             ])
         off_tbl = Table(off_data,
-                        colWidths=[3.5*cm, 2.5*cm, 3*cm, 4.5*cm, 4*cm],
+                        colWidths=[3.5*cm, 2.5*cm, 3*cm, 4.5*cm, 3.5*cm],
                         repeatRows=1)
         off_tbl.setStyle(TableStyle([
             ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
@@ -532,7 +562,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ])
 
     log_tbl = Table(log_data,
-                    colWidths=[3.8*cm, 3*cm, 2*cm, 2.5*cm, 2*cm, 1.8*cm, 2.4*cm],
+                    colWidths=[3.6*cm, 2.6*cm, 1.7*cm, 2.3*cm, 2.3*cm, 1.7*cm, 2.8*cm],
                     repeatRows=1)
     log_tbl.setStyle(TableStyle([
         ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
@@ -561,6 +591,13 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     if history_rows:
         story += _section_header("5.  IP Attack History (Completed Sessions)", styles)
+        # Reason column holds free-form backend text (e.g. "Manual Block
+        # Escalation" measures ~3.1cm — wider than any fixed column width
+        # could safely guarantee). Wrapping it in a Paragraph lets it break
+        # onto a second line within its own cell instead of overflowing.
+        reason_style = ParagraphStyle("reason", fontName="Helvetica", fontSize=7,
+                                       leading=8.4, textColor=C_DARK)
+
         hist_headers = ["Source IP", "Vector", "IF Score", "Conf",
                         "Priority", "Phase", "Offences", "Duration",
                         "Unblocked At", "Reason"]
@@ -578,11 +615,11 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
                 str(r["offence_count"] or 1),
                 dur_str,
                 r["unblocked_at"],
-                r["unblock_reason"] or "-",
+                Paragraph(r["unblock_reason"] or "-", reason_style),
             ])
         hist_tbl = Table(hist_data,
-                         colWidths=[2.5*cm, 2*cm, 1.8*cm, 1.4*cm,
-                                    1.6*cm, 1.5*cm, 1.6*cm, 1.5*cm, 3*cm, 2.1*cm],
+                         colWidths=[1.8*cm, 1.8*cm, 1.5*cm, 1.4*cm,
+                                    1.4*cm, 1.5*cm, 1.55*cm, 1.55*cm, 2.8*cm, 1.7*cm],
                          repeatRows=1)
         hist_tbl.setStyle(TableStyle([
             ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
