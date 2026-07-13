@@ -54,8 +54,7 @@ class FatTreeController(app_manager.RyuApp):
     # ── Initialisation helpers ─────────────────────────────────────────────
 
     def _init_system(self) -> None:
-        # Pin to core 0 — simulates single-core controller, shows real saturation
-        os.sched_setaffinity(0, {0})
+        os.sched_setaffinity(0, {0, 1, 2, 3})
 
     def _init_zmq(self) -> None:
         # Telemetry PUSH socket — sends flow stats and events to backend
@@ -128,7 +127,7 @@ class FatTreeController(app_manager.RyuApp):
         self._src_ports: dict[str, tuple[int, int]] = {}
 
         self._pkt_in_rate: dict = {}
-        self._PKT_IN_RATE_LIMIT = 500
+        self._PKT_IN_RATE_LIMIT = 1000
 
     # ── OpenFlow handshake ─────────────────────────────────────────────────
 
