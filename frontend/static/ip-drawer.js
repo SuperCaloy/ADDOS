@@ -68,7 +68,7 @@ const _ATTACK_CONTEXT = {
   drawer.style.cssText = [
     'position:fixed','top:50%','left:50%',
     'transform:translate(-50%,-48%) scale(0.97)',
-    'width:700px','max-height:88vh','z-index:9991',
+    'width:min(1050px,95vw)','max-height:92vh','z-index:9991',
     'display:flex','flex-direction:column','overflow:hidden',
     'transition:opacity 0.2s ease, transform 0.2s ease',
     'opacity:0','pointer-events:none',
@@ -82,12 +82,12 @@ const _ATTACK_CONTEXT = {
   drawer.innerHTML = `
     <!-- Header -->
     <div id="idd-head" style="display:flex;align-items:flex-start;justify-content:space-between;
-         padding:20px 22px 14px;border-bottom:1px solid var(--border,#eef0f6);flex-shrink:0">
-      <div style="display:flex;flex-direction:column;gap:5px">
-        <div style="font-size:12px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
+         padding:24px 28px 18px;border-bottom:1px solid var(--border,#eef0f6);flex-shrink:0">
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <div style="font-size:13px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
              font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase">Threat Analysis</div>
-        <div style="display:flex;align-items:center;gap:10px">
-          <div id="idd-ip" style="font-family:var(--mono,'Space Mono',monospace);font-size:30px;
+        <div style="display:flex;align-items:center;gap:12px">
+          <div id="idd-ip" style="font-family:var(--mono,'Space Mono',monospace);font-size:36px;
                font-weight:700;color:var(--text,#1a1d2e);letter-spacing:-.5px;line-height:1.1">--</div>
           <div id="idd-status-badge"></div>
         </div>
@@ -126,16 +126,16 @@ const _ATTACK_CONTEXT = {
     </div>
 
     <!-- Content -->
-    <div id="idd-content" style="display:none;flex:1;overflow-y:auto;padding:18px 22px 36px">
+    <div id="idd-content" style="display:none;flex:1;overflow-y:auto;padding:22px 28px 40px">
 
       <!-- Verdict banner -->
-      <div id="idd-verdict" style="border-radius:9px;padding:11px 15px;margin-bottom:8px;
-           font-size:14px;font-family:var(--mono,'Space Mono',monospace);font-weight:700;
+      <div id="idd-verdict" style="border-radius:9px;padding:14px 18px;margin-bottom:12px;
+           font-size:17px;font-family:var(--mono,'Space Mono',monospace);font-weight:700;
            display:flex;align-items:center;gap:8px;letter-spacing:.02em"></div>
 
       <!-- Attack description -->
-      <div id="idd-desc" style="font-size:15px;line-height:1.7;color:var(--sub2,#6b7190);
-           margin-bottom:16px;padding:12px 15px;
+      <div id="idd-desc" style="font-size:17px;line-height:1.75;color:var(--sub2,#6b7190);
+           margin-bottom:18px;padding:14px 18px;
            background:var(--surface,#0d0f18);
            border:1px solid var(--border,#1e2235);
            border-radius:9px;display:none"></div>
@@ -157,7 +157,7 @@ const _ATTACK_CONTEXT = {
         <span id="idd-if-subtitle" style="font-size:12px;color:var(--sub,#9499b7);
               font-family:var(--mono,'Space Mono',monospace)"></span>
       </div>
-      <div id="idd-if-features" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-bottom:18px"></div>
+      <div id="idd-if-features" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px"></div>
 
       <!-- RF model signal cards -->
       <div id="idd-rf-header" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;margin-top:6px">
@@ -169,7 +169,7 @@ const _ATTACK_CONTEXT = {
         <span id="idd-rf-subtitle" style="font-size:12px;color:var(--sub,#9499b7);
               font-family:var(--mono,'Space Mono',monospace)"></span>
       </div>
-      <div id="idd-rf-features" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;margin-bottom:18px"></div>
+      <div id="idd-rf-features" style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px"></div>
 
       <!-- ML evaluation bars -->
       <div style="font-size:12px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
@@ -193,10 +193,10 @@ const _ATTACK_CONTEXT = {
   tip.style.cssText = [
     'position:fixed','z-index:9999','pointer-events:none',
     'background:var(--card,#fff)','border:1px solid var(--border2,#e2e4ed)',
-    'border-radius:8px','padding:9px 13px','max-width:240px',
-    'font-size:13px','line-height:1.55','color:var(--sub2,#6b7190)',
+    'border-radius:12px','padding:16px 20px','max-width:340px',
+    'font-size:15px','line-height:1.7','color:var(--sub2,#6b7190)',
     'font-family:var(--mono,monospace)','display:none',
-    'box-shadow:0 6px 20px rgba(0,0,0,0.12)','white-space:pre-line',
+    'box-shadow:0 10px 36px rgba(0,0,0,0.18)','white-space:pre-line',
   ].join(';');
   document.body.appendChild(tip);
 
@@ -498,29 +498,26 @@ function _mkSignalCard(feat, val, isIF) {
   /* Alert: red border + red value. Normal: neutral gray border, neutral text. */
   const borderCol = isAlert ? 'var(--red,#ff3d5a)' : 'var(--border,#1e2235)';
   const valCol    = isAlert ? 'var(--red,#ff3d5a)' : 'var(--text,#e8eaf6)';
-  /* Alert: warning triangle. Normal: nothing — keep the card clean. */
-  const icon = isAlert
-    ? `<span style="font-size:17px;color:var(--red,#ff3d5a);flex-shrink:0;line-height:1"
-            title="Anomalous value">&#9651;</span>`
-    : '';
+  /* No triangle — red card is sufficient warning */
+  const icon = '';
   const tip = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
   return `
     <div class="idd-fc"
-         style="background:var(--surface,#f7f8fc);border-radius:9px;padding:13px 15px;
+         style="background:var(--surface,#f7f8fc);border-radius:12px;padding:18px 20px;
                 border:1px solid ${borderCol}"
          data-tip="${tip}"
          onmouseenter="_iddShowTip(event,this.dataset.tip)"
          onmouseleave="_iddHideTip()">
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:6px">
-        <div style="font-size:11px;color:var(--sub,#9499b7);
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:9px">
+        <div style="font-size:13px;color:var(--sub,#9499b7);
              font-family:var(--mono,'Space Mono',monospace);
-             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80%;
+             white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90%;
              padding-top:1px">${feat.label}</div>
         ${icon}
       </div>
-      <div style="font-family:var(--mono,'Space Mono',monospace);font-size:19px;font-weight:700;
-           color:${valCol};margin-bottom:8px">${feat.fmt(val)}</div>
-      <div style="height:3px;background:var(--border2,#e2e4ed);border-radius:2px;overflow:hidden">
+      <div style="font-family:var(--mono,'Space Mono',monospace);font-size:26px;font-weight:700;
+           color:${valCol};margin-bottom:11px">${feat.fmt(val)}</div>
+      <div style="height:4px;background:var(--border2,#e2e4ed);border-radius:2px;overflow:hidden">
         <div style="height:100%;width:${barPct}%;
              background:${isAlert ? 'var(--red,#ff3d5a)' : accentCol};
              transition:width .4s;border-radius:2px"></div>
@@ -750,10 +747,10 @@ function _renderHistoryPills(st) {
 
   hist.innerHTML = pills.map(([k, v, c]) => `
     <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);
-         border-radius:9px;padding:9px 14px;display:flex;flex-direction:column;gap:3px">
-      <div style="font-size:11px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);
+         border-radius:10px;padding:12px 17px;display:flex;flex-direction:column;gap:4px">
+      <div style="font-size:12px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);
            text-transform:uppercase;letter-spacing:.1em">${k}</div>
-      <div style="font-size:15px;font-weight:700;color:${c};
+      <div style="font-size:17px;font-weight:700;color:${c};
            font-family:var(--mono,'Space Mono',monospace)">${v}</div>
     </div>`).join('');
 }
