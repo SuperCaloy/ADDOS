@@ -183,6 +183,14 @@ const _ATTACK_CONTEXT = {
            margin-bottom:10px;margin-top:4px">Mitigation Pipeline</div>
       <div id="idd-pipeline" style="margin-bottom:14px"></div>
 
+      <!-- Algorithm Trace (Expert Mode only) -->
+      <div id="idd-expert-section" style="display:none;margin-top:20px;padding-top:20px;border-top:1px solid var(--border,#eef0f6)">
+        <div style="font-size:12px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
+             font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
+             margin-bottom:12px">Algorithm Trace</div>
+        <div id="idd-expert-content"></div>
+      </div>
+
     </div>`;
 
   document.body.appendChild(drawer);
@@ -418,6 +426,7 @@ function _renderIpDetail(d) {
   _renderMlBars(ml, th);
   _renderPipeline(d, ml, st, isAnomaly);
   _renderHistoryPills(st);
+  _renderExpertTrace(d, ml, st, f, th);
 
   _iddShow('content');
 }
@@ -812,4 +821,176 @@ function _fmtTs(ts) {
     const timePart = d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
     return `${datePart}, ${timePart}`;
   } catch { return '--'; }
+}
+
+// ── Expert Mode: Algorithm Trace ──────────────────────────────────────────────
+function _renderExpertTrace(d, ml, st, f, th) {
+  const expertSection = document.getElementById('idd-expert-section');
+  const expertContent = document.getElementById('idd-expert-content');
+  if (!expertSection || !expertContent) return;
+
+  if (!window.EXPERT_MODE) {
+    expertSection.style.display = 'none';
+    return;
+  }
+  expertSection.style.display = 'block';
+
+  const ifScore = ml.if_score || 0;
+  const isAnomaly = ml.is_anomaly;
+  const attackClass = ml.attack_class || 'Uncertain';
+  const rfConf = ml.confidence || 0;
+  const ifThr = th.if_threshold || 0.6092;
+  const rfGate = th.rf_conf_gate || 0.7;
+
+  // IF feature vector (all 16)
+  const ifFeatures = [
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4) },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString() },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s','') },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v) },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString() },
+    { key: 'tp_src', label: 'Src Port', fmt: v => v.toLocaleString() },
+    { key: 'tp_dst', label: 'Dst Port', fmt: v => v.toLocaleString() },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v) },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4) },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4) },
+    { key: 'port_entropy', label: 'Port Entropy', fmt: v => v.toFixed(3) },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2) },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4) },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4) },
+  ];
+
+  // RF feature vector (all 15)
+  const rfFeatures = [
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4) },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString() },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s','') },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v) },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString() },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v) },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4) },
+    { key: 'duration_pkt_ratio', label: 'Duration/Pkt Ratio', fmt: v => v.toFixed(4) },
+    { key: 'pkt_rate_per_duration', label: 'Pkt Rate/Duration', fmt: v => v.toFixed(4) },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4) },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2) },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4) },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4) },
+  ];
+
+  // Flat feature lookup
+  const vals = {
+    flow_duration_sec: f.duration_sec || 0,
+    packet_count: f.pkt_count || 0,
+    byte_count: f.byte_count || 0,
+    packet_count_per_second: f.pps || 0,
+    byte_count_per_second: f.byte_rate || 0,
+    flow_count_per_src: f.flow_count_per_src || 1,
+    tp_src: f.tp_src || 0,
+    tp_dst: f.tp_dst || 0,
+    ip_proto: f.ip_proto || 0,
+    pkt_byte_rate_ratio: f.pkt_byte_rate_ratio || 0,
+    avg_bytes_per_pkt: f.pkt_count > 0 ? (f.byte_count || 0) / (f.pkt_count || 1) : 0,
+    flow_intensity: f.flow_intensity || 0,
+    port_entropy: f.port_entropy || 0,
+    bytes_per_duration: f.bytes_per_duration || 0,
+    pkt_size_uniformity: f.pkt_size_uniformity || 0,
+    flow_src_intensity: f.flow_src_intensity || 0,
+    duration_pkt_ratio: (f.duration_sec || 0) > 0 ? (f.duration_sec || 0) / Math.max(f.pkt_count || 1, 1) : 0,
+    pkt_rate_per_duration: (f.pps || 0) / Math.max(f.duration_sec || 1, 1),
+  };
+
+  // IF feature cards
+  let ifHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
+  ifFeatures.forEach(feat => {
+    const val = vals[feat.key];
+    const fmtVal = feat.fmt(val);
+    ifHtml += `
+      <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);border-radius:8px;padding:12px 14px;">
+        <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${feat.label}</div>
+        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e)">${fmtVal}</div>
+      </div>`;
+  });
+  ifHtml += '</div>';
+
+  // RF feature cards
+  let rfHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
+  rfFeatures.forEach(feat => {
+    const val = vals[feat.key];
+    const fmtVal = feat.fmt(val);
+    rfHtml += `
+      <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);border-radius:8px;padding:12px 14px;">
+        <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${feat.label}</div>
+        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e)">${fmtVal}</div>
+      </div>`;
+  });
+  rfHtml += '</div>';
+
+  // TEA per-IP profile
+  let teaHtml = '';
+  if (d.tea_ip_profile) {
+    const tip = d.tea_ip_profile;
+    teaHtml = `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:11px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">TEA Per-IP Profile</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Verdict</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:${tip.verdict === 'attack' ? 'var(--red)' : tip.verdict === 'normal' ? 'var(--green)' : 'var(--amber)'}">${tip.verdict.toUpperCase()}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Samples</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${tip.samples || 0}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">PPS Trend</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${(tip.pps_trend || 0).toFixed(2)}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Entropy</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${(tip.entropy || 0).toFixed(3)}</div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // Decision trace
+  let decisionHtml = '';
+  const reasons = [];
+  if (isAnomaly) reasons.push(`IF anomaly score ${ifScore.toFixed(4)} ≥ threshold ${ifThr.toFixed(4)}`);
+  else reasons.push(`IF score ${ifScore.toFixed(4)} < threshold ${ifThr.toFixed(4)} → Normal`);
+  if (isAnomaly) {
+    if (rfConf >= rfGate * 100) reasons.push(`RF confidence ${rfConf.toFixed(1)}% ≥ gate ${(rfGate*100).toFixed(0)}% → ${attackClass}`);
+    else reasons.push(`RF confidence ${rfConf.toFixed(1)}% < gate ${(rfGate*100).toFixed(0)}% → Uncertain`);
+  }
+  if (st.phase >= 2) reasons.push(`State machine: Phase ${st.phase} (${st.action_taken}) active`);
+  if (f.is_flood_prefilter_flagged) reasons.push(`Flood prefilter: FLAGGED (overrode IF)`);
+
+  decisionHtml = `
+    <div style="margin-top:16px;">
+      <div style="font-size:11px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">Decision Trace</div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        ${reasons.map(r => `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;font-family:var(--mono);color:var(--text)">${r}</div>`).join('')}
+      </div>
+    </div>`;
+
+  expertContent.innerHTML = `
+    <div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(61,108,255,.1);color:var(--blue);border:1px solid rgba(61,108,255,.25);font-family:var(--mono)">IF Features (16)</span>
+      </div>
+      ${ifHtml}
+    </div>
+    <div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(255,176,46,.1);color:var(--amber);border:1px solid rgba(255,176,46,.25);font-family:var(--mono)">RF Features (15)</span>
+      </div>
+      ${rfHtml}
+    </div>
+    ${teaHtml}
+    ${decisionHtml}
+  `;
 }

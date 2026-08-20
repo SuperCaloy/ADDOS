@@ -14,6 +14,21 @@ from backend.pipeline.flood_prefilter import flood_filter
 
 log = logging.getLogger(__name__)
 
+# Lazy import for expert events
+def _push_expert_worker_event(payload: dict) -> None:
+    try:
+        from backend.api.events import push_expert_event as _push
+        _push(payload)
+    except Exception:
+        pass
+
+def _record_worker_latency(latency_ms: float) -> None:
+    try:
+        from backend.api.expert import _record_worker_latency as _record
+        _record(latency_ms)
+    except Exception:
+        pass
+
 _queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=WORKER_QUEUE_MAXSIZE)
 _result_callback = None
 
@@ -65,7 +80,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     # --- Skip invalid/whitelisted IPs ---
     if not src_ip or src_ip in ("0.0.0.0", ""):
         return
-    _WHITELIST = {"10.0.0.20","10.0.0.21"}
+    _WHITELIST = {"10.0.0.20", "10.0.0.21"}
     if src_ip in _WHITELIST:
         return
 
@@ -94,17 +109,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     # Falls back to pps < 0.05 floor when TEA has not learned yet.
     if not is_flagged:
         try:
-            from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
-            _dpid = int((switch_stats or {}).get("dpid", 0))
-            # Get learned baseline pps mean from TEA — 0 if not learned yet
-            _tea_pps_mean = 0.0
-            if _dpid:
-                with _tea._lock:
-                    _sw_state = _tea._states.get(_dpid)
-                    if _sw_state and _sw_state.pkt_base.is_learned:
-                        _tea_pps_mean = _sw_state.pkt_base.mean
-            # Dynamic threshold: 10% of learned baseline, floor at 0.05
-            _dynamic_min = max(0.05, _tea_pps_mean * 0.1)
+            _dynamic_min = 0.05
         except Exception:
             _dynamic_min = 0.05
         if pps < _dynamic_min:
@@ -182,13 +187,16 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         _prior_class = cached.attack_class
         _prior_conf  = cached.confidence
 
+    # --- Run inference (IF + optional RF) ---
     try:
         # --- Run Isolation Forest ---
+        _inf_start = time.monotonic()
         if_vec = if_pipeline.extract_if_features(flow_stats)
         # None = near-zero duration flow — skip scoring, treat as normal
         if if_vec is None:
             return
         if_score, is_anomaly = if_pipeline.run_if_inference(if_vec)
+        _record_worker_latency((time.monotonic() - _inf_start) * 1000)
 
         # Threshold: use model contract value
         _effective_threshold = loader.if_threshold
@@ -197,12 +205,10 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         # --- TEA feedback — teach entropy analyzer confirmed normal vs attack ---
         try:
             from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
-            _dpid = int((switch_stats or {}).get("dpid", 0))
-            if _dpid:
-                if is_anomaly:
-                    _tea.confirm_attack(_dpid)
-                else:
-                    _tea.confirm_normal(_dpid)
+            if is_anomaly:
+                _tea.confirm_attack()
+            else:
+                _tea.confirm_normal()
         except Exception:
             pass
 
@@ -260,6 +266,18 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         else:
             tracker.invalidate_cache(src_ip)
 
+        # --- Expert event: live IF/RF result ---
+        _push_expert_worker_event({
+            "inference": {
+                "src_ip": src_ip,
+                "if_score": round(if_score, 4),
+                "is_anomaly": is_anomaly,
+                "attack_class": attack_class if is_anomaly else "Normal",
+                "confidence": round(confidence, 3),
+                "threshold": round(_effective_threshold, 4),
+            }
+        })
+
         # --- Fire result callback ---
         if _result_callback:
             try:
@@ -312,4 +330,3 @@ def start(num_workers: int = None) -> None:
     for i in range(num_workers):
         t = threading.Thread(target=_worker_loop, name=f"pipeline-worker-{i}", daemon=True)
         t.start()
-    log.info("Pipeline worker started (%d threads, queue maxsize=%d)", num_workers, WORKER_QUEUE_MAXSIZE)

@@ -68,7 +68,15 @@ function addLogRow(ev) {
 /* Connect SSE stream — auto-reconnects on error after 3s */
 function connectSSE() {
   const es     = new EventSource(`${API}/api/events`);
-  es.onmessage = e => { try { addLogRow(JSON.parse(e.data)); } catch (_) {} };
+  es.onmessage = e => { 
+    try { 
+      const parsed = JSON.parse(e.data);
+      if (parsed.type === 'expert') return; // Handled by expert.js
+      
+      const ev = parsed.payload || parsed;
+      if (ev.src_ip) addLogRow(ev); 
+    } catch (_) {} 
+  };
   es.onerror   = ()  => { es.close(); setTimeout(connectSSE, 3000); };
 }
 

@@ -82,6 +82,7 @@ def create_app() -> Flask:
     from backend.api.events    import bp as events_bp
     from backend.api.mitigation import bp as quarantine_bp
     from backend.api.report    import bp as report_bp
+    from backend.api.expert    import bp as expert_bp
 
     app.register_blueprint(stats_bp)
     app.register_blueprint(ip_detail_bp)
@@ -89,6 +90,7 @@ def create_app() -> Flask:
     app.register_blueprint(events_bp)
     app.register_blueprint(quarantine_bp)
     app.register_blueprint(report_bp)
+    app.register_blueprint(expert_bp)
 
     log.info("All API blueprints registered")
     return app

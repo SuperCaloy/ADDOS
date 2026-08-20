@@ -53,6 +53,8 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
 
 /* Append one data point, shift oldest when buffer is full */
 function pushChartPoint(label, di, db, df) {
+  if (range !== 'Live') return; // Pause live trace while viewing history
+
   const d = window._chart.data;
   d.labels.push(label);
   d.datasets[0].data.push(di);
@@ -79,11 +81,37 @@ async function fetchHistory(r) {
 }
 
 /* Range tab clicks — switch between Live and historical views */
+let _historyTimer = null;
+
 document.getElementById('rtabs').addEventListener('click', e => {
   const btn = e.target.closest('.rt');
   if (!btn) return;
   document.querySelectorAll('.rt').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   range = btn.dataset.r;
-  if (range !== 'Live') fetchHistory(range);
+  
+  if (_historyTimer) {
+    clearInterval(_historyTimer);
+    _historyTimer = null;
+  }
+  
+  if (range !== 'Live') {
+    fetchHistory(range);
+    
+    // Smart Polling Engine: Dynamic intervals based on SOC best practices
+    let intervalMs = 10000; // fallback
+    if (range === '1h') intervalMs = 30000;        // 30 seconds
+    else if (range === '24h') intervalMs = 300000; // 5 minutes
+    else if (range === '7d') intervalMs = 1800000; // 30 minutes
+    
+    _historyTimer = setInterval(() => {
+      if (range !== 'Live') fetchHistory(range);
+    }, intervalMs);
+  } else {
+    // Switching back to Live - clear history data to avoid mixed scaling
+    const d = window._chart.data;
+    d.labels = [];
+    d.datasets.forEach(ds => ds.data = []);
+    window._chart.update();
+  }
 });

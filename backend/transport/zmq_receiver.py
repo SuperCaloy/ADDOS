@@ -170,6 +170,9 @@ def _parse_and_route(raw: bytes) -> None:
                 "src_ip":                 src_ip,
                 "packet_count_per_second": pps,
                 "byte_count_per_second":  float(flow_stats.get("byte_count_per_second", 0.0)),
+                "packet_count":           float(flow_stats.get("packet_count", 0.0)),
+                "byte_count":             float(flow_stats.get("byte_count", 0.0)),
+                "ip_proto":               int(flow_stats.get("ip_proto", 0)),
             })
 
         # Update raw total for UI
@@ -219,8 +222,8 @@ def _parse_and_route(raw: bytes) -> None:
         flow_stats["tea_flash_crowd"]    = tea_result["is_flash_crowd"]
         flow_stats["tea_confidence"]     = tea_result["confidence"]
         flow_stats["tea_is_learned"]     = tea_result["is_learned"]
-        flow_stats["tea_div_entropy"]    = tea_result["diversity_entropy"]
-        flow_stats["tea_pkt_entropy"]    = tea_result["packetrate_entropy"]
+        flow_stats["tea_size_var"]       = tea_result["size_var"]
+        flow_stats["tea_intensity_var"]  = tea_result["intensity_var"]
 
         # Pass dpid so decision_engine can feed IF result back to TEA
         switch_stats["dpid"] = dpid
