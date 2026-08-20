@@ -2,6 +2,7 @@ import math
 from flask import Blueprint, jsonify
 from backend.pipeline.flow_tracker import tracker
 from backend.mitigation.state_machine import state_machine
+from backend.pipeline.entropy_analyzer import entropy_analyzer
 from backend.database.db import query
 from backend.models import loader
 from backend.mitigation import behavioral
@@ -51,6 +52,23 @@ def _build_live_features(src_ip: str) -> dict | None:
     priority = state.priority     if state else "—"
     action   = state.action_taken if state else "—"
 
+    # TEA per-IP profile
+    tea_verdict = "uncertain"
+    tea_samples = 0
+    tea_pps_trend = 0.0
+    tea_entropy = 0.0
+    try:
+        tea_verdict = entropy_analyzer.get_ip_verdict(src_ip)
+        with entropy_analyzer._lock:
+            profile = entropy_analyzer._ip_profiles.get(src_ip)
+            if profile:
+                tea_samples = len(profile._samples)
+                if len(profile._samples) >= 2:
+                    tea_pps_trend = profile._samples[-1][0] - profile._samples[0][0]
+                tea_entropy = profile._entropy or 0.0
+    except Exception:
+        pass
+
     return {
         "src_ip":   src_ip,
         "is_live":  True,
@@ -85,6 +103,12 @@ def _build_live_features(src_ip: str) -> dict | None:
             "rf_conf_gate": loader.rf_conf_gate,
         },
         "phase_history": [],
+        "tea_ip_profile": {
+            "verdict": tea_verdict,
+            "samples": tea_samples,
+            "pps_trend": tea_pps_trend,
+            "entropy": tea_entropy,
+        },
     }
 
 

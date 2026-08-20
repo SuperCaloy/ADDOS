@@ -4,3 +4,6 @@
 /**/*.pyc
 **/__pycache__/
 logs/
+notes/
+.agents/
+AGENT.md

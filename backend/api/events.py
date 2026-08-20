@@ -1,10 +1,34 @@
 import time
 import json
+import threading
+from collections import deque
 from flask import Blueprint, Response, jsonify, request
 from backend.pipeline.decision_engine import drain_sse_events
 from backend.database.db import query
 
 bp = Blueprint("events", __name__)
+
+# Expert SSE events buffer
+_expert_lock = threading.Lock()
+_expert_buffer: deque = deque(maxlen=200)
+
+
+def push_expert_event(payload: dict) -> None:
+    """Called by entropy_analyzer.update() and worker._process_item() to push live TEA/IF/RF data."""
+    entry = {
+        "type": "expert",
+        "ts": time.strftime("%H:%M:%S"),
+        "payload": payload,
+    }
+    with _expert_lock:
+        _expert_buffer.append(entry)
+
+
+def drain_expert_events() -> list[dict]:
+    with _expert_lock:
+        events = list(_expert_buffer)
+        _expert_buffer.clear()
+    return events
 
 
 @bp.get("/api/events")
@@ -13,6 +37,9 @@ def events():
         while True:
             new_events = drain_sse_events()
             for event in new_events:
+                yield f"data: {json.dumps(event)}\n\n"
+            expert_events = drain_expert_events()
+            for event in expert_events:
                 yield f"data: {json.dumps(event)}\n\n"
             time.sleep(0.5)
 
