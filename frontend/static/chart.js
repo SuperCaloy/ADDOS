@@ -45,8 +45,8 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
       },
     },
     scales: {
-      x: { ticks: { color: '#5c6080', font: { family: 'Space Mono', size: 9 }, maxRotation: 0 }, grid: { color: '#1e2235' } },
-      y: { ticks: { color: '#5c6080', font: { family: 'Space Mono', size: 9 } }, grid: { color: '#1e2235' }, beginAtZero: true },
+      x: { ticks: { color: '#5c6080', font: { family: 'Space Mono', size: 11 }, maxRotation: 0 }, grid: { color: '#1e2235' } },
+      y: { ticks: { color: '#5c6080', font: { family: 'Space Mono', size: 11 } }, grid: { color: '#1e2235' }, beginAtZero: true },
     },
   },
 });
