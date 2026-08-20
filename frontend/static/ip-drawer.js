@@ -64,6 +64,9 @@ const _ATTACK_CONTEXT = {
 
   const drawer = document.createElement('div');
   drawer.id = 'ip-drawer';
+  drawer.setAttribute('role', 'dialog');
+  drawer.setAttribute('aria-modal', 'true');
+  drawer.setAttribute('aria-label', 'IP Threat Analysis');
   drawer.setAttribute('aria-hidden', 'true');
   drawer.style.cssText = [
     'position:fixed','top:50%','left:50%',
@@ -78,6 +81,22 @@ const _ATTACK_CONTEXT = {
     'border-radius:16px',
     'box-shadow:0 24px 80px rgba(0,0,0,0.18)',
   ].join(';');
+
+  /* ── Focus trap ───────────────────────────────────────────────────────── */
+  drawer.addEventListener('keydown', function _trapFocus(e) {
+    if (e.key !== 'Tab') return;
+    const focusable = [...drawer.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )].filter(el => !el.closest('[aria-hidden="true"]'));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last  = focusable[focusable.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+    } else {
+      if (document.activeElement === last)  { e.preventDefault(); first.focus(); }
+    }
+  });
 
   drawer.innerHTML = `
     <!-- Header -->
@@ -226,13 +245,15 @@ const _ATTACK_CONTEXT = {
 })();
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let _drawerCurrentIp = null;
-let _drawerLiveTimer = null;
-let _drawerIsLive    = false;
+let _drawerCurrentIp  = null;
+let _drawerLiveTimer  = null;
+let _drawerIsLive     = false;
+let _drawerReturnFocus = null; /* element to restore focus to on close */
 
 // ── Public API ────────────────────────────────────────────────────────────────
 function openIpDrawer(ip) {
   if (!ip || ip === '--') return;
+  _drawerReturnFocus = document.activeElement; /* remember for restore on close */
   _drawerCurrentIp = ip;
   document.getElementById('idd-ip').textContent = ip;
   document.getElementById('idd-status-badge').innerHTML = '';
@@ -246,12 +267,20 @@ function openIpDrawer(ip) {
   drawer.style.transform     = 'translate(-50%,-50%) scale(1)';
   drawer.setAttribute('aria-hidden', 'false');
 
+  /* Move keyboard focus into the drawer */
+  requestAnimationFrame(() => {
+    const closeBtn = document.getElementById('idd-close-btn');
+    if (closeBtn) closeBtn.focus();
+  });
+
   _fetchIpDetail(ip);
 }
 
 function closeIpDrawer() {
   _stopLivePolling();
-  _drawerCurrentIp = null;
+  const returnTo = _drawerReturnFocus;
+  _drawerCurrentIp    = null;
+  _drawerReturnFocus  = null;
   const overlay = document.getElementById('ip-drawer-overlay');
   const drawer  = document.getElementById('ip-drawer');
   if (overlay) overlay.style.display = 'none';
@@ -263,6 +292,8 @@ function closeIpDrawer() {
   }
   const tip = document.getElementById('idd-tooltip');
   if (tip) tip.style.display = 'none';
+  /* Restore focus to the element that triggered the drawer */
+  if (returnTo && typeof returnTo.focus === 'function') returnTo.focus();
 }
 
 document.addEventListener('keydown', e => {
@@ -509,14 +540,20 @@ function _mkSignalCard(feat, val, isIF) {
   const valCol    = isAlert ? 'var(--red,#ff3d5a)' : 'var(--text,#e8eaf6)';
   /* No triangle — red card is sufficient warning */
   const icon = '';
-  const tip = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
+  const tipText = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
+  const tip     = tipText.replace(/"/g, '&quot;');
   return `
     <div class="idd-fc"
          style="background:var(--surface,#f7f8fc);border-radius:12px;padding:18px 20px;
                 border:1px solid ${borderCol}"
          data-tip="${tip}"
+         tabindex="0"
+         role="button"
+         aria-label="${feat.label} — press for details"
          onmouseenter="_iddShowTip(event,this.dataset.tip)"
-         onmouseleave="_iddHideTip()">
+         onmouseleave="_iddHideTip()"
+         onfocus="_iddShowTipEl(this)"
+         onblur="_iddHideTip()">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:9px">
         <div style="font-size:13px;color:var(--sub,#9499b7);
              font-family:var(--mono,'Space Mono',monospace);
@@ -773,6 +810,21 @@ function _iddShowTip(e, text) {
   tip.textContent = text;
   tip.style.display = 'block';
   _iddMoveTip(e);
+}
+
+/* Show tooltip anchored to an element — used for keyboard focus (no mouseevent) */
+function _iddShowTipEl(el) {
+  const text = el.dataset.tip;
+  if (!text) return;
+  const tip = document.getElementById('idd-tooltip');
+  if (!tip) return;
+  tip.textContent = text;
+  tip.style.display = 'block';
+  const rect = el.getBoundingClientRect();
+  const tw   = tip.offsetWidth || 240;
+  const x    = rect.left + rect.width / 2 - tw / 2;
+  tip.style.left = Math.max(4, Math.min(x, window.innerWidth - tw - 8)) + 'px';
+  tip.style.top  = Math.max(4, rect.bottom + 6) + 'px';
 }
 
 function _iddMoveTip(e) {

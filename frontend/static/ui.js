@@ -38,6 +38,8 @@ function renderPriority(v) {
 function showToast(msg, isErr = false) {
   const el     = document.createElement('div');
   el.className = 'toast';
+  el.setAttribute('role', isErr ? 'alert' : 'status');
+  el.setAttribute('aria-live', isErr ? 'assertive' : 'polite');
   if (isErr) el.style.borderColor = 'rgba(255,61,90,.4)';
   el.textContent = msg;
   document.getElementById('toaster').appendChild(el);
@@ -51,7 +53,7 @@ let isLight = false;
 function toggleTheme() {
   isLight = !isLight;
   document.body.classList.toggle('light', isLight);
-  document.getElementById('theme-btn').textContent = isLight ? '☾ Dark Mode' : '☀ Light Mode';
+  document.getElementById('theme-btn').textContent = isLight ? 'Dark Mode' : 'Light Mode';
 
   /* Update chart colors to match theme */
   const gridColor   = isLight ? '#d8dce8' : '#1e2235';
@@ -148,7 +150,7 @@ function _renderCal(which) {
   const daysIn = new Date(s.year, s.month + 1, 0).getDate();
 
   let html = '';
-  for (let i = 0; i < first; i++) html += `<div class="cal-day cal-empty"></div>`;
+  for (let i = 0; i < first; i++) html += `<div class="cal-day cal-empty" aria-hidden="true"></div>`;
 
   for (let d = 1; d <= daysIn; d++) {
     const ds      = _isoDate(new Date(s.year, s.month, d));
@@ -163,8 +165,11 @@ function _renderCal(which) {
     if (isSel)    cls += ' cal-selected';
     if (isToday)  cls += ' cal-today';
 
-    const click = isFut ? '' : `onclick="calSelect('${which}','${ds}')"`;
-    html += `<div class="${cls}" ${click}>${d}</div>`;
+    if (isFut) {
+      html += `<button type="button" class="${cls}" disabled aria-label="${ds} (unavailable)">${d}</button>`;
+    } else {
+      html += `<button type="button" class="${cls}" onclick="calSelect('${which}','${ds}')" aria-label="${ds}${isSel ? ' (selected)' : ''}${hasData ? ', has data' : ''}">${d}</button>`;
+    }
   }
   grid.innerHTML = html;
 }

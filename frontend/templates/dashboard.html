@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>A-DDoS</title>
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/style.css?v=7"/>
+<link rel="stylesheet" href="/static/style.css?v=8"/>
 <script src="/static/chart.umd.min.js"></script>
 <style>
 /* ── Modal sizing ── */
@@ -15,7 +15,7 @@
 .date-field{display:flex;flex-direction:column;gap:6px;flex:1}
 .date-field label{font-size:11px;color:var(--sub,#5c6080);letter-spacing:.05em;font-family:var(--mono,'Space Mono',monospace)}
 .date-input-row{display:flex;gap:6px;align-items:center}
-.date-text-input{flex:1;background:var(--card,#13162a);border:1px solid var(--border,#1e2235);border-radius:8px;padding:8px 12px;color:var(--fg,#e8eaf6);font-family:var(--mono,'Space Mono',monospace);font-size:13px;outline:none}
+.date-text-input{flex:1;background:var(--card,#13162a);border:1px solid var(--border,#1e2235);border-radius:8px;padding:8px 12px;color:var(--fg,#e8eaf6);font-family:var(--mono,'Space Mono',monospace);font-size:13px}
 .date-text-input:focus{border-color:var(--blue,#3d6cff)}
 .cal-toggle-btn{background:var(--card,#13162a);border:1px solid var(--border,#1e2235);border-radius:8px;padding:8px 10px;cursor:pointer;color:var(--sub,#5c6080);font-size:16px;transition:color .15s,border-color .15s}
 .cal-toggle-btn:hover{color:var(--blue,#3d6cff);border-color:var(--blue,#3d6cff)}
@@ -31,7 +31,7 @@
 .cal-nav{background:none;border:none;color:var(--sub,#5c6080);font-size:22px;cursor:pointer;padding:0 6px;line-height:1;border-radius:6px}
 .cal-nav:hover{color:var(--fg,#e8eaf6);background:var(--border,#1e2235)}
 .cal-weekdays{display:grid;grid-template-columns:repeat(7,1fr);margin-bottom:4px}
-.cal-weekdays span{text-align:center;font-size:10px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace);padding:3px 0}
+.cal-weekdays span{text-align:center;font-size:11px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace);padding:3px 0}
 .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
 .cal-day{text-align:center;font-size:12px;font-family:var(--mono,'Space Mono',monospace);
   padding:7px 2px;border-radius:7px;cursor:pointer;color:var(--fg,#e8eaf6);position:relative;transition:background .1s}
@@ -48,6 +48,8 @@
 .cal-legend-dot{width:6px;height:6px;border-radius:50%;background:var(--green,#00d68f);flex-shrink:0}
 .t-ban{background:rgba(255,140,0,.15);color:#ffb300;border:1px solid rgba(255,140,0,.3)}
 .t-blackhole{background:rgba(180,0,0,.2);color:#ff4444;border:1px solid rgba(180,0,0,.4)}
+/* reset <button> used for cal-day so it inherits the cal-day style */
+button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono,'Space Mono',monospace);padding:7px 2px;border-radius:7px;cursor:pointer;color:var(--fg,#e8eaf6);position:relative;transition:background .1s;display:block;width:100%;box-sizing:border-box}
 </style>
 </head>
 <body>
@@ -60,8 +62,12 @@
       <div class="logo-sub">Threat Detection & Mitigation System</div>
     </div>
     <div class="header-right">
-      <button class="expert-btn" id="expert-btn" onclick="toggleExpertMode()" aria-pressed="false" title="Expert Mode: live algorithmic internals">☰ Expert</button>
-      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()">☀ Light Mode</button>
+      <div class="status-pill" id="status-pill" style="display:none" aria-live="polite" aria-label="System status">
+        <div class="dot" id="status-dot"></div>
+        <span id="status-text">System Online</span>
+      </div>
+      <button class="expert-btn" id="expert-btn" onclick="toggleExpertMode()" aria-pressed="false" title="Expert Mode: live algorithmic internals">Expert Mode</button>
+      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()">Light Mode</button>
       <button class="btn" onclick="openModal()">Generate Report</button>
     </div>
   </header>
@@ -319,13 +325,13 @@
   window.EXPERT_MODE  = false;
 </script>
 <!-- Load order matters: api → ui → chart → stats → quarantine → log → main -->
-<script src="/static/api.js?v=7"></script>
-<script src="/static/ui.js?v=7"></script>
-<script src="/static/chart.js?v=7"></script>
+<script src="/static/api.js?v=8"></script>
+<script src="/static/ui.js?v=8"></script>
+<script src="/static/chart.js?v=8"></script>
 <script src="/static/stats.js?v=7"></script>
 <script src="/static/mitigation.js?v=7"></script>
 <script src="/static/log.js?v=7"></script>
-<script src="/static/main.js?v=7"></script>
+<script src="/static/main.js?v=8"></script>
 <script>
   /* Poll system metrics every 5s, model accuracy every 30s */
   fetchSystemMetrics();
@@ -333,7 +339,7 @@
   setInterval(fetchSystemMetrics, 1000);
   setInterval(pollModelInfo, 1000);
 </script>
-<script src="/static/ip-drawer.js?v=7"></script>
+<script src="/static/ip-drawer.js?v=8"></script>
 <script src="/static/expert.js?v=11"></script>
 </body>
 </html>
