@@ -7,8 +7,8 @@ fetchRecentEvents();
 connectSSE();
 
 /* ── Polling intervals ─────────────────────────────────────────────────────── */
-setInterval(fetchStats,      POLL_MS);   /* stats cards + chart — every 5s */
-setInterval(fetchQuarantine, POLL_MS);   /* watchlist table    — every 5s */
+setInterval(fetchStats,      POLL_MS);   /* stats cards + chart — every 2s */
+setInterval(fetchQuarantine, POLL_MS);   /* watchlist table    — every 2s */
 
 /* ── Row-click delegation ──────────────────────────────────────────────────── */
 /* Single listener per tbody — survives innerHTML updates, skips button clicks */

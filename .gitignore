@@ -9,4 +9,11 @@ notes/
 AGENTS.md
 visualization.html
 test/
+test-results/
 docs/
+node_modules/
+package-lock.json
+scratch/
+.superpowers/
+opencode.json
+skills-lock.json

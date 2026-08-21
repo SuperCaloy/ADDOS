@@ -222,24 +222,27 @@ class StateMachine:
 
     def update_observation(self, src_ip: str, if_score: float, attack_class: str,
                            confidence: float, recent_pps: float) -> None:
-        # Refresh live telemetry for a quarantined IP without going through
+        # Refresh live telemetry for a tracked IP without going through
         # the full mitigation-decision path in on_detection. Called on every
         # IF/RF result regardless of the TEA gate, so a Phase 1 entry never
         # freezes just because a given tick got flagged flash crowd.
+        # Phase 4 (probation) also gets live updates so tick() can decide
+        # whether to re-ban or release based on current evidence.
         with self._lock:
             state = self._states.get(src_ip)
-            if state is None or state.phase != 1:
+            if state is None or state.phase not in (1, 2, 3, 4):
                 return
             state.if_score   = if_score
             state.recent_pps = recent_pps
-            # Best evidence wins — only overwrite vector/confidence on a
-            # stronger read, same rule on_detection already uses.
-            if confidence > state.confidence:
-                state.attack_vector = attack_class
-                state.confidence    = confidence
-            else:
-                state.confidence = confidence
-            self._persist(state)
+            if state.phase == 1:
+                # Best evidence wins — only overwrite vector/confidence on a
+                # stronger read, same rule on_detection already uses.
+                if confidence > state.confidence:
+                    state.attack_vector = attack_class
+                    state.confidence    = confidence
+                else:
+                    state.confidence = confidence
+                self._persist(state)
 
     def on_detection(self, src_ip: str, if_score: float,
                      attack_class: str, confidence: float) -> str:
@@ -401,7 +404,24 @@ class StateMachine:
                         self._clear(src_ip, reason="Blackhole TTL Expired")
 
                 elif state.phase == 4 and elapsed >= PROBATION_DURATION:
-                    self._clear(src_ip, reason="Probation Complete")
+                    # Safety net: if IP is still flooding during probation,
+                    # re-ban instead of releasing. Uses a lower threshold
+                    # (80% of normal) so a sustained flood is never released
+                    # mid-attack just because its frozen if_score sits slightly
+                    # below the decision boundary.
+                    from backend.models import loader
+                    _thr = loader.if_threshold if loader._loaded else 0.6004
+                    _recent_pps = getattr(state, "recent_pps", None)
+                    _pps_elevated = (_recent_pps is not None) and (_recent_pps > 1.0)
+                    _score_near = state.if_score >= (_thr * 0.8)
+
+                    if _pps_elevated and _score_near:
+                        log.info("Probation re-offence: %s still flooding "
+                                 "(pps=%.1f, IF=%.4f) — re-banning",
+                                 src_ip, _recent_pps, state.if_score)
+                        self._advance_to_ban(state)
+                    else:
+                        self._clear(src_ip, reason="Probation Complete")
 
         # Also tick the deception module observation windows
         if self._deception:

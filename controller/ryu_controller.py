@@ -239,12 +239,37 @@ class FatTreeController(app_manager.RyuApp):
         if _rate_count <= self._PKT_IN_RATE_LIMIT:
             return False
 
-        # Over limit — drop banned IPs silently, flood the rest
+        # Over limit — drop banned IPs silently, install forward rule for the rest.
+        # Installing a forward rule (instead of flooding) keeps flow_stats flowing
+        # so ML can score/re-score. Flooding bypasses the flow table and starves
+        # telemetry, creating a feedback loop where IPs become invisible to ML.
         self._pkt_in_count[dpid] += 1
         try:
-            _raw_ip = packet.Packet(msg.data).get_protocol(ipv4.ipv4)
-            if _raw_ip and _raw_ip.src in self._banned_ips:
-                return True
+            _raw_pkt = packet.Packet(msg.data)
+            _raw_eth = _raw_pkt.get_protocol(ethernet.ethernet)
+            _raw_ip  = _raw_pkt.get_protocol(ipv4.ipv4)
+            if _raw_ip:
+                if _raw_ip.src in self._banned_ips:
+                    return True
+                # Non-banned IP under throttle: install forward rule so flow_stats
+                # keep flowing and ML can score/re-score.
+                if _raw_eth:
+                    self._mac_to_port[dpid][_raw_eth.src] = in_port
+                    out_port = self._mac_to_port[dpid].get(_raw_eth.dst, ofp.OFPP_FLOOD)
+                    if out_port != ofp.OFPP_FLOOD:
+                        match   = parser.OFPMatch(eth_type=0x0800, ipv4_src=_raw_ip.src)
+                        actions = [parser.OFPActionOutput(out_port)]
+                        inst    = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+                        buf_id  = msg.buffer_id if msg.buffer_id != ofp.OFP_NO_BUFFER else ofp.OFP_NO_BUFFER
+                        dp.send_msg(parser.OFPFlowMod(
+                            datapath=dp, priority=10,
+                            idle_timeout=60, hard_timeout=0,
+                            buffer_id=buf_id, match=match, instructions=inst,
+                        ))
+                        if msg.buffer_id != ofp.OFP_NO_BUFFER:
+                            return True
+                        self._send_packet_out(dp, ofp, parser, msg, in_port, actions)
+                        return True
         except Exception:
             pass
 
@@ -528,7 +553,7 @@ class FatTreeController(app_manager.RyuApp):
             return
 
         # Update banned IP set for the throttled fast-path check
-        if action in ("block", "rate_limit", "quarantine"):
+        if action in ("block", "rate_limit", "quarantine", "redirect"):
             self._banned_ips.add(src_ip)
         elif action == "clear":
             self._on_clear(src_ip)
@@ -545,6 +570,9 @@ class FatTreeController(app_manager.RyuApp):
                 self._install_drop_rule(dp, ofp, parser, match, action, ttl)
             elif action == "proto_block":
                 self._apply_proto_block(dp, ofp, parser, cmd, dpid)
+            elif action == "redirect":
+                redirect_to = cmd.get("redirect_to", "10.0.0.21")
+                self._install_redirect_rule(dp, ofp, parser, match, redirect_to)
             elif action == "clear":
                 self._install_clear_rules(dp, ofp, parser, match)
 
@@ -587,11 +615,11 @@ class FatTreeController(app_manager.RyuApp):
             self._cooldown_intervals[dpid_key] = self._COOLDOWN_INTERVALS
 
     def _resolve_target_switches(self, src_ip: str, action: str = "") -> list:
-        # Block/rate_limit/quarantine — install on ALL switches.
+        # Block/rate_limit/quarantine/redirect — install on ALL switches.
         # Attacker can enter from any edge switch; scoping to one switch
         # leaves other switches unprotected.
         # Clear — scoped to last-seen switch only to avoid unnecessary rule deletion.
-        if action in ("block", "rate_limit", "quarantine"):
+        if action in ("block", "rate_limit", "quarantine", "redirect"):
             return list(self._datapaths.items())
 
         # Clear / fallback — scoped to last-seen switch if known
@@ -640,6 +668,7 @@ class FatTreeController(app_manager.RyuApp):
 
         for cmd_type, pri in [
             (ofp.OFPFC_DELETE_STRICT, 10),       # delete stale forward rule
+            (ofp.OFPFC_DELETE_STRICT, 85),       # delete stale redirect rule
             (ofp.OFPFC_DELETE_STRICT, 1),        # delete table-miss override
             (ofp.OFPFC_DELETE_STRICT, drop_pri), # delete stale rule at same priority
         ]:
@@ -707,7 +736,7 @@ class FatTreeController(app_manager.RyuApp):
         # This forces ML to re-evaluate the IP — critical for probation scoring.
         # Permit at priority=5 lets the released IP forward immediately
         # before the MAC table re-learns naturally (expires in 10s).
-        for pri in (100, 90, 80, 10):
+        for pri in (100, 90, 85, 80, 10):
             dp.send_msg(parser.OFPFlowMod(
                 datapath=dp,
                 command=ofp.OFPFC_DELETE_STRICT,
@@ -724,6 +753,30 @@ class FatTreeController(app_manager.RyuApp):
             datapath=dp, priority=5,
             idle_timeout=10, hard_timeout=10,
             match=match, instructions=permit_inst,
+        ))
+
+    def _install_redirect_rule(self, dp, ofp, parser, match, redirect_to: str) -> None:
+        # Install redirect rule: match src_ip, rewrite dst_ip to sinkhole, forward.
+        # Priority 85 — above rate_limit (80), below quarantine (90).
+        # Delete stale forward rule (p10) and any existing redirect rule (p85).
+        for pri in (10, 85):
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, command=ofp.OFPFC_DELETE_STRICT,
+                priority=pri,
+                out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
+                match=match,
+            ))
+
+        # Actions: set ipv4_dst to sinkhole, output via NORMAL forwarding
+        actions = [
+            parser.OFPActionSetField(ipv4_dst=redirect_to),
+            parser.OFPActionOutput(ofp.OFPP_NORMAL),
+        ]
+        inst = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+        dp.send_msg(parser.OFPFlowMod(
+            datapath=dp, priority=85,
+            idle_timeout=0, hard_timeout=0,
+            match=match, instructions=inst,
         ))
 
     # ── Helpers ────────────────────────────────────────────────────────────
