@@ -1,6 +1,11 @@
 {
   "version": 1,
   "skills": {
+    "anti-ui-slop": {
+      "source": "uizze.com",
+      "sourceType": "well-known",
+      "computedHash": "0af212b0ee5b248b4a6bd9a887c8091011cf8cd3966602a42200936c29bb5662"
+    },
     "caveman-review": {
       "source": "juliusbrussee/caveman",
       "sourceType": "github",
@@ -114,6 +119,21 @@
       "sourceType": "github",
       "skillPath": "skills/security-review/SKILL.md",
       "computedHash": "ec9792f5fd065e020c48ab5a57707c83435c286c449ba98dfa726d7b1842c868"
+    },
+    "ui-design": {
+      "source": "uizze.com",
+      "sourceType": "well-known",
+      "computedHash": "36a156f9832716be6870df47a93554bbef6297aa30f0e7e8a0f0dc44a6a00d4f"
+    },
+    "ui-radar": {
+      "source": "uizze.com",
+      "sourceType": "well-known",
+      "computedHash": "34305420bba52f3fe7d1d3b2dd355b64ccf12de7411cbbf4557a1231e8ef8ddb"
+    },
+    "ui-slop-score": {
+      "source": "uizze.com",
+      "sourceType": "well-known",
+      "computedHash": "797c0c907e21e9051586b3734db94bfcd637ffde86c724e5da27dbe6e0c27d26"
     },
     "ui-ux-pro-max": {
       "source": "nextlevelbuilder/ui-ux-pro-max-skill",
