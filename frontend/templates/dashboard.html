@@ -233,6 +233,21 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
     </div>
   </div>
 
+  <!-- Expert Mode: Pipeline Visualization (hidden by default) -->
+  <div id="expert-pipeline-panel" class="expert-hidden">
+    <div class="expert-pipeline-canvas-wrap">
+      <div class="expert-pipeline-header">
+        <span class="expert-pipeline-eyebrow">8-stage detection cascade &middot; click a stage to inspect</span>
+        <span class="expert-pipeline-live"><span class="expert-pipeline-live-dot"></span>streaming</span>
+      </div>
+      <canvas id="expert-pipeline-canvas"></canvas>
+    </div>
+    <div class="expert-inspector-row">
+      <div id="expert-stage-inspector" class="expert-inspector"></div>
+      <div id="expert-live-metrics" class="expert-metrics-panel"></div>
+    </div>
+  </div>
+
   <!-- Expert Mode Panels (hidden by default) -->
   <div id="expert-panels" class="expert-hidden">
     <div class="panel" id="expert-ml">
