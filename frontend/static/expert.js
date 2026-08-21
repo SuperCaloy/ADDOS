@@ -302,6 +302,8 @@ var ExpertPipeline = {
     this.container = this.canvas.parentElement;
 
     this.reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.isLightMode = document.body.classList.contains('light') ||
+      window.matchMedia('(prefers-color-scheme: light)').matches;
 
     for (var key in this.nodes) {
       this.nodes[key].colorHex = ExpertStages.data[key].color;
@@ -378,12 +380,14 @@ var ExpertPipeline = {
         var cX = (start.x + end.x) / 2;
         var cY = (start.y + end.y) / 2 + path.curve;
         ctx.quadraticCurveTo(cX, cY, end.x, end.y);
-        ctx.strokeStyle = path.kind === 'learn' ? 'rgba(20,184,166,0.4)' : 'rgba(245,158,11,0.4)';
+        ctx.strokeStyle = path.kind === 'learn'
+          ? (this.isLightMode ? 'rgba(13,148,136,0.5)' : 'rgba(20,184,166,0.4)')
+          : (this.isLightMode ? 'rgba(180,83,9,0.5)' : 'rgba(245,158,11,0.4)');
         ctx.lineWidth = 2;
         ctx.setLineDash([5, 4]);
       } else {
         ctx.lineTo(end.x, end.y);
-        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        ctx.strokeStyle = this.isLightMode ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.25)';
         ctx.lineWidth = 1.4;
       }
       ctx.stroke();
@@ -396,7 +400,9 @@ var ExpertPipeline = {
         var ly = 0.25 * start.y + 0.5 * cY2 + 0.25 * end.y;
         ctx.font = '600 9px "Fira Code", monospace';
         ctx.textAlign = 'center';
-        ctx.fillStyle = path.kind === 'learn' ? 'rgba(20,184,166,0.6)' : 'rgba(245,158,11,0.6)';
+        ctx.fillStyle = path.kind === 'learn'
+          ? (this.isLightMode ? 'rgba(13,148,136,0.8)' : 'rgba(20,184,166,0.6)')
+          : (this.isLightMode ? 'rgba(180,83,9,0.8)' : 'rgba(245,158,11,0.6)');
         ctx.fillText(path.kind === 'learn' ? 'learns baseline' : 'sends block', lx, ly);
       }
     }.bind(this));
@@ -418,47 +424,82 @@ var ExpertPipeline = {
       ctx.shadowBlur = 0;
     }
 
+    var time = Date.now();
+    var pulseAlpha = Math.sin(time / 300) * 0.3 + 0.7;
+
     for (var key in this.nodes) {
       var node = this.nodes[key];
       var c = this._coords(node.x, node.y);
       var isSel = ExpertState.selectedStage === key;
       var glow = this.nodeGlow[key] || 0;
 
-      if (glow > 0.05) {
+      // Glow ring (dark mode only, when active)
+      if (!this.isLightMode && glow > 0.05) {
         ctx.beginPath();
-        ctx.arc(c.x, c.y, 33, 0, Math.PI * 2);
-        var glowAlpha = Math.round(glow * 40).toString(16);
-        if (glowAlpha.length < 2) glowAlpha = '0' + glowAlpha;
-        ctx.fillStyle = node.colorHex + glowAlpha;
+        ctx.arc(c.x, c.y, 30, 0, Math.PI * 2);
+        ctx.shadowBlur = 20;
+        ctx.shadowColor = node.colorHex;
+        var glowHex = Math.round(glow * 60).toString(16);
+        if (glowHex.length < 2) glowHex = '0' + glowHex;
+        ctx.fillStyle = node.colorHex + glowHex;
         ctx.fill();
+        ctx.shadowBlur = 0;
       }
 
+      // Selected pulsing ring
       if (isSel) {
         ctx.beginPath();
-        ctx.arc(c.x, c.y, 33, 0, Math.PI * 2);
+        ctx.arc(c.x, c.y, 32, 0, Math.PI * 2);
         ctx.strokeStyle = node.colorHex;
-        ctx.lineWidth = 2.2;
+        ctx.globalAlpha = pulseAlpha;
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+
+      // Main node circle
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 24, 0, Math.PI * 2);
+
+      if (this.isLightMode) {
+        // Light mode: multi-layer depth with drop shadow
+        ctx.shadowColor = 'rgba(0,0,0,0.15)';
+        ctx.shadowBlur = 8;
+        ctx.shadowOffsetY = 2;
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetY = 0;
+        ctx.strokeStyle = '#e2e8f0';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        // Inner accent ring
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 22, 0, Math.PI * 2);
+        ctx.strokeStyle = node.colorHex + '40';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      } else {
+        // Dark mode: vibrant glow
+        ctx.fillStyle = '#1e293b';
+        ctx.fill();
+        ctx.strokeStyle = node.colorHex;
+        ctx.lineWidth = 2;
         ctx.stroke();
       }
 
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 24, 0, Math.PI * 2);
-      ctx.fillStyle = isSel ? 'rgba(255,255,255,0.08)' : '#1E293B';
-      ctx.strokeStyle = isSel ? node.colorHex : 'rgba(255,255,255,0.18)';
-      ctx.lineWidth = isSel ? 2.6 : 1.6;
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.font = '700 13px "Fira Code", monospace';
-      ctx.fillStyle = isSel ? node.colorHex : 'rgba(248,250,252,0.5)';
+      // Number inside
+      ctx.font = '700 14px "Fira Code", monospace';
+      ctx.fillStyle = this.isLightMode ? '#1e293b' : '#F8FAFC';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(ExpertStages.data[key].num, c.x, c.y);
 
+      // Label below
       ctx.font = '600 12px "Fira Code", monospace';
-      ctx.fillStyle = isSel ? '#F8FAFC' : 'rgba(248,250,252,0.5)';
+      ctx.fillStyle = this.isLightMode ? '#334155' : (isSel ? '#F8FAFC' : 'rgba(248,250,252,0.7)');
       ctx.textBaseline = 'alphabetic';
-      ctx.fillText(node.label, c.x, c.y + 40);
+      ctx.fillText(node.label, c.x, c.y + 42);
     }
 
     this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
