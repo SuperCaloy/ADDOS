@@ -31,14 +31,14 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg:       #EDF0F7;
-    --surface:  #F4F6FB;
-    --card:     #FAFBFE;
-    --border:   #D5DAE8;
-    --border2:  #B8C0D4;
+    --bg:       #E8ECF4;
+    --surface:  #EEF2F7;
+    --card:     #FFFFFF;
+    --border:   #C8CED9;
+    --border2:  #9CA3AF;
     --text:     #1A2035;
-    --sub:      #4A5578;
-    --sub2:     #6B7A9E;
+    --sub:      #374151;
+    --sub2:     #4B5563;
     --blue:     #0D9488;
     --blue-g:   rgba(13, 148, 136, 0.12);
     --red:      #BE123C;
@@ -48,7 +48,7 @@
     --amber:    #B45309;
     --amber-g:  rgba(180, 83, 9, 0.12);
     --grid-opacity: 0.04;
-    --terminal-bg: #EAEFF8;
+    --terminal-bg: #F1F5F9;
     --track-bg: rgba(0,0,0,0.08);
     --track-mid: rgba(0,0,0,0.14);
     --line-border: rgba(0,0,0,0.07);
@@ -57,14 +57,14 @@
 
 body.light {
   /* LIGHT MODE (MANUAL TOGGLE) — softer, warmer palette */
-  --bg:       #EDF0F7;
-  --surface:  #F4F6FB;
-  --card:     #FAFBFE;
-  --border:   #D5DAE8;
-  --border2:  #B8C0D4;
+  --bg:       #E8ECF4;
+  --surface:  #EEF2F7;
+  --card:     #FFFFFF;
+  --border:   #C8CED9;
+  --border2:  #9CA3AF;
   --text:     #1A2035;
-  --sub:      #4A5578;
-  --sub2:     #6B7A9E;
+  --sub:      #374151;
+  --sub2:     #4B5563;
   --blue:     #0D9488;
   --blue-g:   rgba(13, 148, 136, 0.12);
   --red:      #BE123C;
@@ -74,7 +74,7 @@ body.light {
   --amber:    #B45309;
   --amber-g:  rgba(180, 83, 9, 0.12);
   --grid-opacity: 0.04;
-  --terminal-bg: #EAEFF8;
+  --terminal-bg: #F1F5F9;
   --track-bg: rgba(0,0,0,0.08);
   --track-mid: rgba(0,0,0,0.14);
   --line-border: rgba(0,0,0,0.07);
@@ -590,6 +590,29 @@ body.light .tea-switch-card { background: var(--surface); border-color: var(--bo
 body.light .expert-metric { background: var(--card); border-color: var(--border); }
 body.light .zscore-track { background: var(--track-bg); }
 body.light .zscore-midline { background: var(--track-mid); }
+
+/* Light mode: pipeline visualization */
+body.light .expert-pipeline-canvas-wrap { border-color: #C8CED9; }
+body.light .expert-formula-block { background: #F8FAFC; border-color: #C8CED9; }
+body.light .expert-io-col,
+body.light .expert-stat,
+body.light .expert-proto-item { background: #F1F5F9; border-color: #C8CED9; }
+body.light .expert-terminal { background: #F1F5F9; border-color: #C8CED9; }
+body.light .expert-formula-line { color: #92400E; }
+body.light .expert-formula-line .note { color: #4B5563; }
+body.light .expert-inspector-desc { color: #374151; }
+body.light .expert-inspector-file { color: #4B5563; }
+body.light .expert-stat .lbl,
+body.light .expert-proto-title,
+body.light .expert-proto-item .pk,
+body.light .expert-metrics-title,
+body.light .expert-trend-legend span { color: #4B5563; }
+body.light .expert-io-col .body { color: #374151; }
+body.light .expert-stat .note { color: #4B5563; }
+body.light .expert-formula-line { color: #334155; }
+body.light .expert-formula-line .note { color: #334155; }
+body.light .expert-inspector-desc { color: #334155; }
+body.light .expert-terminal div { color: #334155; }
 
 /* ── REDUCED MOTION ──────────────────────────────────────────────────────── */
 /* Respect OS-level "reduce motion" preference — disable all animations */
