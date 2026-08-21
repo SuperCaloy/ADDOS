@@ -198,14 +198,27 @@ def _parse_and_route(raw: bytes) -> None:
         if pkt_count_cumulative < 1:
             return
 
-        # Skip phase 2/3, block rule active. Phase 4 allowed through for ML.
+        # Phase 2/3: skip TEA but still score via IF/RF for lightweight tracking.
+        # This prevents frozen if_score during ban, so probation has live evidence.
+        _skip_tea = False
         try:
             from backend.mitigation.state_machine import state_machine as _sm
             _ip_state = _sm._states.get(src_ip)
             if _ip_state is not None and _ip_state.phase in (2, 3):
-                return
+                _skip_tea = True
         except Exception:
             pass
+
+        if _skip_tea:
+            flow_stats["tea_attack_pattern"] = False
+            flow_stats["tea_flash_crowd"]    = False
+            flow_stats["tea_confidence"]     = "low"
+            flow_stats["tea_is_learned"]     = False
+            flow_stats["tea_size_var"]       = 0.0
+            flow_stats["tea_intensity_var"]  = 0.0
+            switch_stats["dpid"] = dpid
+            worker.submit(src_ip, flow_stats, switch_stats)
+            return
 
         # TEA gate, snapshot the switch buffer and run entropy analysis.
         with _switch_flows_lock:
