@@ -17,7 +17,7 @@ def _push_expert_event(payload: dict) -> None:
         pass
 
 # === ADAPTIVE TEA CONSTANTS ===
-TEA_LEARN_INTERVALS   = 30
+TEA_LEARN_INTERVALS   = 15
 TEA_ATTACK_SIGMA      = 2.5
 TEA_CROWD_SIGMA       = 1.5
 TEA_MIN_CROWD_DIVERSITY = 1.0
@@ -86,7 +86,7 @@ class _AdaptiveBaseline:
                 self._alpha    = self._compute_alpha()
                 self._learned  = True
                 log.info(
-                    "TEA baseline learned — mean=%.4f  std=%.4f  alpha=%.4f  (n=%d samples)",
+                    "TEA baseline learned - mean=%.4f  std=%.4f  alpha=%.4f  (n=%d samples)",
                     self._mean, self._std, self._alpha, len(self._samples)
                 )
             return
@@ -123,14 +123,14 @@ class _AdaptiveBaseline:
             return TEA_ATTACK_SIGMA
         cv = self._std / (abs(self._mean) + 1e-9)
         sigma = TEA_ATTACK_SIGMA + cv * 1.5
-        return max(2.0, min(3.5, sigma))
+        return max(2.0, min(3.0, sigma))
 
     def dynamic_crowd_sigma(self) -> float:
         if self._variance is None or self._mean is None or self._mean == 0:
             return TEA_CROWD_SIGMA
         cv = self._std / (abs(self._mean) + 1e-9)
         sigma = TEA_CROWD_SIGMA + cv * 1.0
-        return max(1.2, min(2.5, sigma))
+        return max(1.2, min(2.0, sigma))
 
     def z_score(self, value: float) -> float:
         if not self._learned:
@@ -149,6 +149,7 @@ class _GlobalEntropyState:
         self.window    = deque(maxlen=window_size)
         self.size_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.proto_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.last_result = {}
 
     def observe(self, snapshot: dict) -> None:
@@ -157,6 +158,7 @@ class _GlobalEntropyState:
     def learn(self, snapshot: dict) -> None:
         self.size_base.push(snapshot["size_var"])
         self.intensity_base.push(snapshot["intensity_var"])
+        self.proto_base.push(snapshot["proto_entropy"])
 
     def push(self, snapshot: dict) -> None:
         self.observe(snapshot)
@@ -173,7 +175,11 @@ class _GlobalEntropyState:
 
     @property
     def is_learned(self) -> bool:
-        return self.size_base.is_learned and self.intensity_base.is_learned
+        return (
+            self.size_base.is_learned
+            and self.intensity_base.is_learned
+            and self.proto_base.is_learned
+        )
 
 
 IP_PROFILE_MIN_SAMPLES = 5
@@ -320,6 +326,7 @@ class EntropyAnalyzer:
             is_learned = state.is_learned
             size_base   = state.size_base
             intensity_base   = state.intensity_base
+            proto_base   = state.proto_base
 
             if not state.is_ready():
                 state.learn(snapshot)
@@ -339,9 +346,11 @@ class EntropyAnalyzer:
             else:
                 size_z  = size_base.z_score(curr["size_var"])
                 intensity_z  = intensity_base.z_score(curr["intensity_var"])
+                proto_z = proto_base.z_score(curr["proto_entropy"])
                 attack_sigma = size_base.dynamic_attack_sigma()
                 size_collapsed  = size_base.is_low(curr["size_var"], attack_sigma)
                 intensity_collapsed = intensity_base.is_low(curr["intensity_var"], attack_sigma)
+                proto_collapsed = proto_base.is_low(curr["proto_entropy"], attack_sigma)  # protocol concentration lowers entropy
 
         size_delta  = curr["size_var"]  - prev["size_var"]
         intensity_delta = curr["intensity_var"] - prev["intensity_var"]
@@ -355,16 +364,21 @@ class EntropyAnalyzer:
                 state.last_result = res
             return res
 
-        is_attack_pattern = size_collapsed and intensity_collapsed
-        is_flash_crowd    = False # Redefine or remove for feature-based
+        is_attack_pattern = size_collapsed or intensity_collapsed or proto_collapsed
+        is_flash_crowd    = False
 
         if not is_attack_pattern:
             with self._lock:
                 state.learn(snapshot)
 
         if is_attack_pattern:
-            confidence = "high"
-        elif size_collapsed or intensity_collapsed:
+            if size_collapsed and intensity_collapsed:
+                confidence = "high"  # Both collapsed
+            elif proto_collapsed and (size_collapsed or intensity_collapsed):
+                confidence = "high"  # Proto + one other
+            else:
+                confidence = "moderate"  # Only one collapsed
+        elif size_collapsed or intensity_collapsed or proto_collapsed:
             confidence = "moderate"
         else:
             confidence = "low"
@@ -372,10 +386,12 @@ class EntropyAnalyzer:
         result = {
             "size_var":  round(curr["size_var"],  4),
             "intensity_var": round(curr["intensity_var"], 4),
+            "proto_entropy": round(curr["proto_entropy"], 4),
             "size_delta":    round(size_delta,  4),
             "intensity_delta":   round(intensity_delta, 4),
             "size_zscore":   round(size_z,  4),
             "intensity_zscore":  round(intensity_z,  4),
+            "proto_zscore":  round(proto_z, 4),
             "baseline_mean_size":  round(size_base.mean, 4),
             "baseline_mean_intensity":  round(intensity_base.mean, 4),
             "unique_ips":         curr["unique_ips"],
@@ -386,15 +402,17 @@ class EntropyAnalyzer:
         }
 
         if is_attack_pattern:
-            log.info("TEA global attack pattern — size_z=%.2f  int_z=%.2f  conf=%s", size_z, intensity_z, confidence)
+            log.info("TEA global attack pattern - size_z=%.2f  int_z=%.2f  conf=%s", size_z, intensity_z, confidence)
 
         _push_expert_event({
             "tea_update": {
                 "dpid": 0,
                 "size_var": result["size_var"],
                 "intensity_var": result["intensity_var"],
+                "proto_entropy": result["proto_entropy"],
                 "size_z": result["size_zscore"],
                 "intensity_z": result["intensity_zscore"],
+                "proto_z": result["proto_zscore"],
                 "unique_ips": result["unique_ips"],
                 "is_attack": is_attack_pattern,
                 "is_flash_crowd": is_flash_crowd,
@@ -412,22 +430,24 @@ class EntropyAnalyzer:
             return True
         if not tea_result.get("is_learned", False):
             return True
-        conf = tea_result.get("confidence", "low")
         if tea_result.get("is_attack_pattern"):
             return True
+        conf = tea_result.get("confidence", "low")
         if conf == "moderate":
             return True
-        return True
+        return False  # TEA confident it's low (flash crowd, normal) -> block gate
 
     def confirm_normal(self, dpid: int = 0) -> None:
         with self._lock:
             self._global_state.size_base.unlock()
             self._global_state.intensity_base.unlock()
+            self._global_state.proto_base.unlock()
 
     def confirm_attack(self, dpid: int = 0) -> None:
         with self._lock:
             self._global_state.size_base.lock()
             self._global_state.intensity_base.lock()
+            self._global_state.proto_base.lock()
 
     def feedback(self, is_anomaly: bool) -> None:
         with self._lock:
@@ -435,12 +455,14 @@ class EntropyAnalyzer:
                 self._fb_normal_streak = 0
                 self._global_state.size_base.lock()
                 self._global_state.intensity_base.lock()
+                self._global_state.proto_base.lock()
                 return
             self._fb_normal_streak += 1
             if self._fb_normal_streak >= TEA_FEEDBACK_UNLOCK_STREAK:
                 self._fb_normal_streak = 0
                 self._global_state.size_base.unlock()
                 self._global_state.intensity_base.unlock()
+                self._global_state.proto_base.unlock()
 
     def update_ip(self, src_ip: str, pps: float, bps: float) -> None:
         with self._lock:
@@ -468,10 +490,12 @@ class EntropyAnalyzer:
         return {
             "size_var":  round(size, 4),
             "intensity_var": round(intensity, 4),
+            "proto_entropy": 0.0,
             "size_delta":    0.0,
             "intensity_delta":   0.0,
             "size_zscore":   0.0,
             "intensity_zscore":  0.0,
+            "proto_zscore":  0.0,
             "baseline_mean_size":  0.0,
             "baseline_mean_intensity":  0.0,
             "unique_ips":         0,
