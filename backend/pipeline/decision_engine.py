@@ -201,6 +201,30 @@ def _assign_priority(if_score: float, confidence: float) -> str:
     return "Low"
 
 
+# ── Detection ledger gate: one 'detected' row per phase entry ────────────
+# Keyed on IpState.phase_entered (monotonic). A phase transition changes the
+# timestamp so the next evidence write logs again; repeats inside one entry
+# are suppressed. Stale entries are pruned once the cache grows past the cap,
+# keeping memory bounded under IP churn without affecting correctness (a
+# returning IP always carries a new, later phase_entered).
+_DETECTION_LOGGED_MAX = 128
+_detection_logged: dict[str, float] = {}
+
+
+def _should_log_detection(src_ip: str, phase_entered: float | None) -> bool:
+    if phase_entered is None:
+        return True
+    with _lock:
+        if _detection_logged.get(src_ip) == phase_entered:
+            return False
+        _detection_logged[src_ip] = phase_entered
+        if len(_detection_logged) > _DETECTION_LOGGED_MAX:
+            live_states = state_machine._states
+            for ip in [k for k in _detection_logged if k not in live_states]:
+                del _detection_logged[ip]
+        return True
+
+
 def on_result(src_ip: str, if_score, is_anomaly,
               attack_class, confidence, *,
               flow_stats: dict = None, switch_stats: dict = None,
@@ -389,7 +413,11 @@ def on_result(src_ip: str, if_score, is_anomaly,
     phase_label = ip_state.phase_label() if ip_state else None
 
     # Skip write for legit hosts, and for flash crowd, no action taken.
-    if not is_known_legit and _tea_mitigate:
+    # One 'detected' row per phase entry: per-flow repeats inside the same
+    # entry are suppressed by the gate (writer dedup remains as safety net).
+    if not is_known_legit and _tea_mitigate and (
+        ip_state is None or _should_log_detection(src_ip, ip_state.phase_entered)
+    ):
         writer.log_mitigation_event({
         "timestamp":       ts,
         "src_ip":          src_ip,
@@ -401,7 +429,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "if_score":        if_score,
         "phase":           phase_label,
         "is_manual":       0,
-        "force_insert":    True,   # never overwrite existing rows
+        "event_type":      "detected",
         "detection_ms":    detection_ms,
         "mitigation_ms":   mitigation_ms,
         })

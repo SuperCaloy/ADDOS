@@ -37,6 +37,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             if_score        REAL,
             phase           TEXT,
             is_manual       INTEGER DEFAULT 0,
+            event_type      TEXT DEFAULT 'transition',
+            reason          TEXT,
             detection_ms    REAL,
             mitigation_ms   REAL
         );
@@ -52,7 +54,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             action_taken    TEXT    NOT NULL,
             if_score        REAL,
             phase           TEXT,
-            is_manual       INTEGER DEFAULT 0
+            is_manual       INTEGER DEFAULT 0,
+            event_type      TEXT DEFAULT 'transition',
+            reason          TEXT
         );
 
         CREATE TABLE IF NOT EXISTS traffic_summary (
@@ -306,6 +310,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for col in ("detection_ms", "mitigation_ms"):
         try:
             conn.execute(f"ALTER TABLE mitigation_events ADD COLUMN {col} REAL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # lifecycle ledger columns (event_type + reason) on hot and archive tables
+    for table in ("mitigation_events", "mitigation_events_archive"):
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN event_type TEXT DEFAULT 'transition'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN reason TEXT")
             conn.commit()
         except sqlite3.OperationalError:
             pass

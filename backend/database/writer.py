@@ -65,8 +65,8 @@ def log_mitigation_event(event: dict) -> None:
             INSERT INTO mitigation_events
                 (timestamp, src_ip, predicted_class, attack_vector,
                  confidence, priority, action_taken, if_score, phase, is_manual,
-                 detection_ms, mitigation_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 event_type, reason, detection_ms, mitigation_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             event["timestamp"],
             event["src_ip"],
@@ -78,6 +78,8 @@ def log_mitigation_event(event: dict) -> None:
             event.get("if_score"),
             event.get("phase"),
             int(event.get("is_manual", 0)),
+            event.get("event_type") or "transition",
+            event.get("reason"),
             event.get("detection_ms"),
             event.get("mitigation_ms"),
         ))
@@ -102,13 +104,15 @@ def log_manual_action(src_ip: str, action: str,
         execute("""
             INSERT INTO mitigation_events
                 (timestamp, src_ip, predicted_class, attack_vector,
-                 confidence, priority, action_taken, if_score, phase, is_manual)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 confidence, priority, action_taken, if_score, phase, is_manual,
+                 event_type, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             ts, src_ip, "DDoS", attack_vector,
             confidence, priority,
             action.replace("_", " ").title(),
             if_score, phase, 1,
+            "manual", None,
         ))
     except Exception:
         log.exception("Failed to write manual action for %s", src_ip)

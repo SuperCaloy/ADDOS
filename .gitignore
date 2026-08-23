@@ -3,7 +3,6 @@
 /**/*.db-wal
 /**/*.pyc
 **/__pycache__/
-logs/
 notes/
 .agents/
 AGENTS.md
@@ -11,9 +10,13 @@ visualization.html
 test/
 test-results/
 docs/
+design-system/
 node_modules/
 package-lock.json
 scratch/
 .superpowers/
 opencode.json
 skills-lock.json
+.opencode/
+logs/*
+!logs/.gitkeep
