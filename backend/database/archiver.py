@@ -35,13 +35,15 @@ def _archive_old_events() -> int:
                 conn.execute("""
                     INSERT INTO mitigation_events_archive
                         (timestamp, src_ip, predicted_class, attack_vector,
-                         confidence, priority, action_taken, if_score, phase, is_manual)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         confidence, priority, action_taken, if_score, phase, is_manual,
+                         event_type, reason)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     row["timestamp"], row["src_ip"], row["predicted_class"],
                     row["attack_vector"], row["confidence"], row["priority"],
                     row["action_taken"], row.get("if_score"), row.get("phase"),
                     row.get("is_manual", 0),
+                    row.get("event_type") or "transition", row.get("reason"),
                 ))
             conn.execute(
                 "DELETE FROM mitigation_events WHERE timestamp < ?", (cutoff,)

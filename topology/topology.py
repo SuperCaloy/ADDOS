@@ -21,17 +21,18 @@ CONTROLLER_PORT  = 6633
 BACKEND_API      = "http://127.0.0.1:5000"
 RESTORE_POLL_S   = 5.0
 N_EDGE           = 8
-N_HOSTS          = 20
+N_HOSTS          = 27
 SERVER_IP        = "10.0.0.20"   # h20, victim server
 SINKHOLE_IP      = "10.0.0.21"   # h21, dummy sinkhole host
 ATTACK_PKT_COUNT = 5000
 WHITELIST_IPS    = {SERVER_IP, SINKHOLE_IP}
 
-# h1 to h5 legit, h6 to h19 attacker
-_ATTACKER_NUMS = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19}
+# h1 to h5 legit, h6 to h19 + h22 to h27 attacker (20 total), h20 server, h21 sinkhole
+_ATTACKER_NUMS = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+                  22, 23, 24, 25, 26, 27}
 _LEGIT_NUMS    = {1, 2, 3, 4, 5}
 
-# 5 SYN, 5 ICMP, 2 UDP, 2 MIXED
+# 10 SYN, 7 ICMP, 2 UDP, 1 MIXED (h6-h19, h22-h27)
 _ATTACKER_VARIANTS = {
     #        type     flags                              burst   sleep
     # burst/sleep unused — all attackers run pure continuous --flood (no -c, no sleep)
@@ -47,34 +48,49 @@ _ATTACKER_VARIANTS = {
     15: ("ICMP", "--icmp --flood --data 128",            0, 0),
     16: ("UDP",  "--udp -p 53    --flood --data 1400",   0, 0),
     17: ("UDP",  "--udp -p 123   --flood --data 512",    0, 0),
+    18: ("SYN",  "-S -p 1900   --flood",               0, 0),
     # MIXED fires SYN and UDP together, model never trained on this combo
-    18: ("MIXED", "-S -p 1900   --flood",               0, 0),
     19: ("MIXED", "--udp -p 11211 --flood",              0, 0),
+    22: ("SYN",  "-S -p 21   --flood",                  0, 0),
+    23: ("SYN",  "-S -p 25   --flood",                  0, 0),
+    24: ("SYN",  "-S -p 3389 --flood",                  0, 0),
+    25: ("SYN",  "-S -p 5432 --flood",                  0, 0),
+    26: ("ICMP", "--icmp --flood --data 1400",           0, 0),
+    27: ("ICMP", "--icmp --flood --data 1000",           0, 0),
 }
 
 # Stagger order: SYN, then ICMP, then UDP, then MIXED
 _ATTACKER_START_DELAYS = {
-    6: 0.0, 7: 0.1, 8: 0.2, 9: 0.3, 10: 0.4,
-    11: 0.5, 12: 0.6, 13: 0.7, 14: 0.8, 15: 0.9,
-    16: 1.0, 17: 1.1, 18: 1.2, 19: 1.3,
+    6: 0.0, 7: 0.05, 8: 0.1, 9: 0.15, 10: 0.2,
+    11: 0.25, 12: 0.3, 13: 0.35, 14: 0.4, 15: 0.45,
+    16: 0.5, 17: 0.55, 18: 0.6, 19: 0.65,
+    22: 0.7, 23: 0.75, 24: 0.8, 25: 0.85, 26: 0.9, 27: 0.95,
 }
 
 # attack_min, attack_max, rest_min, rest_max in seconds
+# rest windows shrunk, active windows lengthened, so IF sees a sustained
+# anomaly instead of a noisy on/off pattern that blends into baseline jitter
 _ATTACKER_CYCLES = {
-    6:  (5, 20, 2, 8),
-    7:  (5, 18, 2, 7),
-    8:  (6, 20, 2, 8),
-    9:  (5, 15, 2, 6),
-    10: (6, 18, 2, 7),
-    11: (30, 90,  8, 20),
-    12: (35, 90,  8, 18),
-    13: (25, 80,  8, 18),
-    14: (30, 75,  8, 15),
-    15: (25, 70,  8, 15),
-    16: (10, 30, 5, 15),
-    17: (10, 28, 5, 12),
-    18: (12, 30, 5, 15),
-    19: (10, 25, 5, 12),
+    6:  (30, 60, 1, 3),
+    7:  (30, 55, 1, 3),
+    8:  (35, 60, 1, 3),
+    9:  (30, 50, 1, 3),
+    10: (35, 55, 1, 3),
+    11: (60, 120, 2, 5),
+    12: (65, 120, 2, 5),
+    13: (55, 110, 2, 5),
+    14: (60, 105, 2, 5),
+    15: (55, 100, 2, 5),
+    16: (40, 70, 1, 4),
+    17: (40, 65, 1, 4),
+    18: (40, 70, 1, 4),
+    19: (40, 65, 1, 4),
+    22: (45, 90, 1, 3),
+    23: (45, 85, 1, 3),
+    24: (40, 80, 1, 3),
+    25: (45, 85, 1, 3),
+    26: (60, 120, 2, 5),
+    27: (58, 115, 2, 5),
 }
 
 _mixed_stop_event = threading.Event()
@@ -179,21 +195,24 @@ def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
         edge_switches.append(sw)
 
     # Fixed host-to-switch mapping — deterministic every run.
-    # h1–h19 spread across s1–s7 (3 per switch, last has 1).
+    # h1-h19 + h22-h27 spread across s1-s7 (3-4 per switch).
     # h20 server on s8 only — dedicated, no attacker on same switch.
+    # h21 is the sinkhole, added separately below, skipped in this loop.
     _HOST_TO_SWITCH = {
-        1: 1,  2: 1,  3: 1,
-        4: 2,  5: 2,  6: 2,
-        7: 3,  8: 3,  9: 3,
-        10: 4, 11: 4, 12: 4,
-        13: 5, 14: 5, 15: 5,
-        16: 6, 17: 6, 18: 6,
+        1: 1,  2: 1,  3: 1,  22: 1,
+        4: 2,  5: 2,  6: 2,  23: 2,
+        7: 3,  8: 3,  9: 3,  24: 3,
+        10: 4, 11: 4, 12: 4, 25: 4,
+        13: 5, 14: 5, 15: 5, 26: 5,
+        16: 6, 17: 6, 18: 6, 27: 6,
         19: 7,
         20: 8,
     }
 
     _hosts = []
     for host_num in range(1, n_hosts + 1):
+        if host_num == 21:
+            continue  # reserved for sinkhole, added separately below
         sw_idx = _HOST_TO_SWITCH[host_num]
         sw     = edge_switches[sw_idx - 1]
         ip     = f"10.0.0.{host_num}"
@@ -204,7 +223,7 @@ def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
         _host_switch_map[f"h{host_num}"] = sw.name
 
     # Distribution count per switch — used for banner display only
-    distribution = [3, 3, 3, 3, 3, 3, 1, 1]
+    distribution = [5, 5, 5, 5, 5, 5, 5, 1]
 
     # h21 silent sinkhole — connected to core, receives redirected traffic
     sinkhole = _net.addHost(
@@ -216,6 +235,17 @@ def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
     _host_switch_map["h21"] = core.name
 
     return _net, _hosts, edge_switches, distribution
+
+
+def _speed_up_reconnect(edge_switches, core) -> None:
+    # Lower OVS inactivity probe + backoff so dead controller connections
+    # are detected and retried fast instead of default ~15-25s.
+    for sw in [core] + edge_switches:
+        subprocess.run(
+            f"ovs-vsctl set controller {sw.name} "
+            f"inactivity_probe=5000 max_backoff=2000",
+            shell=True
+        )
 
 
 def _assign_attacks() -> list[dict]:
@@ -448,30 +478,38 @@ def _hping_cmd(attacker_num: int, target: str, count: int = None) -> str:
 
 
 def _notify_attack_start(ip: str, attack_type: str) -> None:
-    try:
-        req = urllib.request.Request(
-            f"{BACKEND_API}/api/attack_ground_truth/start",
-            data=_json.dumps({"ip": ip, "attack_type": attack_type}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=2):
-            pass
-    except Exception:
-        pass
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                f"{BACKEND_API}/api/attack_ground_truth/start",
+                data=_json.dumps({"ip": ip, "attack_type": attack_type}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2):
+                pass
+            return
+        except Exception as e:
+            if attempt == 2:
+                info(f"*** Error: Failed to notify attack start for {ip}: {e}\n")
+            time.sleep(1.0)
 
 
 def _notify_attack_stop(ip: str) -> None:
     _active_attackers.discard(ip)
-    try:
-        req = urllib.request.Request(
-            f"{BACKEND_API}/api/attack_ground_truth/stop",
-            data=_json.dumps({"ip": ip}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=2):
-            pass
-    except Exception:
-        pass
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                f"{BACKEND_API}/api/attack_ground_truth/stop",
+                data=_json.dumps({"ip": ip}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2):
+                pass
+            return
+        except Exception as e:
+            if attempt == 2:
+                info(f"*** Error: Failed to notify attack stop for {ip}: {e}\n")
+            time.sleep(1.0)
 
 
 
@@ -679,14 +717,14 @@ def start_udp_flood_campaign() -> None:
 
 
 def start_mixed_campaign() -> None:
-    # all 14 attackers, staggered starts, continuous flood — no rest periods
+    # all 20 attackers, staggered starts, continuous flood — no rest periods
     global _mixed_stop_event, _campaign_threads
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
     info("\n" + "=" * 65 + "\n")
-    info("  [MIXED CAMPAIGN]  All 14 attackers  |  Continuous flood\n")
-    info("  SYN (h6-h10) -> ICMP (h11-h15) -> UDP (h16-h17) -> MIXED (h18-h19)\n")
+    info("  [MIXED CAMPAIGN]  All 20 attackers  |  Continuous flood\n")
+    info("  SYN (h6-h10,h18,h22-h25) -> ICMP (h11-h15,h26-h27) -> UDP (h16,h17) -> MIXED (h19)\n")
     info("=" * 65 + "\n")
     info(f"  {'HOST':<6} {'TYPE':<8} {'FLAGS':<35} START\n")
     info("  " + "-" * 60 + "\n")
@@ -739,15 +777,21 @@ def start_stress_test() -> None:
         15: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
         16: "hping3 --udp -p 53    --flood --rand-source --data 32 {t} > /dev/null 2>&1",
         17: "hping3 --udp -p 123   --flood --rand-source --data 32 {t} > /dev/null 2>&1",
-        18: "hping3 -S -p 1900   --flood --rand-source {t} > /dev/null 2>&1 & hping3 --udp -p 11211 --flood --rand-source {t} > /dev/null 2>&1 & wait",
+        18: "hping3 -S -p 1900   --flood --rand-source {t} > /dev/null 2>&1",
         19: "hping3 --udp -p 11211 --flood --rand-source {t} > /dev/null 2>&1 & hping3 -S -p 1900 --flood --rand-source {t} > /dev/null 2>&1 & wait",
+        22: "hping3 -S -p 21   --flood --rand-source {t} > /dev/null 2>&1",
+        23: "hping3 -S -p 25   --flood --rand-source {t} > /dev/null 2>&1",
+        24: "hping3 -S -p 3389 --flood --rand-source {t} > /dev/null 2>&1",
+        25: "hping3 -S -p 5432 --flood --rand-source {t} > /dev/null 2>&1",
+        26: "hping3 --icmp --flood --rand-source --data 64 {t} > /dev/null 2>&1",
+        27: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
     }
 
-    info("*** Starting stress test — all 14 attackers, rand-source flood -> {}\n".format(SERVER_IP))
+    info("*** Starting stress test — all 20 attackers, rand-source flood -> {}\n".format(SERVER_IP))
 
     # Stagger each attacker by 100ms — prevents OVS from being hit by all
-    # 14 floods in the same millisecond, which causes switch disconnects.
-    # 100ms per host = ~1.4s total ramp — still appears simultaneous in report.
+    # 20 floods in the same millisecond, which causes switch disconnects.
+    # 100ms per host = ~2.0s total ramp — still appears simultaneous in report.
     def _stress_worker(num: int) -> None:
         h   = net.get(f"h{num}")
         cmd = _STRESS_CMDS[num].format(t=SERVER_IP)
@@ -1255,14 +1299,14 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
     info("  py launch_icmp_flood_sustained()       # h11\n")
     info("  py launch_udp_flood_sustained()        # h16\n\n")
     info("  ── ALL ATTACKERS ─────────────────────────────────────────────\n")
-    info("  py launch_attack()                     # all 14, sustained\n")
-    info("  py launch_attack(sustained=False)      # all 14, burst\n\n")
+    info("  py launch_attack()                     # all 20, sustained\n")
+    info("  py launch_attack(sustained=False)      # all 20, burst\n\n")
     info("  ── CAMPAIGNS ─────────────────────────────────────────────────\n")
     info("  py start_syn_flood_campaign()          # h6,h7,h8\n")
     info("  py start_icmp_flood_campaign()         # h11,h12,h13\n")
     info("  py start_udp_flood_campaign()          # h16,h17,h18\n")
-    info("  py start_mixed_campaign()              # all 14, staggered cyclic\n")
-    info("  py start_stress_test()                 # all 14, rand-source, memory stress\n\n")
+    info("  py start_mixed_campaign()              # all 20, staggered cyclic\n")
+    info("  py start_stress_test()                 # all 20, rand-source, memory stress\n\n")
     info("  ── STOP ──────────────────────────────────────────────────────\n")
     info("  py stop_all_attacks()                  # kill + flush + clear\n")
     info("  py stop_baseline()                     # stop baseline\n\n")
@@ -1282,6 +1326,7 @@ if __name__ == "__main__":
 
     net, hosts, edge_switches, distribution = build_star()
     net.start()
+    _speed_up_reconnect(edge_switches, net.get("s0"))
     _assign_attacks()
 
     # wait for switches to connect to Ryu

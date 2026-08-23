@@ -64,6 +64,9 @@ const _ATTACK_CONTEXT = {
 
   const drawer = document.createElement('div');
   drawer.id = 'ip-drawer';
+  drawer.setAttribute('role', 'dialog');
+  drawer.setAttribute('aria-modal', 'true');
+  drawer.setAttribute('aria-label', 'IP Threat Analysis');
   drawer.setAttribute('aria-hidden', 'true');
   drawer.style.cssText = [
     'position:fixed','top:50%','left:50%',
@@ -78,6 +81,22 @@ const _ATTACK_CONTEXT = {
     'border-radius:16px',
     'box-shadow:0 24px 80px rgba(0,0,0,0.18)',
   ].join(';');
+
+  /* ── Focus trap ───────────────────────────────────────────────────────── */
+  drawer.addEventListener('keydown', function _trapFocus(e) {
+    if (e.key !== 'Tab') return;
+    const focusable = [...drawer.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )].filter(el => !el.closest('[aria-hidden="true"]'));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last  = focusable[focusable.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+    } else {
+      if (document.activeElement === last)  { e.preventDefault(); first.focus(); }
+    }
+  });
 
   drawer.innerHTML = `
     <!-- Header -->
@@ -183,6 +202,14 @@ const _ATTACK_CONTEXT = {
            margin-bottom:10px;margin-top:4px">Mitigation Pipeline</div>
       <div id="idd-pipeline" style="margin-bottom:14px"></div>
 
+      <!-- Algorithm Trace (Expert Mode only) -->
+      <div id="idd-expert-section" style="display:none;margin-top:20px;padding-top:20px;border-top:1px solid var(--border,#eef0f6)">
+        <div style="font-size:12px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
+             font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
+             margin-bottom:12px">Algorithm Trace</div>
+        <div id="idd-expert-content"></div>
+      </div>
+
     </div>`;
 
   document.body.appendChild(drawer);
@@ -218,13 +245,15 @@ const _ATTACK_CONTEXT = {
 })();
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let _drawerCurrentIp = null;
-let _drawerLiveTimer = null;
-let _drawerIsLive    = false;
+let _drawerCurrentIp  = null;
+let _drawerLiveTimer  = null;
+let _drawerIsLive     = false;
+let _drawerReturnFocus = null; /* element to restore focus to on close */
 
 // ── Public API ────────────────────────────────────────────────────────────────
 function openIpDrawer(ip) {
   if (!ip || ip === '--') return;
+  _drawerReturnFocus = document.activeElement; /* remember for restore on close */
   _drawerCurrentIp = ip;
   document.getElementById('idd-ip').textContent = ip;
   document.getElementById('idd-status-badge').innerHTML = '';
@@ -238,12 +267,20 @@ function openIpDrawer(ip) {
   drawer.style.transform     = 'translate(-50%,-50%) scale(1)';
   drawer.setAttribute('aria-hidden', 'false');
 
+  /* Move keyboard focus into the drawer */
+  requestAnimationFrame(() => {
+    const closeBtn = document.getElementById('idd-close-btn');
+    if (closeBtn) closeBtn.focus();
+  });
+
   _fetchIpDetail(ip);
 }
 
 function closeIpDrawer() {
   _stopLivePolling();
-  _drawerCurrentIp = null;
+  const returnTo = _drawerReturnFocus;
+  _drawerCurrentIp    = null;
+  _drawerReturnFocus  = null;
   const overlay = document.getElementById('ip-drawer-overlay');
   const drawer  = document.getElementById('ip-drawer');
   if (overlay) overlay.style.display = 'none';
@@ -255,6 +292,8 @@ function closeIpDrawer() {
   }
   const tip = document.getElementById('idd-tooltip');
   if (tip) tip.style.display = 'none';
+  /* Restore focus to the element that triggered the drawer */
+  if (returnTo && typeof returnTo.focus === 'function') returnTo.focus();
 }
 
 document.addEventListener('keydown', e => {
@@ -371,13 +410,13 @@ function _setBadge(isLive) {
 // ── Live section partial update ───────────────────────────────────────────────
 
 function _updateLiveSection(data) {
-  /* Only refresh parts that change — pipeline/history are static per session */
   const f  = data.features || {};
   const ml = data.ml       || {};
   const st = data.state    || {};
   _renderFeatureSignals(f, ml.attack_class);
   _renderMlBars(ml, data.thresholds || {});
   _renderHistoryPills(st);
+  _renderPipeline(data, ml, st, ml.is_anomaly);
 }
 
 // ── Full render ───────────────────────────────────────────────────────────────
@@ -418,6 +457,7 @@ function _renderIpDetail(d) {
   _renderMlBars(ml, th);
   _renderPipeline(d, ml, st, isAnomaly);
   _renderHistoryPills(st);
+  _renderExpertTrace(d, ml, st, f, th);
 
   _iddShow('content');
 }
@@ -500,14 +540,20 @@ function _mkSignalCard(feat, val, isIF) {
   const valCol    = isAlert ? 'var(--red,#ff3d5a)' : 'var(--text,#e8eaf6)';
   /* No triangle — red card is sufficient warning */
   const icon = '';
-  const tip = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
+  const tipText = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
+  const tip     = tipText.replace(/"/g, '&quot;');
   return `
     <div class="idd-fc"
          style="background:var(--surface,#f7f8fc);border-radius:12px;padding:18px 20px;
                 border:1px solid ${borderCol}"
          data-tip="${tip}"
+         tabindex="0"
+         role="button"
+         aria-label="${feat.label} — press for details"
          onmouseenter="_iddShowTip(event,this.dataset.tip)"
-         onmouseleave="_iddHideTip()">
+         onmouseleave="_iddHideTip()"
+         onfocus="_iddShowTipEl(this)"
+         onblur="_iddHideTip()">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:9px">
         <div style="font-size:13px;color:var(--sub,#9499b7);
              font-family:var(--mono,'Space Mono',monospace);
@@ -766,6 +812,21 @@ function _iddShowTip(e, text) {
   _iddMoveTip(e);
 }
 
+/* Show tooltip anchored to an element — used for keyboard focus (no mouseevent) */
+function _iddShowTipEl(el) {
+  const text = el.dataset.tip;
+  if (!text) return;
+  const tip = document.getElementById('idd-tooltip');
+  if (!tip) return;
+  tip.textContent = text;
+  tip.style.display = 'block';
+  const rect = el.getBoundingClientRect();
+  const tw   = tip.offsetWidth || 240;
+  const x    = rect.left + rect.width / 2 - tw / 2;
+  tip.style.left = Math.max(4, Math.min(x, window.innerWidth - tw - 8)) + 'px';
+  tip.style.top  = Math.max(4, rect.bottom + 6) + 'px';
+}
+
 function _iddMoveTip(e) {
   const tip = document.getElementById('idd-tooltip');
   if (!tip || tip.style.display === 'none') return;
@@ -812,4 +873,180 @@ function _fmtTs(ts) {
     const timePart = d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
     return `${datePart}, ${timePart}`;
   } catch { return '--'; }
+}
+
+// ── Expert Mode: Algorithm Trace ──────────────────────────────────────────────
+function _renderExpertTrace(d, ml, st, f, th) {
+  const expertSection = document.getElementById('idd-expert-section');
+  const expertContent = document.getElementById('idd-expert-content');
+  if (!expertSection || !expertContent) return;
+
+  if (!window.EXPERT_MODE) {
+    expertSection.style.display = 'none';
+    return;
+  }
+  expertSection.style.display = 'block';
+
+  const ifScore = ml.if_score || 0;
+  const isAnomaly = ml.is_anomaly;
+  const attackClass = ml.attack_class || 'Uncertain';
+  const rfConf = ml.confidence || 0;
+  const ifThr = th.if_threshold || 0.6092;
+  const rfGate = th.rf_conf_gate || 0.7;
+
+  // IF feature vector (all 16)
+  const ifFeatures = [
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Time elapsed since the first packet of the flow.' },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed.' },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume in bytes.' },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Packets per second; high values indicate potential floods.' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Bytes per second; indicates bandwidth consumption.' },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows from this IP.' },
+    { key: 'tp_src', label: 'Src Port', fmt: v => v.toLocaleString(), desc: 'Source port number used by the traffic.' },
+    { key: 'tp_dst', label: 'Dst Port', fmt: v => v.toLocaleString(), desc: 'Destination port number targeted.' },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport protocol (e.g. TCP, UDP, ICMP).' },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate.' },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size; helps identify specific flood types.' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and byte rate.' },
+    { key: 'port_entropy', label: 'Port Entropy', fmt: v => v.toFixed(3), desc: 'Distribution of source vs destination ports.' },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration.' },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Variance in packet sizes; low variance often means automated attack traffic.' },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and packet rate.' },
+  ];
+
+  // RF feature vector (all 15)
+  const rfFeatures = [
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Time elapsed since the first packet of the flow.' },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed.' },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume in bytes.' },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Packets per second; high values indicate potential floods.' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Bytes per second; indicates bandwidth consumption.' },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows from this IP.' },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport protocol (e.g. TCP, UDP, ICMP).' },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate.' },
+    { key: 'duration_pkt_ratio', label: 'Duration/Pkt Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of flow duration to packet count.' },
+    { key: 'pkt_rate_per_duration', label: 'Pkt Rate/Duration', fmt: v => v.toFixed(4), desc: 'Rate of packets scaled by flow duration.' },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size; helps identify specific flood types.' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and byte rate.' },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration.' },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Variance in packet sizes; low variance often means automated attack traffic.' },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and packet rate.' },
+  ];
+
+  // Flat feature lookup
+  const vals = {
+    flow_duration_sec: f.duration_sec || 0,
+    packet_count: f.pkt_count || 0,
+    byte_count: f.byte_count || 0,
+    packet_count_per_second: f.pps || 0,
+    byte_count_per_second: f.byte_rate || 0,
+    flow_count_per_src: f.flow_count_per_src || 1,
+    tp_src: f.tp_src || 0,
+    tp_dst: f.tp_dst || 0,
+    ip_proto: f.ip_proto || 0,
+    pkt_byte_rate_ratio: f.pkt_byte_rate_ratio || 0,
+    avg_bytes_per_pkt: f.pkt_count > 0 ? (f.byte_count || 0) / (f.pkt_count || 1) : 0,
+    flow_intensity: f.flow_intensity || 0,
+    port_entropy: f.port_entropy || 0,
+    bytes_per_duration: f.bytes_per_duration || 0,
+    pkt_size_uniformity: f.pkt_size_uniformity || 0,
+    flow_src_intensity: f.flow_src_intensity || 0,
+    duration_pkt_ratio: (f.duration_sec || 0) > 0 ? (f.duration_sec || 0) / Math.max(f.pkt_count || 1, 1) : 0,
+    pkt_rate_per_duration: (f.pps || 0) / Math.max(f.duration_sec || 1, 1),
+  };
+
+  // IF feature cards
+  let ifHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Isolation Forest model evaluated 16 features to detect anomalous deviations from normal traffic baselines.</div>';
+  ifHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
+  ifFeatures.forEach(feat => {
+    const val = vals[feat.key];
+    const fmtVal = feat.fmt(val);
+    ifHtml += `
+      <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);border-radius:8px;padding:12px 14px;">
+        <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${feat.label}</div>
+        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e);margin-bottom:4px">${fmtVal}</div>
+        <div style="font-size:10px;color:var(--sub2);font-family:var(--mono);line-height:1.4">${feat.desc}</div>
+      </div>`;
+  });
+  ifHtml += '</div>';
+
+  // RF feature cards
+  let rfHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Random Forest model classified the anomaly by analyzing 15 flow characteristics against known attack signatures.</div>';
+  rfHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
+  rfFeatures.forEach(feat => {
+    const val = vals[feat.key];
+    const fmtVal = feat.fmt(val);
+    rfHtml += `
+      <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);border-radius:8px;padding:12px 14px;">
+        <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${feat.label}</div>
+        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e);margin-bottom:4px">${fmtVal}</div>
+        <div style="font-size:10px;color:var(--sub2);font-family:var(--mono);line-height:1.4">${feat.desc}</div>
+      </div>`;
+  });
+  rfHtml += '</div>';
+
+  // TEA per-IP profile
+  let teaHtml = '';
+  if (d.tea_ip_profile) {
+    const tip = d.tea_ip_profile;
+    teaHtml = `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:11px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">TEA Per-IP Profile</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Verdict</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:${tip.verdict === 'attack' ? 'var(--red)' : tip.verdict === 'normal' ? 'var(--green)' : 'var(--amber)'}">${tip.verdict.toUpperCase()}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Samples</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${tip.samples || 0}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">PPS Trend</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${(tip.pps_trend || 0).toFixed(2)}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Entropy</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${(tip.entropy || 0).toFixed(3)}</div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // Decision trace
+  let decisionHtml = '';
+  const reasons = [];
+  if (isAnomaly) reasons.push(`IF anomaly score ${ifScore.toFixed(4)} ≥ threshold ${ifThr.toFixed(4)}`);
+  else reasons.push(`IF score ${ifScore.toFixed(4)} < threshold ${ifThr.toFixed(4)} → Normal`);
+  if (isAnomaly) {
+    if (rfConf >= rfGate * 100) reasons.push(`RF confidence ${rfConf.toFixed(1)}% ≥ gate ${(rfGate*100).toFixed(0)}% → ${attackClass}`);
+    else reasons.push(`RF confidence ${rfConf.toFixed(1)}% < gate ${(rfGate*100).toFixed(0)}% → Uncertain`);
+  }
+  if (st.phase >= 2) reasons.push(`State machine: Phase ${st.phase} (${st.action_taken}) active`);
+  if (f.is_flood_prefilter_flagged) reasons.push(`Flood prefilter: FLAGGED (overrode IF)`);
+
+  decisionHtml = `
+    <div style="margin-top:16px;">
+      <div style="font-size:11px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">Decision Trace</div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        ${reasons.map(r => `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;font-family:var(--mono);color:var(--text)">${r}</div>`).join('')}
+      </div>
+    </div>`;
+
+  expertContent.innerHTML = `
+    <div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(61,108,255,.1);color:var(--blue);border:1px solid rgba(61,108,255,.25);font-family:var(--mono)">IF Features (16)</span>
+      </div>
+      ${ifHtml}
+    </div>
+    <div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(255,176,46,.1);color:var(--amber);border:1px solid rgba(255,176,46,.25);font-family:var(--mono)">RF Features (15)</span>
+      </div>
+      ${rfHtml}
+    </div>
+    ${teaHtml}
+    ${decisionHtml}
+  `;
 }

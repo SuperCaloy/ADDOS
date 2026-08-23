@@ -7,6 +7,8 @@ from backend.mitigation.state_machine import state_machine
 from backend.mitigation.deception import deception
 from backend.database import writer
 from backend.pipeline import worker
+from backend.pipeline.flood_prefilter import flood_filter
+from backend.pipeline.entropy_analyzer import entropy_analyzer
 from backend.models import loader
 from backend.config import ML_ENABLED
 
@@ -14,14 +16,7 @@ log = logging.getLogger(__name__)
 
 
 def _estimate_pkt_count(flow_stats: dict) -> int:
-    """Real packet_count from the OVS flow-stats poll, when present.
-
-    Falls back to packet_count_per_second (this worker cycle is ~1s, so
-    pps approximates the packet count for that window) when flow_stats
-    is missing or stale — e.g. during a switch reconnect. Previously
-    this fell back to a hardcoded 1, which massively undercounts real
-    traffic during a flood.
-    """
+    """Real packet_count when present, else falls back to pps estimate."""
     fs  = flow_stats or {}
     raw = fs.get("packet_count")
     if raw is not None:
@@ -32,7 +27,7 @@ def _estimate_pkt_count(flow_stats: dict) -> int:
 
 _lock = threading.Lock()
 
-# Confidence lock — keeps highest seen confidence+attack_class per IP
+# Confidence lock - keeps highest seen confidence+attack_class per IP
 # Only updates if new confidence > locked value
 _conf_lock: dict[str, tuple[float, str]] = {}
 _conf_lock_mutex = threading.Lock()
@@ -45,15 +40,19 @@ _LEGIT_HOST_IPS: frozenset = frozenset([
     "10.0.0.5", # h5
 ])
 
-# Ground truth — attacker hosts h6-h19
-_ATTACKER_IPS: frozenset = frozenset([f"10.0.0.{i}" for i in range(6, 20)])
+# Ground truth - attacker hosts h6-h19 + h22-h27 (20 total), per topology.py.
+# h20 (server) and h21 (sinkhole) are excluded on purpose, not attackers.
+_ATTACKER_IPS: frozenset = frozenset(
+    [f"10.0.0.{i}" for i in range(6, 20)] +
+    [f"10.0.0.{i}" for i in range(22, 28)]
+)
 
 _stats = {
     "total_packets":       0,
     "malicious_dropped":   0,   # ML events classified as malicious
     "actual_pkts_dropped": 0,   # real OVS physical drops from dropped_delta messages
     "normal_packets":      0,
-    # Dedicated legit counter — incremented directly when IF says normal.
+    # Dedicated legit counter - incremented directly when IF says normal.
     # Avoids subtraction (raw_total - dropped) which breaks when attackers dominate.
     "normal_forwarded":    0,
     "false_positives":     0,
@@ -68,11 +67,11 @@ _sse_buffer: collections.deque = collections.deque(maxlen=200)
 _sse_dedup: dict = {}
 _SSE_DEDUP_TTL = 5.0
 
-# ── Pending restores — IPs awaiting baseline traffic restart after manual release
+# ── Pending restores - IPs awaiting baseline traffic restart after manual release
 _restore_lock     = threading.Lock()
 _pending_restores: set[str] = set()
 
-# ── Scan log — rolling buffer of last 200 flow evaluations for /api/debug/flows
+# ── Scan log - rolling buffer of last 200 flow evaluations for /api/debug/flows
 _scan_lock   = threading.Lock()
 _scan_buffer: collections.deque = collections.deque(maxlen=200)
 
@@ -91,7 +90,7 @@ def push_scan_result(src_ip: str, pps: float, sw_delta: float,
         "threshold":   round(threshold, 4),
         "is_anomaly":  is_anomaly,
         "attack_class": attack_class if is_anomaly else "Normal",
-        "confidence":  f"{confidence*100:.1f}%" if is_anomaly else "—",
+        "confidence":  f"{confidence*100:.1f}%" if is_anomaly else "-",
     }
     with _scan_lock:
         _scan_buffer.appendleft(entry)
@@ -101,7 +100,7 @@ def get_scan_log() -> list[dict]:
     with _scan_lock:
         return list(_scan_buffer)
 
-# ── Pipeline debug log — rolling buffer of last 200 inference results
+# ── Pipeline debug log - rolling buffer of last 200 inference results
 # Each entry: {src_ip, pps, if_score, threshold, is_anomaly,
 #              attack_class, confidence, action, ts}
 # Exposed via GET /api/debug so operators can see what the ML pipeline is doing.
@@ -120,16 +119,7 @@ def _push_debug(entry: dict) -> None:
 
 
 def record_dropped_packets(src_ip: str, delta: int) -> None:
-    """Called by ZMQ receiver for every 'dropped_delta' message from ryu_controller.
-
-    F3 fix: accumulates REAL physical packet drop counts from OVS blocked flow
-    entries (priority 80/90/100). This gives the UI an accurate 'Malicious Dropped'
-    counter instead of the misleading per-ML-event count.
-
-    Call this from zmq_receiver.py when msg["type"] == "dropped_delta":
-        from backend.pipeline.decision_engine import record_dropped_packets
-        record_dropped_packets(msg["src_ip"], msg["delta"])
-    """
+    """Accumulates real OVS dropped packet counts from ryu_controller."""
     with _lock:
         _stats["actual_pkts_dropped"] += delta
 
@@ -164,21 +154,11 @@ def get_stats() -> dict:
 # ── FP rate fix ────────────────────────────────────────────────────────────────
 
 def record_false_positive(src_ip: str) -> None:
-    """Called by quarantine.py on every manual release.
-
-    Manual release = operator confirmed a blocked host was legitimate = real FP.
-
-    H4 fix: also buffers fp=1 into traffic_summary so the PDF report's
-    FP rate reflects operational ground truth.  The flush guard in writer.py
-    was also fixed (it previously skipped total=0 entries, dropping FP rows).
-
-    Also queues src_ip for auto-restoration of baseline traffic (Feature 2).
-    """
+    """Manual release of a blocked host, real FP. Buffers into traffic_summary
+    and queues src_ip for baseline restore."""
     with _lock:
         _stats["false_positives"] += 1
-    # H4: write to traffic_summary so report.py sees it (flushed within 5s)
     writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1)
-    # Feature 2: queue for baseline restore polling
     with _restore_lock:
         _pending_restores.add(src_ip)
     log.info("FP recorded for %s (manual release). fp_total=%d",
@@ -186,10 +166,7 @@ def record_false_positive(src_ip: str) -> None:
 
 
 def drain_pending_restores() -> list[str]:
-    """Drain and return IPs queued for baseline traffic restoration.
-
-    Called by GET /api/pending_restores, polled by topology.py every 5s.
-    """
+    """Drain and return IPs queued for baseline traffic restoration."""
     with _restore_lock:
         ips = list(_pending_restores)
         _pending_restores.clear()
@@ -224,21 +201,46 @@ def _assign_priority(if_score: float, confidence: float) -> str:
     return "Low"
 
 
+# ── Detection ledger gate: one 'detected' row per phase entry ────────────
+# Keyed on IpState.phase_entered (monotonic). A phase transition changes the
+# timestamp so the next evidence write logs again; repeats inside one entry
+# are suppressed. Stale entries are pruned once the cache grows past the cap,
+# keeping memory bounded under IP churn without affecting correctness (a
+# returning IP always carries a new, later phase_entered).
+_DETECTION_LOGGED_MAX = 128
+_detection_logged: dict[str, float] = {}
+
+
+def _should_log_detection(src_ip: str, phase_entered: float | None) -> bool:
+    if phase_entered is None:
+        return True
+    with _lock:
+        if _detection_logged.get(src_ip) == phase_entered:
+            return False
+        _detection_logged[src_ip] = phase_entered
+        if len(_detection_logged) > _DETECTION_LOGGED_MAX:
+            live_states = state_machine._states
+            for ip in [k for k in _detection_logged if k not in live_states]:
+                del _detection_logged[ip]
+        return True
+
+
 def on_result(src_ip: str, if_score, is_anomaly,
               attack_class, confidence, *,
               flow_stats: dict = None, switch_stats: dict = None,
               timed_out: bool, enqueued_at: float = None) -> None:
+    from backend.api.stats import get_active_attacks as _get_gt
     t_start = time.monotonic()
 
-    # Detection Time — flow queued (worker.submit) → IF/RF result ready here.
-    # None when not provided (e.g. timeout fallback path) — left as None in DB.
+    # Detection Time - flow queued (worker.submit) → IF/RF result ready here.
+    # None when not provided (e.g. timeout fallback path) - left as None in DB.
     detection_ms = ((t_start - enqueued_at) * 1000.0) if enqueued_at is not None else None
 
     with _lock:
         _stats["total_packets"] += 1
 
-    # --- ML OFF — count packet as normal, skip all detection and mitigation ---
-    # ML OFF — show traffic visually but take NO action
+    # --- ML OFF - count packet as normal, skip all detection and mitigation ---
+    # ML OFF - show traffic visually but take NO action
     if not ML_ENABLED:
         _pkt_count = _estimate_pkt_count(flow_stats)
         _pps       = float((flow_stats or {}).get("packet_count_per_second", 0.0))
@@ -259,10 +261,10 @@ def on_result(src_ip: str, if_score, is_anomaly,
         return
 
     if timed_out:
-        state_machine.manual_block(src_ip)
+        state_machine.hold_ip(src_ip, reason="queue_timeout", ttl_s=15.0)
         with _lock:
             _stats["malicious_dropped"] += 1
-        log.warning("Fallback block: %s (pipeline timeout)", src_ip)
+        log.warning("Holding: %s (retries exhausted, unscored)", src_ip)
         return
 
     writer.log_detection_features(
@@ -278,11 +280,14 @@ def on_result(src_ip: str, if_score, is_anomaly,
     with _lock:
         _stats["ml_processed"] += 1
 
-    # ── Debug log — record every inference result ─────────────────────────────
+    # ── Debug log - record every inference result ─────────────────────────────
     _pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
 
     # update sinkhole PPS so observation window can escalate/release correctly
     deception.update_pps(src_ip, _pps)
+    # feed live score/confidence too, sinkhole can't escalate on resolved
+    # confidence without this, was previously frozen at entry-time values
+    deception.update_score(src_ip, if_score or 0.0, confidence or 0.0)
 
     _push_debug({
         "ts":          datetime.datetime.now().strftime("%H:%M:%S"),
@@ -295,6 +300,13 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "confidence":  round((confidence or 0.0) * 100, 1),
         "action":      "pending",
     })
+    # Always refresh a tracked IP's live telemetry, even if it falls below the
+    # anomaly threshold. This allows probation (Phase 4) to monitor and re-ban
+    # attackers that try to evade by hovering just below the threshold.
+    state_machine.update_observation(
+        src_ip, if_score, attack_class or "Normal", confidence or 0.0,
+        float((flow_stats or {}).get("packet_count_per_second", 0.0)),
+    )
 
     if not is_anomaly:
         _pkt_count = _estimate_pkt_count(flow_stats)
@@ -302,8 +314,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
             _stats["normal_packets"]  += 1
             _stats["normal_forwarded"] += _pkt_count
 
-        # IF: normal → TN if legit, FN if attacker
-        _is_attacker = src_ip in _ATTACKER_IPS
+        # IF: normal → TN if legit, FN if attacker (only if actively attacking)
+        _is_attacker = src_ip in _get_gt()
         writer.log_traffic_summary(
             total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0,
             tn=(0 if _is_attacker else 1),
@@ -318,23 +330,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     log.debug("Anomaly confirmed: %s  IF=%.4f  RF=%s  conf=%.1f%%",
               src_ip, if_score, attack_class, (confidence or 0)*100)
 
-    # Inform resource_guard of the current attack protocol.
-    # Allows CRIT tier to install protocol-specific OVS drop rules
-    # that catch rand-source floods bypassing per-IP block rules.
-    from backend.mitigation.resource_guard import resource_guard
-    resource_guard.set_attack_proto(attack_class)
-
-    # F4 fix: update recent_pps on the state so _evaluate_phase1 can check
-    # whether traffic is still active before escalating to a time ban.
-    _recent_pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
-    with state_machine._lock:
-        _existing_state = state_machine._states.get(src_ip)
-        if _existing_state is not None:
-            _existing_state.recent_pps = _recent_pps
-
-    # Bug 3a fix: check if legit host BEFORE mitigation so FPR updates immediately
-    # in the UI. Previously this check ran after on_detection() and db writes,
-    # causing the FP counter to lag behind what was shown in the dashboard.
+    # Check legit host before mitigation so FP counter updates immediately.
     is_known_legit = src_ip in _LEGIT_HOST_IPS
     if is_known_legit:
         with _lock:
@@ -342,7 +338,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1)
         log.warning("FALSE POSITIVE detected: %s is a known legit host!", src_ip)
 
-    # Confidence lock — only update attack_class/confidence if new > locked
+    # Confidence lock - only update attack_class/confidence if new > locked
     with _conf_lock_mutex:
         prev = _conf_lock.get(src_ip)
         if prev is not None and confidence < prev[0]:
@@ -354,47 +350,85 @@ def on_result(src_ip: str, if_score, is_anomaly,
     predicted_class = "DDoS" if attack_class != "Uncertain" else "Anomaly"
     priority        = _assign_priority(if_score, confidence)
 
-    # Mitigation Response Time — IF/RF result ready (t_start) → FlowMod dispatched.
-    # on_detection()/on_reoffence() are synchronous, so by the time they return
-    # the command has already been pushed to the commander.
-    t_mitigate_start = time.monotonic()
+    # TEA mitigation gate. Every interval already went through IF/RF.
+    # Ground truth counting below always runs, regardless of this decision.
+    _tea_result = {
+        "is_flash_crowd":    (flow_stats or {}).get("tea_flash_crowd", False),
+        "is_attack_pattern": (flow_stats or {}).get("tea_attack_pattern", False),
+        "confidence":        (flow_stats or {}).get("tea_confidence", "low"),
+        "is_learned":        (flow_stats or {}).get("tea_is_learned", False),
+    }
 
-    # Check if IP was previously banned and is re-offending
-    existing = state_machine._states.get(src_ip)
-    if existing is None:
-        # Check history for prior bans on this IP
-        from backend.database.db import query as _q
-        prior = _q(
-            "SELECT ban_level, offence_count FROM ip_attack_history WHERE src_ip=? ORDER BY id DESC LIMIT 1",
-            (src_ip,)
-        )
-        if prior and prior[0].get("ban_level", 0) is not None:
-            prev_ban   = int(prior[0].get("ban_level", 0) or 0)
-            prev_off   = int(prior[0].get("offence_count", 0) or 0)
-            if prev_ban > 0:  # only re-offence if previously banned, not just quarantined
-                state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_off)
-                action_taken = state_machine._states[src_ip].action_taken if src_ip in state_machine._states else "Quarantined"
+    # TEA confidence-based routing
+    _tea_confidence = _tea_result.get("confidence", "low")
+    _tea_attack = _tea_result.get("is_attack_pattern", False)
+
+    # High confidence attack -> ensure High priority (fast-track)
+    if _tea_attack and _tea_confidence == "high":
+        if priority == "Low":
+            priority = "High"
+            log.info("TEA high-confidence fast-track: %s -> High priority", src_ip)
+
+    _already_flagged = flood_filter.is_flagged_any(src_ip)
+    _tea_mitigate     = entropy_analyzer.should_submit(_tea_result, _already_flagged)
+    mitigation_ms = None
+    action_taken  = "Logged (flash crowd, no mitigation)"
+
+    if _tea_mitigate:
+        # Tell resource_guard the attack proto for CRIT tier drop rules.
+        from backend.mitigation.resource_guard import resource_guard
+        resource_guard.set_attack_proto(attack_class)
+
+        # Update recent_pps so phase1 can check if traffic is still active.
+        _recent_pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
+        with state_machine._lock:
+            _existing_state = state_machine._states.get(src_ip)
+            if _existing_state is not None:
+                _existing_state.recent_pps = _recent_pps
+
+        # Mitigation response time, result ready to FlowMod dispatched.
+        t_mitigate_start = time.monotonic()
+
+        # Check if IP was previously banned and is re-offending
+        existing = state_machine._states.get(src_ip)
+        if existing is None:
+            # Check history for prior bans on this IP
+            from backend.database.db import query as _q
+            prior = _q(
+                "SELECT ban_level, offence_count FROM ip_attack_history WHERE src_ip=? ORDER BY id DESC LIMIT 1",
+                (src_ip,)
+            )
+            if prior and prior[0].get("ban_level", 0) is not None:
+                prev_ban   = int(prior[0].get("ban_level", 0) or 0)
+                prev_off   = int(prior[0].get("offence_count", 0) or 0)
+                if prev_ban > 0:  # only re-offence if previously banned, not just quarantined
+                    state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_off)
+                    action_taken = state_machine._states[src_ip].action_taken if src_ip in state_machine._states else "Quarantined"
+                else:
+                    action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
             else:
                 action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
         else:
             action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
+
+        mitigation_ms = (time.monotonic() - t_mitigate_start) * 1000.0
+
+        with _lock:
+            _stats["malicious_dropped"] += 1
     else:
-        action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
-
-    mitigation_ms = (time.monotonic() - t_mitigate_start) * 1000.0
-
-    with _lock:
-        _stats["malicious_dropped"] += 1
+        log.debug("TEA mitigation gate: flash crowd, logging only - %s", src_ip)
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     ip_state    = state_machine._states.get(src_ip)
     phase_label = ip_state.phase_label() if ip_state else None
 
-    # Skip DB mitigation write for known legit hosts.
-    # FP is already counted above — writing a "DDoS" row here would
-    # corrupt ground truth. Only real attackers get a mitigation record.
-    if not is_known_legit:
+    # Skip write for legit hosts, and for flash crowd, no action taken.
+    # One 'detected' row per phase entry: per-flow repeats inside the same
+    # entry are suppressed by the gate (writer dedup remains as safety net).
+    if not is_known_legit and _tea_mitigate and (
+        ip_state is None or _should_log_detection(src_ip, ip_state.phase_entered)
+    ):
         writer.log_mitigation_event({
         "timestamp":       ts,
         "src_ip":          src_ip,
@@ -406,23 +440,29 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "if_score":        if_score,
         "phase":           phase_label,
         "is_manual":       0,
-        "force_insert":    True,   # never overwrite existing rows
+        "event_type":      "detected",
         "detection_ms":    detection_ms,
         "mitigation_ms":   mitigation_ms,
         })
 
     _threat_pps = _estimate_pkt_count(flow_stats)
-    _is_tp      = src_ip in _ATTACKER_IPS
+    _is_tp      = src_ip in _get_gt()
     _is_legit   = src_ip in _LEGIT_HOST_IPS
 
     # IF metrics
     _if_tp = 1 if _is_tp    else 0
     _if_fp = 1 if _is_legit else 0
 
-    # RF ground truth — use live topology-reported attack type
+    # RF ground truth - use live topology-reported attack type
     from backend.api.stats import get_active_attacks as _get_gt
     _gt = _get_gt()
     _expected_class = _gt.get(src_ip)  # "SYN", "ICMP", "UDP" or None
+    # MIXED is a topology-only label (h19), RF's 3-class model was never
+    # trained to predict it. Scoring it as FN/FP either way corrupts the
+    # confusion matrix, so it's excluded from RF ground truth entirely,
+    # same as if the IP had never been registered.
+    if _expected_class == "MIXED":
+        _expected_class = None
 
     # Map RF attack_class to short type
     _class_map = {"SYN Flood": "SYN", "ICMP Flood": "ICMP", "UDP Flood": "UDP"}
@@ -446,7 +486,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
             elif _expected_class == "UDP":
                 _rf_tp_udp = 1; _rf_tn_syn = 1; _rf_tn_icmp = 1
         else:
-            # Misclassification — track off-diagonal cell
+            # Misclassification - track off-diagonal cell
             _rf_fp = 1; _rf_fn = 1
             _mis = (_expected_class, _predicted)
             if   _mis == ("SYN",  "ICMP"): _rf_syn_as_icmp  = 1
@@ -497,16 +537,20 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # Force-push SSE on phase upgrades (Quarantine→TimeBan, →Blackhole)
     # so the audit log always reflects the latest phase, bypassing dedup.
-    _phase_upgrade = action_taken in ("Time Ban", "Blackhole")
-    _push_sse_event({
-        "timestamp":       ts,
-        "src_ip":          src_ip,
-        "predicted_class": predicted_class,
-        "attack_vector":   attack_class,
-        "confidence":      f"{confidence * 100:.1f}%",
-        "priority":        priority,
-        "action_taken":    action_taken,
-    }, force=_phase_upgrade)
+    # Skip entirely on flash-crowd ticks - no real action happened, the
+    # Audit Log should only ever show actual mitigation outcomes.
+    if not is_known_legit and _tea_mitigate:
+        _phase_upgrade = action_taken in ("Time Ban", "Blackhole")
+        _push_sse_event({
+            "timestamp":       ts,
+            "src_ip":          src_ip,
+            "predicted_class": predicted_class,
+            "attack_vector":   attack_class,
+            "confidence":      f"{confidence * 100:.1f}%",
+            "priority":        priority,
+            "action_taken":    action_taken,
+            "event_type":      "released" if action_taken == "Released" else "transition",
+        }, force=_phase_upgrade)
 
 
 def start() -> None:

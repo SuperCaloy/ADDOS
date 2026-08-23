@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import pandas as pd
 from backend.models import loader
@@ -20,25 +21,26 @@ def extract_rf_features(flow_stats: dict) -> np.ndarray:
     ipr  = float(s.get("ip_proto",                0))
 
     # engineered features
-    fdt               = fds * 1e9 + fdns
-    fdt_log           = np.log1p(max(fdt, 0))
-    pkt_byte_rate_ratio  = np.log1p(max(pps / (bps + eps), 0))
-    duration_pkt_ratio   = np.log1p(max(fdt_log / (pkt + eps), 0)) if pkt > 0 else 0.0
-    pkt_rate_per_duration = np.log1p(max(pkt / (fdt_log + eps), 0))
-    avg_bytes_per_pkt    = byt / (pkt + eps)
-    flow_intensity       = np.log1p(max(pkt * bps, 0))
-    bytes_per_duration   = np.log1p(max(byt / (fds + eps), 0))
-    pkt_size_uniformity  = np.log1p(max(avg_bytes_per_pkt / (bps + 1), 0))
-    flow_src_intensity   = np.log1p(max(fcps * pps, 0))
+    fdt                    = fds * 1e9 + fdns
+    fdt_log                = math.log1p(max(fdt, 0))
+    pkt_byte_rate_ratio    = math.log1p(max(pps / (bps + eps), 0))
+    duration_pkt_ratio     = math.log1p(max(fdt_log / (pkt + eps), 0)) if pkt > 0 else 0.0
+    pkt_rate_per_duration  = math.log1p(max(pkt / (fdt_log + eps), 0))
+    avg_bytes_per_pkt      = byt / (pkt + eps)
+    flow_intensity         = math.log1p(max(pkt * bps, 0))
+    bytes_per_duration     = math.log1p(max(byt / (fds + eps), 0))
+    # eps here, not +1 — matches training denominator exactly
+    pkt_size_uniformity    = math.log1p(max(avg_bytes_per_pkt / (bps + eps), 0))
+    flow_src_intensity     = math.log1p(max(fcps * pps, 0))
 
     # contract order (15 features)
     vec = np.array([
-        np.log1p(max(fds,  0)),   # flow_duration_sec
-        np.log1p(max(pkt,  0)),   # packet_count
-        np.log1p(max(byt,  0)),   # byte_count
-        np.log1p(max(pps,  0)),   # packet_count_per_second
-        np.log1p(max(bps,  0)),   # byte_count_per_second
-        np.log1p(max(fcps, 0)),   # flow_count_per_src
+        math.log1p(max(fds,  0)),   # flow_duration_sec
+        math.log1p(max(pkt,  0)),   # packet_count
+        math.log1p(max(byt,  0)),   # byte_count
+        math.log1p(max(pps,  0)),   # packet_count_per_second
+        math.log1p(max(bps,  0)),   # byte_count_per_second
+        math.log1p(max(fcps, 0)),   # flow_count_per_src
         ipr,                       # ip_proto
         pkt_byte_rate_ratio,
         duration_pkt_ratio,

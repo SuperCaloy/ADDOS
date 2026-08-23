@@ -38,6 +38,8 @@ function renderPriority(v) {
 function showToast(msg, isErr = false) {
   const el     = document.createElement('div');
   el.className = 'toast';
+  el.setAttribute('role', isErr ? 'alert' : 'status');
+  el.setAttribute('aria-live', isErr ? 'assertive' : 'polite');
   if (isErr) el.style.borderColor = 'rgba(255,61,90,.4)';
   el.textContent = msg;
   document.getElementById('toaster').appendChild(el);
@@ -48,15 +50,14 @@ function showToast(msg, isErr = false) {
 
 let isLight = false;
 
-function toggleTheme() {
-  isLight = !isLight;
-  document.body.classList.toggle('light', isLight);
-  document.getElementById('theme-btn').textContent = isLight ? '☾ Dark Mode' : '☀ Light Mode';
+function _applyTheme(light) {
+  document.body.classList.toggle('light', light);
+  document.body.classList.toggle('dark', !light);
+  document.getElementById('theme-btn').textContent = light ? 'Dark Mode' : 'Light Mode';
 
-  /* Update chart colors to match theme */
-  const gridColor   = isLight ? '#d8dce8' : '#1e2235';
-  const tickColor   = isLight ? '#6b7280' : '#5c6080';
-  const legendColor = isLight ? '#4b5563' : '#5c6080';
+  const gridColor   = light ? '#d8dce8' : '#1e2235';
+  const tickColor   = light ? '#6b7280' : '#5c6080';
+  const legendColor = light ? '#4b5563' : '#5c6080';
 
   if (window._chart) {
     window._chart.options.scales.x.grid.color         = gridColor;
@@ -64,19 +65,37 @@ function toggleTheme() {
     window._chart.options.scales.x.ticks.color        = tickColor;
     window._chart.options.scales.y.ticks.color        = tickColor;
     window._chart.options.plugins.legend.labels.color = legendColor;
-    window._chart.options.plugins.tooltip.backgroundColor = isLight ? '#ffffff' : '#111320';
-    window._chart.options.plugins.tooltip.titleColor      = isLight ? '#6b7280' : '#8890b0';
-    window._chart.options.plugins.tooltip.bodyColor       = isLight ? '#111827' : '#e8eaf6';
-    window._chart.options.plugins.tooltip.borderColor     = isLight ? '#d8dce8' : '#1e2235';
+    window._chart.options.plugins.tooltip.backgroundColor = light ? '#ffffff' : '#111320';
+    window._chart.options.plugins.tooltip.titleColor      = light ? '#6b7280' : '#8890b0';
+    window._chart.options.plugins.tooltip.bodyColor       = light ? '#111827' : '#e8eaf6';
+    window._chart.options.plugins.tooltip.borderColor     = light ? '#d8dce8' : '#1e2235';
     window._chart.update();
   }
 
-  localStorage.setItem('adddos-theme', isLight ? 'light' : 'dark');
+  if (window.ExpertPipeline && window.ExpertPipeline.canvas) {
+    window.ExpertPipeline.isLightMode = light;
+  }
+
+  localStorage.setItem('adddos-theme', light ? 'light' : 'dark');
+}
+
+function toggleTheme() {
+  isLight = !isLight;
+  _applyTheme(isLight);
 }
 
 /* Restore saved theme on load — defer so window._chart exists first */
 window.addEventListener('DOMContentLoaded', () => {
-  if (localStorage.getItem('adddos-theme') === 'light') toggleTheme();
+  const saved = localStorage.getItem('adddos-theme');
+  if (saved === 'light') {
+    isLight = true;
+    _applyTheme(true);
+  } else if (saved === 'dark') {
+    isLight = false;
+    _applyTheme(false);
+  } else {
+    _applyTheme(false);
+  }
 });
 
 /* ── Report modal ──────────────────────────────────────────────────────────── */
@@ -148,7 +167,7 @@ function _renderCal(which) {
   const daysIn = new Date(s.year, s.month + 1, 0).getDate();
 
   let html = '';
-  for (let i = 0; i < first; i++) html += `<div class="cal-day cal-empty"></div>`;
+  for (let i = 0; i < first; i++) html += `<div class="cal-day cal-empty" aria-hidden="true"></div>`;
 
   for (let d = 1; d <= daysIn; d++) {
     const ds      = _isoDate(new Date(s.year, s.month, d));
@@ -163,8 +182,11 @@ function _renderCal(which) {
     if (isSel)    cls += ' cal-selected';
     if (isToday)  cls += ' cal-today';
 
-    const click = isFut ? '' : `onclick="calSelect('${which}','${ds}')"`;
-    html += `<div class="${cls}" ${click}>${d}</div>`;
+    if (isFut) {
+      html += `<button type="button" class="${cls}" disabled aria-label="${ds} (unavailable)">${d}</button>`;
+    } else {
+      html += `<button type="button" class="${cls}" onclick="calSelect('${which}','${ds}')" aria-label="${ds}${isSel ? ' (selected)' : ''}${hasData ? ', has data' : ''}">${d}</button>`;
+    }
   }
   grid.innerHTML = html;
 }

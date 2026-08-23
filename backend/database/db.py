@@ -37,6 +37,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             if_score        REAL,
             phase           TEXT,
             is_manual       INTEGER DEFAULT 0,
+            event_type      TEXT DEFAULT 'transition',
+            reason          TEXT,
             detection_ms    REAL,
             mitigation_ms   REAL
         );
@@ -52,7 +54,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             action_taken    TEXT    NOT NULL,
             if_score        REAL,
             phase           TEXT,
-            is_manual       INTEGER DEFAULT 0
+            is_manual       INTEGER DEFAULT 0,
+            event_type      TEXT DEFAULT 'transition',
+            reason          TEXT
         );
 
         CREATE TABLE IF NOT EXISTS traffic_summary (
@@ -94,7 +98,11 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             rf_icmp_as_syn        INTEGER DEFAULT 0,
             rf_icmp_as_udp        INTEGER DEFAULT 0,
             rf_udp_as_syn         INTEGER DEFAULT 0,
-            rf_udp_as_icmp        INTEGER DEFAULT 0
+            rf_udp_as_icmp        INTEGER DEFAULT 0,
+            -- hold_ip stats (unscored fallback mitigation)
+            held                  INTEGER DEFAULT 0,
+            rescored              INTEGER DEFAULT 0,
+            expired_unscored      INTEGER DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_events_ts    ON mitigation_events(timestamp);
@@ -289,11 +297,33 @@ def _migrate(conn: sqlite3.Connection) -> None:
         except sqlite3.OperationalError:
             pass
 
+    # hold_ip stats columns
+    for col in ("held", "rescored", "expired_unscored"):
+        try:
+            conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
 
     # latency tracking columns (Detection Time / Mitigation Response Time)
     for col in ("detection_ms", "mitigation_ms"):
         try:
             conn.execute(f"ALTER TABLE mitigation_events ADD COLUMN {col} REAL")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # lifecycle ledger columns (event_type + reason) on hot and archive tables
+    for table in ("mitigation_events", "mitigation_events_archive"):
+        try:
+            conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN event_type TEXT DEFAULT 'transition'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN reason TEXT")
             conn.commit()
         except sqlite3.OperationalError:
             pass

@@ -44,7 +44,8 @@ _summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
                    "rf_tp_udp": 0, "rf_fp_udp": 0, "rf_tn_udp": 0, "rf_fn_udp": 0,
                    "rf_syn_as_icmp": 0, "rf_syn_as_udp": 0,
                    "rf_icmp_as_syn": 0, "rf_icmp_as_udp": 0,
-                   "rf_udp_as_syn":  0, "rf_udp_as_icmp": 0}
+                   "rf_udp_as_syn":  0, "rf_udp_as_icmp": 0,
+                   "held": 0, "rescored": 0, "expired_unscored": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +65,8 @@ def log_mitigation_event(event: dict) -> None:
             INSERT INTO mitigation_events
                 (timestamp, src_ip, predicted_class, attack_vector,
                  confidence, priority, action_taken, if_score, phase, is_manual,
-                 detection_ms, mitigation_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 event_type, reason, detection_ms, mitigation_ms)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             event["timestamp"],
             event["src_ip"],
@@ -77,6 +78,8 @@ def log_mitigation_event(event: dict) -> None:
             event.get("if_score"),
             event.get("phase"),
             int(event.get("is_manual", 0)),
+            event.get("event_type") or "transition",
+            event.get("reason"),
             event.get("detection_ms"),
             event.get("mitigation_ms"),
         ))
@@ -101,13 +104,15 @@ def log_manual_action(src_ip: str, action: str,
         execute("""
             INSERT INTO mitigation_events
                 (timestamp, src_ip, predicted_class, attack_vector,
-                 confidence, priority, action_taken, if_score, phase, is_manual)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 confidence, priority, action_taken, if_score, phase, is_manual,
+                 event_type, reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             ts, src_ip, "DDoS", attack_vector,
             confidence, priority,
             action.replace("_", " ").title(),
             if_score, phase, 1,
+            "manual", None,
         ))
     except Exception:
         log.exception("Failed to write manual action for %s", src_ip)
@@ -281,7 +286,9 @@ def log_traffic_summary(total: int, threats: int,
                         rf_tp_udp: int = 0, rf_fp_udp: int = 0, rf_tn_udp: int = 0, rf_fn_udp: int = 0,
                         rf_syn_as_icmp: int = 0, rf_syn_as_udp: int = 0,
                         rf_icmp_as_syn: int = 0, rf_icmp_as_udp: int = 0,
-                        rf_udp_as_syn:  int = 0, rf_udp_as_icmp: int = 0) -> None:
+                        rf_udp_as_syn:  int = 0, rf_udp_as_icmp: int = 0,
+                        held: int = 0, rescored: int = 0,
+                        expired_unscored: int = 0) -> None:
     # --- ML OFF — skip metric writes to keep dataset clean ---
     if not ML_ENABLED:
         return
@@ -319,6 +326,9 @@ def log_traffic_summary(total: int, threats: int,
         _summary_buffer["rf_icmp_as_udp"] += rf_icmp_as_udp
         _summary_buffer["rf_udp_as_syn"]  += rf_udp_as_syn
         _summary_buffer["rf_udp_as_icmp"] += rf_udp_as_icmp
+        _summary_buffer["held"]             += held
+        _summary_buffer["rescored"]         += rescored
+        _summary_buffer["expired_unscored"] += expired_unscored
 
 
 def flush_summary() -> None:
@@ -343,8 +353,9 @@ def flush_summary() -> None:
                  rf_tp_udp, rf_fp_udp, rf_tn_udp, rf_fn_udp,
                  rf_syn_as_icmp, rf_syn_as_udp,
                  rf_icmp_as_syn, rf_icmp_as_udp,
-                 rf_udp_as_syn,  rf_udp_as_icmp)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 rf_udp_as_syn,  rf_udp_as_icmp,
+                 held, rescored, expired_unscored)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (ts, snapshot["total"], snapshot["threats"],
               snapshot["true_neg"], snapshot["fp"],
               snapshot["tp"], snapshot["tn"], snapshot["fn"],
@@ -355,7 +366,8 @@ def flush_summary() -> None:
               snapshot["rf_tp_udp"], snapshot["rf_fp_udp"], snapshot["rf_tn_udp"], snapshot["rf_fn_udp"],
               snapshot["rf_syn_as_icmp"], snapshot["rf_syn_as_udp"],
               snapshot["rf_icmp_as_syn"], snapshot["rf_icmp_as_udp"],
-              snapshot["rf_udp_as_syn"],  snapshot["rf_udp_as_icmp"]))
+              snapshot["rf_udp_as_syn"],  snapshot["rf_udp_as_icmp"],
+              snapshot["held"], snapshot["rescored"], snapshot["expired_unscored"]))
     except Exception:
         log.exception("Failed to flush traffic_summary")
 
