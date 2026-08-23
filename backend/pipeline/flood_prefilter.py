@@ -20,6 +20,7 @@ _PROTO_CONFIG = {
 # Burst: trip if 40% of limit arrives within 0.1s or 0.5s sub-window
 _BURST_WINDOWS   = [0.1, 0.5]
 _BURST_FRACTION  = 0.4
+_ACK_POP_MIN_INTERVAL = 0.05
 
 # Correlation: 2+ protocols active simultaneously = multi-vector attack
 _CORRELATION_THRESHOLD = 2
@@ -62,6 +63,7 @@ class FloodPreFilter:
 
         # IPs detected on multiple protocols at once
         self._correlated: set[str] = set()
+        self._ack_pop_ts: dict[str, float] = {}
 
     def on_packet(self, src_ip: str, proto: str) -> bool:
         # Record one packet; return True only on the first trip
@@ -116,11 +118,14 @@ class FloodPreFilter:
             log.info("FloodPreFilter correlation: %s active on %d protocols", src_ip, active)
 
     def on_ack(self, src_ip: str) -> None:
-        # SYN-ACK received — remove one half-open SYN entry
+        now = time.monotonic()
         with self._lock:
+            if now - self._ack_pop_ts.get(src_ip, 0.0) < _ACK_POP_MIN_INTERVAL:
+                return
             win = self._windows[src_ip].get("SYN")
             if win and win.times:
                 win.times.pop(0)
+                self._ack_pop_ts[src_ip] = now
 
     def is_flagged(self, src_ip: str, proto: str = None) -> bool:
         with self._lock:
@@ -150,6 +155,7 @@ class FloodPreFilter:
             for proto in _PROTO_CONFIG:
                 self._flagged.pop((src_ip, proto), None)
             self._windows.pop(src_ip, None)
+            self._ack_pop_ts.pop(src_ip, None)
             self._correlated.discard(src_ip)
 
     def purge_stale(self) -> None:
@@ -165,6 +171,7 @@ class FloodPreFilter:
             ]
             for ip in stale:
                 self._windows.pop(ip, None)
+                self._ack_pop_ts.pop(ip, None)
                 self._correlated.discard(ip)
                 for proto in _PROTO_CONFIG:
                     self._flagged.pop((ip, proto), None)

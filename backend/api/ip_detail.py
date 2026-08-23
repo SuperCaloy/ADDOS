@@ -179,13 +179,13 @@ def _build_db_features(src_ip: str) -> dict | None:
 
     # Phase history — all distinct phase transitions
     phase_rows = query("""
-        SELECT timestamp, phase, action_taken, attack_vector
+        SELECT timestamp, phase, action_taken, attack_vector, event_type, reason
         FROM mitigation_events WHERE src_ip = ?
         ORDER BY timestamp ASC
     """, (src_ip,))
     if not phase_rows:
         phase_rows = query("""
-            SELECT timestamp, phase, action_taken, attack_vector
+            SELECT timestamp, phase, action_taken, attack_vector, event_type, reason
             FROM mitigation_events_archive WHERE src_ip = ?
             ORDER BY timestamp ASC
         """, (src_ip,))
@@ -202,6 +202,8 @@ def _build_db_features(src_ip: str) -> dict | None:
                 "phase":         pr.get("phase") or "—",
                 "action_taken":  pr.get("action_taken") or "—",
                 "attack_vector": pr.get("attack_vector") or "—",
+                "event_type":    pr.get("event_type"),
+                "reason":        pr.get("reason"),
             })
 
     return {

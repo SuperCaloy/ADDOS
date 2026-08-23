@@ -21,8 +21,9 @@ log = logging.getLogger(__name__)
 PHASE1_DURATION_LOW  = 10.0
 PHASE1_DURATION_HIGH = 20.0
 
-# Simulation: 30s watch. Production: 5 min watch.
-PROBATION_DURATION = 30.0 if SIMULATION_MODE else 300.0
+# Simulation: 60s watch. Production: 5 min watch.
+# 60s gives ML pipeline enough time to re-score rate_limited traffic during probation.
+PROBATION_DURATION = 60.0 if SIMULATION_MODE else 300.0
 MIN_QUARANTINE_CONFIDENCE = 0.70
 CONFIDENCE_LOCK_THRESHOLD = 0.80
 
@@ -212,6 +213,20 @@ class StateMachine:
                     self._push_command(src_ip, _action)
                 log.info("Prefilter Quarantine: %s (single-protocol trip)", src_ip)
                 self._persist(state)
+                writer.log_mitigation_event({
+                    "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "src_ip":          src_ip,
+                    "predicted_class": "DDoS",
+                    "attack_vector":   state.attack_vector,
+                    "confidence":      state.confidence,
+                    "priority":        state.priority,
+                    "action_taken":    "Quarantined",
+                    "if_score":        state.if_score,
+                    "phase":           "Phase 1",
+                    "is_manual":       False,
+                    "event_type":      "transition",
+                    "reason":          "prefilter trip",
+                })
                 return "Quarantined"
 
         # Correlated — dispatch sinkhole outside the lock, deception has its own.
@@ -295,6 +310,20 @@ class StateMachine:
                                  "vector=%s  duration=%ds",
                                  src_ip, confidence * 100, attack_class, ban_secs)
                         self._persist(state)
+                        writer.log_mitigation_event({
+                            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "src_ip":          src_ip,
+                            "predicted_class": "DDoS",
+                            "attack_vector":   attack_class,
+                            "confidence":      confidence,
+                            "priority":        _prio,
+                            "action_taken":    f"Time Ban ({ban_secs // 60}m)" if ban_secs >= 60 else f"Time Ban ({ban_secs}s)",
+                            "if_score":        if_score,
+                            "phase":           "Time Ban",
+                            "is_manual":       False,
+                            "event_type":      "transition",
+                            "reason":          "high priority detection",
+                        })
                     else:
                         # Low priority — Phase 1 observation (quarantine)
                         state = IpState(
@@ -600,6 +629,21 @@ class StateMachine:
         self._push_command(src_ip, resolve_release_action())
         writer.delete_quarantine_state(src_ip)
         if state is not None:
+            # Terminal event: the lifecycle ledger must show why mitigation ended.
+            writer.log_mitigation_event({
+                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "src_ip":          src_ip,
+                "predicted_class": "DDoS",
+                "attack_vector":   state.attack_vector,
+                "confidence":      state.confidence,
+                "priority":        state.priority,
+                "action_taken":    "Released",
+                "if_score":        state.if_score,
+                "phase":           state.phase_label(),
+                "is_manual":       False,
+                "event_type":      "released",
+                "reason":          reason,
+            })
             # behavioral.record_offense writes to DB so reputation survives restarts
             behavioral.record_offense(
                 src_ip         = src_ip,
@@ -812,6 +856,20 @@ class StateMachine:
                 state.ttl_expires_at = time.monotonic() + ttl_s
                 state.sinkhole_flags = _flag_count
             self._persist(state)
+        writer.log_mitigation_event({
+            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "src_ip":          src_ip,
+            "predicted_class": "DDoS",
+            "attack_vector":   state.attack_vector,
+            "confidence":      state.confidence,
+            "priority":        state.priority,
+            "action_taken":    action_label,
+            "if_score":        state.if_score,
+            "phase":           "Phase 2",
+            "is_manual":       False,
+            "event_type":      "transition",
+            "reason":          reason,
+        })
         self._push_command(src_ip, "rate_limit", ttl=int(ttl_s))
         log.warning("Holding %s (unscored, reason=%s, ttl=%.0fs)", src_ip, reason, ttl_s)
         return True

@@ -99,6 +99,7 @@ class DeceptionModule:
             "if_score":        if_score,
             "phase":           "Sinkhole",
             "is_manual":       False,
+            "event_type":      "transition",
         })
 
         return True
@@ -148,6 +149,20 @@ class DeceptionModule:
             self._cumulative_time.pop(src_ip, None)
         if entry:
             self._push_clear(src_ip)
+            writer.log_mitigation_event({
+                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "src_ip":          src_ip,
+                "predicted_class": "DDoS",
+                "attack_vector":   entry.attack_vector,
+                "confidence":      entry.confidence,
+                "priority":        "Low",
+                "action_taken":    "Released",
+                "if_score":        entry.if_score,
+                "phase":           "Sinkhole",
+                "is_manual":       True,
+                "event_type":      "released",
+                "reason":          "manual release",
+            })
             log.info("Deception: manually released %s from sinkhole", src_ip)
             return True
         return False
@@ -158,10 +173,26 @@ class DeceptionModule:
         # resource_guard must never access private _lock/_entries directly.
         with self._lock:
             sinkhole_ips = list(self._entries.keys())
+            entries = dict(self._entries)
             self._entries.clear()
             self._cumulative_time.clear()
         for ip in sinkhole_ips:
             self._push_clear(ip)
+            e = entries[ip]
+            writer.log_mitigation_event({
+                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "src_ip":          ip,
+                "predicted_class": "DDoS",
+                "attack_vector":   e.attack_vector,
+                "confidence":      e.confidence,
+                "priority":        "Low",
+                "action_taken":    "Released",
+                "if_score":        e.if_score,
+                "phase":           "Sinkhole",
+                "is_manual":       False,
+                "event_type":      "released",
+                "reason":          "resource guard CRIT",
+            })
         if sinkhole_ips:
             log.info("Deception: emergency cleared %d sinkhole entries", len(sinkhole_ips))
         return len(sinkhole_ips)
@@ -215,9 +246,21 @@ class DeceptionModule:
                       else "confidence unresolved")
             log.info("Deception: %s → released (%s)  pps=%.1f  conf=%.1f%%  total=%.0fs",
                      src_ip, reason, entry.recent_pps, entry.confidence * 100, total_time)
+            writer.log_mitigation_event({
+                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "src_ip":          src_ip,
+                "predicted_class": "DDoS",
+                "attack_vector":   entry.attack_vector,
+                "confidence":      entry.confidence,
+                "priority":        "Low",
+                "action_taken":    "Released",
+                "if_score":        entry.if_score,
+                "phase":           "Sinkhole",
+                "is_manual":       False,
+                "event_type":      "released",
+                "reason":          reason,
+            })
             self._push_clear(src_ip)
-            if self._release_callback:
-                self._release_callback(src_ip)
             if self._release_callback:
                 self._release_callback(src_ip)
 

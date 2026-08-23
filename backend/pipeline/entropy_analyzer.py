@@ -25,6 +25,7 @@ TEA_EMA_ALPHA_MIN     = 0.02
 TEA_EMA_ALPHA_MAX     = 0.10
 TEA_VARIANCE_STABLE_THRESHOLD = 0.01
 TEA_ROBUST_REJECT_SIGMA = 3.0
+TEA_FEEDBACK_UNLOCK_STREAK = 10
 
 
 def _shannon_entropy(values: list[float]) -> float:
@@ -150,10 +151,16 @@ class _GlobalEntropyState:
         self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.last_result = {}
 
-    def push(self, snapshot: dict) -> None:
+    def observe(self, snapshot: dict) -> None:
         self.window.append(snapshot)
+
+    def learn(self, snapshot: dict) -> None:
         self.size_base.push(snapshot["size_var"])
         self.intensity_base.push(snapshot["intensity_var"])
+
+    def push(self, snapshot: dict) -> None:
+        self.observe(snapshot)
+        self.learn(snapshot)
 
     def is_ready(self) -> bool:
         return len(self.window) >= 2
@@ -246,6 +253,7 @@ class EntropyAnalyzer:
         self._lock   = threading.Lock()
         self._global_state = _GlobalEntropyState(TEA_WINDOW_SIZE)
         self._ip_profiles: dict[str, _IpEntropyProfile] = {}
+        self._fb_normal_streak = 0
         
         self._flow_buffer = deque(maxlen=2000)
         self._last_eval_time = 0.0
@@ -307,13 +315,14 @@ class EntropyAnalyzer:
 
         with self._lock:
             state = self._global_state
-            state.push(snapshot)
-            
+            state.observe(snapshot)
+
             is_learned = state.is_learned
             size_base   = state.size_base
             intensity_base   = state.intensity_base
 
             if not state.is_ready():
+                state.learn(snapshot)
                 res = self._neutral(size_var, intensity_var, learned=False)
                 state.last_result = res
                 return res
@@ -339,6 +348,8 @@ class EntropyAnalyzer:
 
         if not is_learned:
             log.debug("TEA global learning phase")
+            with self._lock:
+                state.learn(snapshot)
             res = self._neutral(size_var, intensity_var, learned=False)
             with self._lock:
                 state.last_result = res
@@ -346,6 +357,10 @@ class EntropyAnalyzer:
 
         is_attack_pattern = size_collapsed and intensity_collapsed
         is_flash_crowd    = False # Redefine or remove for feature-based
+
+        if not is_attack_pattern:
+            with self._lock:
+                state.learn(snapshot)
 
         if is_attack_pattern:
             confidence = "high"
@@ -413,6 +428,19 @@ class EntropyAnalyzer:
         with self._lock:
             self._global_state.size_base.lock()
             self._global_state.intensity_base.lock()
+
+    def feedback(self, is_anomaly: bool) -> None:
+        with self._lock:
+            if is_anomaly:
+                self._fb_normal_streak = 0
+                self._global_state.size_base.lock()
+                self._global_state.intensity_base.lock()
+                return
+            self._fb_normal_streak += 1
+            if self._fb_normal_streak >= TEA_FEEDBACK_UNLOCK_STREAK:
+                self._fb_normal_streak = 0
+                self._global_state.size_base.unlock()
+                self._global_state.intensity_base.unlock()
 
     def update_ip(self, src_ip: str, pps: float, bps: float) -> None:
         with self._lock:

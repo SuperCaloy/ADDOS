@@ -202,13 +202,10 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         _effective_threshold = loader.if_threshold
         is_anomaly = (if_score >= _effective_threshold)
 
-        # --- TEA feedback — teach entropy analyzer confirmed normal vs attack ---
+        # --- TEA feedback ---
         try:
             from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
-            if is_anomaly:
-                _tea.confirm_attack()
-            else:
-                _tea.confirm_normal()
+            _tea.feedback(is_anomaly)
         except Exception:
             pass
 

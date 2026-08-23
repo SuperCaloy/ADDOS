@@ -553,7 +553,9 @@ class FatTreeController(app_manager.RyuApp):
             return
 
         # Update banned IP set for the throttled fast-path check
-        if action in ("block", "rate_limit", "quarantine", "redirect"):
+        # Only drop actions (block/quarantine/redirect) — rate_limit allows traffic
+        # so flow_stats continue and ML can re-score during probation
+        if action in ("block", "quarantine", "redirect"):
             self._banned_ips.add(src_ip)
         elif action == "clear":
             self._on_clear(src_ip)
