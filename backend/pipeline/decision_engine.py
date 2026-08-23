@@ -27,7 +27,7 @@ def _estimate_pkt_count(flow_stats: dict) -> int:
 
 _lock = threading.Lock()
 
-# Confidence lock — keeps highest seen confidence+attack_class per IP
+# Confidence lock - keeps highest seen confidence+attack_class per IP
 # Only updates if new confidence > locked value
 _conf_lock: dict[str, tuple[float, str]] = {}
 _conf_lock_mutex = threading.Lock()
@@ -40,7 +40,7 @@ _LEGIT_HOST_IPS: frozenset = frozenset([
     "10.0.0.5", # h5
 ])
 
-# Ground truth — attacker hosts h6-h19 + h22-h27 (20 total), per topology.py.
+# Ground truth - attacker hosts h6-h19 + h22-h27 (20 total), per topology.py.
 # h20 (server) and h21 (sinkhole) are excluded on purpose, not attackers.
 _ATTACKER_IPS: frozenset = frozenset(
     [f"10.0.0.{i}" for i in range(6, 20)] +
@@ -52,7 +52,7 @@ _stats = {
     "malicious_dropped":   0,   # ML events classified as malicious
     "actual_pkts_dropped": 0,   # real OVS physical drops from dropped_delta messages
     "normal_packets":      0,
-    # Dedicated legit counter — incremented directly when IF says normal.
+    # Dedicated legit counter - incremented directly when IF says normal.
     # Avoids subtraction (raw_total - dropped) which breaks when attackers dominate.
     "normal_forwarded":    0,
     "false_positives":     0,
@@ -67,11 +67,11 @@ _sse_buffer: collections.deque = collections.deque(maxlen=200)
 _sse_dedup: dict = {}
 _SSE_DEDUP_TTL = 5.0
 
-# ── Pending restores — IPs awaiting baseline traffic restart after manual release
+# ── Pending restores - IPs awaiting baseline traffic restart after manual release
 _restore_lock     = threading.Lock()
 _pending_restores: set[str] = set()
 
-# ── Scan log — rolling buffer of last 200 flow evaluations for /api/debug/flows
+# ── Scan log - rolling buffer of last 200 flow evaluations for /api/debug/flows
 _scan_lock   = threading.Lock()
 _scan_buffer: collections.deque = collections.deque(maxlen=200)
 
@@ -90,7 +90,7 @@ def push_scan_result(src_ip: str, pps: float, sw_delta: float,
         "threshold":   round(threshold, 4),
         "is_anomaly":  is_anomaly,
         "attack_class": attack_class if is_anomaly else "Normal",
-        "confidence":  f"{confidence*100:.1f}%" if is_anomaly else "—",
+        "confidence":  f"{confidence*100:.1f}%" if is_anomaly else "-",
     }
     with _scan_lock:
         _scan_buffer.appendleft(entry)
@@ -100,7 +100,7 @@ def get_scan_log() -> list[dict]:
     with _scan_lock:
         return list(_scan_buffer)
 
-# ── Pipeline debug log — rolling buffer of last 200 inference results
+# ── Pipeline debug log - rolling buffer of last 200 inference results
 # Each entry: {src_ip, pps, if_score, threshold, is_anomaly,
 #              attack_class, confidence, action, ts}
 # Exposed via GET /api/debug so operators can see what the ML pipeline is doing.
@@ -231,15 +231,15 @@ def on_result(src_ip: str, if_score, is_anomaly,
               timed_out: bool, enqueued_at: float = None) -> None:
     t_start = time.monotonic()
 
-    # Detection Time — flow queued (worker.submit) → IF/RF result ready here.
-    # None when not provided (e.g. timeout fallback path) — left as None in DB.
+    # Detection Time - flow queued (worker.submit) → IF/RF result ready here.
+    # None when not provided (e.g. timeout fallback path) - left as None in DB.
     detection_ms = ((t_start - enqueued_at) * 1000.0) if enqueued_at is not None else None
 
     with _lock:
         _stats["total_packets"] += 1
 
-    # --- ML OFF — count packet as normal, skip all detection and mitigation ---
-    # ML OFF — show traffic visually but take NO action
+    # --- ML OFF - count packet as normal, skip all detection and mitigation ---
+    # ML OFF - show traffic visually but take NO action
     if not ML_ENABLED:
         _pkt_count = _estimate_pkt_count(flow_stats)
         _pps       = float((flow_stats or {}).get("packet_count_per_second", 0.0))
@@ -279,7 +279,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     with _lock:
         _stats["ml_processed"] += 1
 
-    # ── Debug log — record every inference result ─────────────────────────────
+    # ── Debug log - record every inference result ─────────────────────────────
     _pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
 
     # update sinkhole PPS so observation window can escalate/release correctly
@@ -330,7 +330,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1)
         log.warning("FALSE POSITIVE detected: %s is a known legit host!", src_ip)
 
-    # Confidence lock — only update attack_class/confidence if new > locked
+    # Confidence lock - only update attack_class/confidence if new > locked
     with _conf_lock_mutex:
         prev = _conf_lock.get(src_ip)
         if prev is not None and confidence < prev[0]:
@@ -358,6 +358,17 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "confidence":        (flow_stats or {}).get("tea_confidence", "low"),
         "is_learned":        (flow_stats or {}).get("tea_is_learned", False),
     }
+
+    # TEA confidence-based routing
+    _tea_confidence = _tea_result.get("confidence", "low")
+    _tea_attack = _tea_result.get("is_attack_pattern", False)
+
+    # High confidence attack -> ensure High priority (fast-track)
+    if _tea_attack and _tea_confidence == "high":
+        if priority == "Low":
+            priority = "High"
+            log.info("TEA high-confidence fast-track: %s -> High priority", src_ip)
+
     _already_flagged = flood_filter.is_flagged_any(src_ip)
     _tea_mitigate     = entropy_analyzer.should_submit(_tea_result, _already_flagged)
     mitigation_ms = None
@@ -405,7 +416,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         with _lock:
             _stats["malicious_dropped"] += 1
     else:
-        log.debug("TEA mitigation gate: flash crowd, logging only — %s", src_ip)
+        log.debug("TEA mitigation gate: flash crowd, logging only - %s", src_ip)
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -442,7 +453,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     _if_tp = 1 if _is_tp    else 0
     _if_fp = 1 if _is_legit else 0
 
-    # RF ground truth — use live topology-reported attack type
+    # RF ground truth - use live topology-reported attack type
     from backend.api.stats import get_active_attacks as _get_gt
     _gt = _get_gt()
     _expected_class = _gt.get(src_ip)  # "SYN", "ICMP", "UDP" or None
@@ -475,7 +486,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
             elif _expected_class == "UDP":
                 _rf_tp_udp = 1; _rf_tn_syn = 1; _rf_tn_icmp = 1
         else:
-            # Misclassification — track off-diagonal cell
+            # Misclassification - track off-diagonal cell
             _rf_fp = 1; _rf_fn = 1
             _mis = (_expected_class, _predicted)
             if   _mis == ("SYN",  "ICMP"): _rf_syn_as_icmp  = 1
@@ -526,7 +537,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # Force-push SSE on phase upgrades (Quarantine→TimeBan, →Blackhole)
     # so the audit log always reflects the latest phase, bypassing dedup.
-    # Skip entirely on flash-crowd ticks — no real action happened, the
+    # Skip entirely on flash-crowd ticks - no real action happened, the
     # Audit Log should only ever show actual mitigation outcomes.
     if not is_known_legit and _tea_mitigate:
         _phase_upgrade = action_taken in ("Time Ban", "Blackhole")
@@ -538,6 +549,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
             "confidence":      f"{confidence * 100:.1f}%",
             "priority":        priority,
             "action_taken":    action_taken,
+            "event_type":      "released" if action_taken == "Released" else "transition",
         }, force=_phase_upgrade)
 
 

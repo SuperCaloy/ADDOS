@@ -71,7 +71,7 @@ def _parse_and_route(raw: bytes) -> None:
     msg_type = msg.get("type")
 
     # ------------------------------------------------------------------
-    # switch_count — update how many switches are connected
+    # switch_count - update how many switches are connected
     # ------------------------------------------------------------------
     if msg_type == "switch_count":
         with _switch_count_lock:
@@ -79,8 +79,8 @@ def _parse_and_route(raw: bytes) -> None:
         return
 
     # ------------------------------------------------------------------
-    # packet_in — real-time per-packet event from Ryu
-    # This is where the flood pre-filter runs — no stats poll delay
+    # packet_in - real-time per-packet event from Ryu
+    # This is where the flood pre-filter runs - no stats poll delay
     # ------------------------------------------------------------------
     elif msg_type == "packet_in":
         src_ip = msg.get("src_ip", "")
@@ -93,41 +93,41 @@ def _parse_and_route(raw: bytes) -> None:
         if src_ip in _WHITELIST_IPS:
             return
 
-        # --- ML OFF — skip all flood prefilter processing ---
+        # --- ML OFF - skip all flood prefilter processing ---
         if not ML_ENABLED:
             return
 
         # Map Ryu proto strings to our prefilter keys
-        # SYN is a special case — only pure SYN packets (no ACK) count
+        # SYN is a special case - only pure SYN packets (no ACK) count
         if proto == "TCP":
             if msg.get("tcp_flags_syn") and not msg.get("tcp_flags_ack"):
                 # SYN flood tracking
                 tripped = flood_filter.on_packet(src_ip, "SYN")
                 if tripped:
-                    log.info("FloodPreFilter SYN tripped: %s — awaiting real flow_stats", src_ip)
+                    log.info("FloodPreFilter SYN tripped: %s - awaiting real flow_stats", src_ip)
                     state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
 
             elif msg.get("tcp_flags_ack"):
-                # ACK means handshake completed — reduce half-open count
+                # ACK means handshake completed - reduce half-open count
                 flood_filter.on_ack(src_ip)
 
         elif proto == "ICMP":
-            # ICMP flood tracking — count every echo request
+            # ICMP flood tracking - count every echo request
             tripped = flood_filter.on_packet(src_ip, "ICMP")
             if tripped:
-                log.info("FloodPreFilter ICMP tripped: %s — awaiting real flow_stats", src_ip)
+                log.info("FloodPreFilter ICMP tripped: %s - awaiting real flow_stats", src_ip)
                 state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
 
         elif proto == "UDP":
-            # UDP flood tracking — this is the key fix for slow UDP detection
+            # UDP flood tracking - this is the key fix for slow UDP detection
             # Previously UDP had no prefilter so had to wait for stats poll
             tripped = flood_filter.on_packet(src_ip, "UDP")
             if tripped:
-                log.info("FloodPreFilter UDP tripped: %s — awaiting real flow_stats", src_ip)
+                log.info("FloodPreFilter UDP tripped: %s - awaiting real flow_stats", src_ip)
                 state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
 
     # ------------------------------------------------------------------
-    # dropped_delta — real physical packet drop count from OVS
+    # dropped_delta - real physical packet drop count from OVS
     # ------------------------------------------------------------------
     elif msg_type == "dropped_delta":
         src_ip = msg.get("src_ip", "")
@@ -140,8 +140,8 @@ def _parse_and_route(raw: bytes) -> None:
                 pass
 
     # ------------------------------------------------------------------
-    # flow_stats — per-flow telemetry from OVS stats poll (every 1s)
-    # This is where TEA runs — after collecting flow data per switch
+    # flow_stats - per-flow telemetry from OVS stats poll (every 1s)
+    # This is where TEA runs - after collecting flow data per switch
     # ------------------------------------------------------------------
     elif msg_type == "flow_stats":
         src_ip       = msg.get("src_ip", "")
@@ -155,7 +155,7 @@ def _parse_and_route(raw: bytes) -> None:
         pkt_count_cumulative = int(flow_stats.get("packet_count", 0))
         pps                  = float(flow_stats.get("packet_count_per_second", 0.0))
 
-        # Delta tracking — compute how many new packets arrived this interval
+        # Delta tracking - compute how many new packets arrived this interval
         flow_key = (src_ip, dpid)
         with _flow_lock:
             prev_count                = _flow_prev_pkts.get(flow_key, 0)
@@ -175,11 +175,15 @@ def _parse_and_route(raw: bytes) -> None:
                 "ip_proto":               int(flow_stats.get("ip_proto", 0)),
             })
 
+        # Update per-IP TEA profile for small-attacker detection
+        if src_ip not in _WHITELIST_IPS:
+            entropy_analyzer.update_ip(src_ip, pps, float(flow_stats.get("byte_count_per_second", 0.0)))
+
         # Update raw total for UI
         with _raw_lock:
             _raw_total_pkts += delta_pkts
 
-        # --- ML OFF — skip TEA and ML inference, count packet directly ---
+        # --- ML OFF - skip TEA and ML inference, count packet directly ---
         # Calls on_result() directly so dashboard counters still update.
         if not ML_ENABLED:
             try:
@@ -238,6 +242,13 @@ def _parse_and_route(raw: bytes) -> None:
         flow_stats["tea_size_var"]       = tea_result["size_var"]
         flow_stats["tea_intensity_var"]  = tea_result["intensity_var"]
 
+        # Check per-IP verdict for small attackers
+        ip_verdict = entropy_analyzer.get_ip_verdict(src_ip)
+        if ip_verdict == "attack":
+            flow_stats["tea_attack_pattern"] = True
+            flow_stats["tea_confidence"] = "moderate"
+            log.info("TEA per-IP attack detected: %s", src_ip)
+
         # Pass dpid so decision_engine can feed IF result back to TEA
         switch_stats["dpid"] = dpid
         worker.submit(src_ip, flow_stats, switch_stats)
@@ -281,11 +292,11 @@ def _receiver_loop() -> None:
                 except zmq.Again:
                     pass
                 except zmq.ZMQError as e:
-                    log.warning("ZMQ recv error: %s — reconnecting", e)
+                    log.warning("ZMQ recv error: %s - reconnecting", e)
                     break
 
         except zmq.ZMQError as e:
-            log.warning("ZMQ connect failed: %s — retry in %ss", e, _RECONNECT_DELAY_S)
+            log.warning("ZMQ connect failed: %s - retry in %ss", e, _RECONNECT_DELAY_S)
         finally:
             sock.close()
 
