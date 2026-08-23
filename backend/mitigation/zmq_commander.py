@@ -42,6 +42,18 @@ class ZmqCommander:
         with self._lock:
             try:
                 self._sock.send(payload, zmq.NOBLOCK)
+                # Push expert event for visualization
+                try:
+                    from backend.api.events import push_expert_event as _push
+                    _push({
+                        "mitigation": {
+                            "action": command.get("action", "unknown"),
+                            "src_ip": command.get("src_ip", ""),
+                            "ts": time.strftime("%H:%M:%S"),
+                        }
+                    })
+                except Exception:
+                    pass
             except zmq.Again:
                 log.debug("ZMQ command dropped (Ryu unavailable): %s", command)
             except zmq.ZMQError as e:

@@ -142,6 +142,9 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
             log.debug("Worker timeout for %s (not flagged) — dropped silently", src_ip)
         return
 
+    # --- Update Flow Tracker ---
+    tracker.update_flow(src_ip, flow_stats)
+
     # --- Check inference cache — reuse fresh result if available ---
     cached = tracker.get_cached(src_ip)
     _prior_class = None

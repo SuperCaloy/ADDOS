@@ -38,7 +38,7 @@ function addLogRow(ev) {
   }
 
   /* Same IP, same action, same incident -- update in-place with flash */
-  const key = `${ip}|${ev.event_type || 'transition'}`;
+  const key = `${ip}|${ev.event_type || 'transition'}|${ev.timestamp || ''}`;
   if (_logRows.has(key)) {
     const existing = _logRows.get(key);
     if (existing.action === newAction) {

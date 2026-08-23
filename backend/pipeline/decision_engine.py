@@ -229,6 +229,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
               attack_class, confidence, *,
               flow_stats: dict = None, switch_stats: dict = None,
               timed_out: bool, enqueued_at: float = None) -> None:
+    from backend.api.stats import get_active_attacks as _get_gt
     t_start = time.monotonic()
 
     # Detection Time - flow queued (worker.submit) → IF/RF result ready here.
@@ -299,6 +300,13 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "confidence":  round((confidence or 0.0) * 100, 1),
         "action":      "pending",
     })
+    # Always refresh a tracked IP's live telemetry, even if it falls below the
+    # anomaly threshold. This allows probation (Phase 4) to monitor and re-ban
+    # attackers that try to evade by hovering just below the threshold.
+    state_machine.update_observation(
+        src_ip, if_score, attack_class or "Normal", confidence or 0.0,
+        float((flow_stats or {}).get("packet_count_per_second", 0.0)),
+    )
 
     if not is_anomaly:
         _pkt_count = _estimate_pkt_count(flow_stats)
@@ -306,8 +314,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
             _stats["normal_packets"]  += 1
             _stats["normal_forwarded"] += _pkt_count
 
-        # IF: normal → TN if legit, FN if attacker
-        _is_attacker = src_ip in _ATTACKER_IPS
+        # IF: normal → TN if legit, FN if attacker (only if actively attacking)
+        _is_attacker = src_ip in _get_gt()
         writer.log_traffic_summary(
             total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0,
             tn=(0 if _is_attacker else 1),
@@ -341,14 +349,6 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     predicted_class = "DDoS" if attack_class != "Uncertain" else "Anomaly"
     priority        = _assign_priority(if_score, confidence)
-
-    # Always refresh a quarantined IP's live telemetry, independent of the
-    # TEA gate below. Otherwise a flash-crowd-tagged tick freezes if_score,
-    # confidence, and attack_vector for the rest of the observation window.
-    state_machine.update_observation(
-        src_ip, if_score, attack_class, confidence,
-        float((flow_stats or {}).get("packet_count_per_second", 0.0)),
-    )
 
     # TEA mitigation gate. Every interval already went through IF/RF.
     # Ground truth counting below always runs, regardless of this decision.
@@ -446,7 +446,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         })
 
     _threat_pps = _estimate_pkt_count(flow_stats)
-    _is_tp      = src_ip in _ATTACKER_IPS
+    _is_tp      = src_ip in _get_gt()
     _is_legit   = src_ip in _LEGIT_HOST_IPS
 
     # IF metrics

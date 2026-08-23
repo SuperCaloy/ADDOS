@@ -46,6 +46,8 @@ class FlowTracker:
         self._lock   = threading.Lock()
         self._flows: OrderedDict[str, FlowEntry]    = OrderedDict()
         self._cache: dict[str, InferenceCacheEntry] = {}
+        self._cache_hits   = 0
+        self._cache_lookups = 0
 
     # ------------------------------------------------------------------
     # Flow tracking
@@ -80,8 +82,10 @@ class FlowTracker:
 
     def get_cached(self, src_ip: str) -> InferenceCacheEntry | None:
         with self._lock:
+            self._cache_lookups += 1
             entry = self._cache.get(src_ip)
             if entry and entry.is_valid():
+                self._cache_hits += 1
                 return entry
             self._cache.pop(src_ip, None)
             return None

@@ -37,28 +37,30 @@ PHASE_LABELS = {
 
 @dataclass
 class IpState:
-    src_ip:         str
-    phase:          int   = 1
-    attack_vector:  str   = "Uncertain"
-    if_score:       float = 0.0
-    confidence:     float = 0.0
-    priority:       str   = "Low"
-    phase_entered:  float = field(default_factory=time.monotonic)
-    action_taken:   str   = "Quarantined"
-    permanent:      bool  = False
-    ttl_expires_at: Optional[float] = None
-    first_seen:     str   = field(
+    src_ip:             str
+    phase:              int   = 1
+    attack_vector:      str   = "Uncertain"
+    if_score:           float = 0.0
+    confidence:         float = 0.0
+    priority:           str   = "Low"
+    phase_entered:      float = field(default_factory=time.monotonic)
+    action_taken:       str   = "Quarantined"
+    permanent:          bool  = False
+    ttl_expires_at:     Optional[float] = None
+    first_seen:         str   = field(
         default_factory=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
-    ban_level:      int   = 0
-    offence_count:  int   = 0
+    ban_level:          int   = 0
+    offence_count:      int   = 0
     # Tentative reputation, unconfirmed. Counts hold_ip triggers only.
     # Never written to behavioral DB history, kept separate from offence_count
     # which only reflects confirmed, ML backed offenses.
-    sinkhole_flags: int   = 0
+    sinkhole_flags:     int   = 0
     # Updated by decision_engine on each flow result
     # _evaluate_phase1 checks this to avoid escalating a stopped attacker
-    recent_pps:     float = 0.0
+    recent_pps:         float = 0.0
+    # Last transition reason for audit/visualization
+    transition_reason:  str   = ""
 
     def phase_label(self) -> str:
         return PHASE_LABELS.get(self.phase, "Unknown")
@@ -75,10 +77,11 @@ class IpState:
     def to_api_dict(self) -> dict:
         d = {
             "src_ip":            self.src_ip,
-            "phase":             self.phase_label(),
+            "phase":             self.phase,
+            "phase_label":       self.phase_label(),
             "attack_vector":     self.attack_vector,
             "if_score":          round(self.if_score, 4),
-            "confidence":        f"{self.confidence * 100:.1f}%",
+            "confidence":        round(self.confidence * 100, 1),
             "time_in_phase_sec": int(self.time_in_phase_sec()),
             "priority":          self.priority,
             "offence_count":     self.offence_count,
@@ -249,6 +252,17 @@ class StateMachine:
                 return
             state.if_score   = if_score
             state.recent_pps = recent_pps
+            
+            if state.phase == 4:
+                # Mid-probation re-attack check
+                from backend.models import loader
+                _thr = loader.if_threshold if loader._loaded else 0.6004
+                if recent_pps > 1.0 and if_score >= (_thr * 0.8):
+                    log.info("Probation mid-observation re-attack: %s (pps=%.1f, IF=%.4f) - re-banning",
+                             src_ip, recent_pps, if_score)
+                    # Use a thread timer so we don't hold the lock during escalation
+                    threading.Timer(0.1, lambda: self._handle_mid_probation_reattack(src_ip)).start()
+                    
             if state.phase == 1:
                 # Best evidence wins - only overwrite vector/confidence on a
                 # stronger read, same rule on_detection already uses.
@@ -459,7 +473,7 @@ class StateMachine:
     def _evaluate_phase1(self, src_ip: str, state: IpState) -> None:
         # After Phase 1 window: escalate to time ban or release.
         # Checks both IF score AND recent_pps to avoid escalating a stopped attacker.
-        # recent_pps is None if no recent flow data → treat as stopped (release)
+        # recent_pps is None if no recent flow data -> treat as stopped (release)
         from backend.models import loader
         thr = loader.if_threshold if loader._loaded else 0.6004
 
@@ -471,9 +485,11 @@ class StateMachine:
             if state.attack_vector == "Uncertain" and state.confidence < SINKHOLE_CONFIDENCE_THRESHOLD:
                 log.info("Phase1 unresolved: %s conf=%.1f%% - escalating to sinkhole",
                          src_ip, state.confidence * 100)
+                state.transition_reason = "Unresolved after quarantine - escalating to sinkhole"
                 self._advance_to_sinkhole(state)
             else:
-                # Both signals elevated - attack persisted → escalate
+                # Both signals elevated - attack persisted -> escalate
+                state.transition_reason = "Attack persisted - escalating to time ban"
                 self._advance_to_ban(state)
         else:
             reason = (
@@ -482,7 +498,15 @@ class StateMachine:
                 else f"traffic stopped (pps={recent_pps:.1f} <= 1.0)"
             )
             log.info("Phase1 complete: %s %s - releasing", src_ip, reason)
+            state.transition_reason = reason
             self._clear(src_ip, reason="Attack Stopped")
+
+    def _handle_mid_probation_reattack(self, src_ip: str) -> None:
+        with self._lock:
+            state = self._states.get(src_ip)
+            if state and state.phase == 4:
+                state.permanent = True
+                self._advance_to_ban(state)
 
     def _advance_to_ban(self, state: IpState) -> None:
         # Escalate to Phase 2 time ban.
@@ -493,6 +517,9 @@ class StateMachine:
                 _sse_dedup.pop(state.src_ip, None)
         except Exception:
             pass
+
+        if not state.transition_reason:
+            state.transition_reason = "Escalated to Time Ban"
 
         # Increment ban_level BEFORE lookup - each ban longer than the last
         state.ban_level      = min(state.ban_level + 1, MAX_BAN_LEVEL)
@@ -534,7 +561,7 @@ class StateMachine:
             priority       = state.priority,
             phase_reached  = state.phase,
             first_seen     = state.first_seen,
-            unblock_reason = "Escalated to Time Ban",
+            unblock_reason = state.transition_reason,
             ban_level      = state.ban_level,
             offence_count  = state.offence_count,
         )
@@ -545,6 +572,7 @@ class StateMachine:
         # sinkhole instead of a blind ban, so it keeps getting observed
         # rather than fully blocked on weak evidence.
         src_ip = state.src_ip
+        state.transition_reason = "Unresolved after quarantine - escalated to sinkhole"
         self._states.pop(src_ip, None)
         writer.delete_quarantine_state(src_ip)
         if self._deception:
@@ -558,7 +586,7 @@ class StateMachine:
             priority       = state.priority,
             phase_reached  = state.phase,
             first_seen     = state.first_seen,
-            unblock_reason = "Sinkhole - Unresolved after quarantine",
+            unblock_reason = state.transition_reason,
             ban_level      = state.ban_level,
             offence_count  = state.offence_count,
         )
@@ -569,6 +597,7 @@ class StateMachine:
         # Move IP from Phase 2 to Phase 4 Probation.
         # Install rate_limit so ML can observe traffic without flood risk.
         # If ML flags re-attack during probation, jumps straight to Phase 2.
+        state.transition_reason = "Time ban complete - moved to probation for observation"
         state.phase         = 4
         state.phase_entered = time.monotonic()
         state.action_taken  = "Probation"
@@ -607,6 +636,7 @@ class StateMachine:
         except Exception:
             pass
 
+        state.transition_reason = "Escalated to Blackhole"
         state.offence_count  = min(state.offence_count + 1, 5)  # offence on blackhole
         state.phase          = 3
         state.phase_entered  = time.monotonic()
@@ -643,7 +673,7 @@ class StateMachine:
             priority       = state.priority,
             phase_reached  = state.phase,
             first_seen     = state.first_seen,
-            unblock_reason = "Escalated to Blackhole",
+            unblock_reason = state.transition_reason,
             ban_level      = state.ban_level,
             offence_count  = state.offence_count,
         )
@@ -653,6 +683,7 @@ class StateMachine:
         self._push_command(src_ip, resolve_release_action())
         writer.delete_quarantine_state(src_ip)
         if state is not None:
+            state.transition_reason = reason
             # Terminal event: the lifecycle ledger must show why mitigation ended.
             writer.log_mitigation_event({
                 "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -739,7 +770,7 @@ class StateMachine:
                     confidence    = confidence,
                     priority      = _prio,
                     action_taken  = "Quarantined",
-                    ban_level     = new_ban_lvl,
+                    ban_level     = prev_ban_level,
                     offence_count = prev_offence_count + 1,
                 )
                 self._states[src_ip] = state

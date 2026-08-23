@@ -132,11 +132,12 @@ class DeceptionModule:
                     "src_ip":        e.src_ip,
                     "attack_vector": e.attack_vector,
                     "if_score":      round(e.if_score, 4),
-                    "confidence":    f"{e.confidence * 100:.1f}%",
+                    "confidence":    round(e.confidence * 100, 1),
                     "elapsed_sec":   int(e.elapsed()),
                     "remaining_sec": max(0, int(SINKHOLE_OBSERVE_SECONDS - e.elapsed())),
                     "recent_pps":    round(e.recent_pps, 2),
-                    "phase":         "Sinkhole",
+                    "phase":         0,
+                    "phase_label":   "Sinkhole",
                 }
                 for e in self._entries.values()
             ]
