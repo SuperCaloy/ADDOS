@@ -227,6 +227,8 @@ def _parse_and_route(raw: bytes) -> None:
         # TEA gate, snapshot the switch buffer and run entropy analysis.
         with _switch_flows_lock:
             switch_flow_list = list(_switch_flows.get(dpid, []))
+            if dpid in _switch_flows:
+                _switch_flows[dpid] = []
 
         tea_result = entropy_analyzer.update(dpid, switch_flow_list)
 
@@ -280,7 +282,10 @@ def _receiver_loop() -> None:
             while True:
                 try:
                     raw = sock.recv()
-                    _parse_and_route(raw)
+                    try:
+                        _parse_and_route(raw)
+                    except Exception:
+                        log.exception("Error processing ZMQ message")
 
                     # Clear flow buffers once per second so TEA gets fresh data
                     now = time.monotonic()

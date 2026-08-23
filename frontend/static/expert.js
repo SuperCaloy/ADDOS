@@ -12,6 +12,7 @@ function toggleExpertMode() {
 
   if (!_expertActive) {
     _expertActive = true;
+    window.EXPERT_MODE = true;
     btn.classList.add('active');
     btn.setAttribute('aria-pressed', 'true');
     btn.textContent = '☰ Expert ✓';
@@ -23,6 +24,7 @@ function toggleExpertMode() {
     if (typeof showToast === 'function') showToast('Expert Mode enabled');
   } else {
     _expertActive = false;
+    window.EXPERT_MODE = false;
     btn.classList.remove('active');
     btn.setAttribute('aria-pressed', 'false');
     btn.textContent = '☰ Expert';
@@ -87,6 +89,15 @@ async function fetchExpert() {
 function connectExpertSSE() {
   if (_expertSSE) _expertSSE.close();
   _expertSSE = new EventSource(window.API_URL + '/api/events');
+  _expertSSE.onopen = () => {
+    var indicator = document.querySelector('.expert-pipeline-live');
+    if (indicator) {
+      indicator.innerHTML = '<span class="expert-pipeline-live-dot"></span>streaming';
+      indicator.style.color = '';
+      var dot = indicator.querySelector('.expert-pipeline-live-dot');
+      if (dot) { dot.style.animation = ''; dot.style.background = ''; }
+    }
+  };
   _expertSSE.onmessage = (e) => {
     try {
       const event = JSON.parse(e.data);
@@ -98,6 +109,11 @@ function connectExpertSSE() {
   _expertSSE.onerror = () => {
     _expertSSE.close();
     _expertSSE = null;
+    var indicator = document.querySelector('.expert-pipeline-live');
+    if (indicator) {
+      indicator.innerHTML = '<span class="expert-pipeline-live-dot" style="animation:none;background:var(--sub2)"></span>polling';
+      indicator.style.color = 'var(--sub2)';
+    }
     if (_expertActive) setTimeout(connectExpertSSE, 3000);
   };
 }
@@ -112,6 +128,7 @@ function handleExpertEvent(payload) {
   if (payload.inference) {
     updateIFBar(payload.inference);
     ExpertPipeline.spawnParticleFromEvent(payload.inference);
+    ExpertPipeline.spawnFeedbackParticle(payload.inference.is_anomaly);
     var cls = payload.inference.attack_class || 'unknown';
     var score = (payload.inference.if_score || 0).toFixed(4);
     var conf = (payload.inference.confidence || 0).toFixed(2);
@@ -119,6 +136,17 @@ function handleExpertEvent(payload) {
       payload.inference.src_ip + ' -> ' + cls + ' (IF=' + score + ', conf=' + conf + ')',
       payload.inference.is_anomaly ? 'danger' : 'info'
     );
+  }
+  if (payload.mitigation) {
+    var action = payload.mitigation.action || '';
+    if (action === 'block' || action === 'rate_limit' || action === 'proto_block' || action === 'clear') {
+      ExpertPipeline.spawnEnforceParticle(action);
+      ExpertMetrics.appendLog('Enforcement: ' + action + ' command sent to Ryu', 'warn');
+    }
+    if (action === 'redirect') {
+      ExpertPipeline.spawnRedirectParticle();
+      ExpertMetrics.appendLog('Redirect: traffic sent to sinkhole', 'warn');
+    }
   }
 }
 
@@ -195,7 +223,7 @@ var ExpertStages = {
       output: 'Anomaly score (0 to 1) plus\nabove/below threshold flag',
       formula: [
         { f: 's(x, n) = 2^(-E(h(x)) / c(n))', note: 'anomaly score from average isolation path length' },
-        { f: 'if_score = -score_samples(x)', note: 'flagged anomalous when if_score >= 0.609' }
+        { f: 'if_score = -score_samples(x)', note: 'flagged anomalous when if_score >= threshold (from model contract)' }
       ]
     },
     rf: {
@@ -207,16 +235,43 @@ var ExpertStages = {
       output: 'One of: ICMP Flood, SYN Flood,\nUDP Flood, plus confidence',
       formula: [
         { f: 'y_hat = mode{T_1(x), T_2(x), ..., T_k(x)}', note: 'majority vote across k decision trees' },
-        { f: 'confidence = votes(y_hat) / k', note: 'acted on only when confidence >= 0.70' }
+        { f: 'confidence = votes(y_hat) / k', note: 'acted on only when confidence >= conf_gate (from model contract)' }
       ]
     },
     decision: {
       num: 8, color: '#F59E0B',
       title: 'Decision + Mitigation',
       file: 'backend/pipeline/decision_engine.py',
-      desc: 'The final judge. It weighs the Isolation Forest score and the Random Forest classification together against configured thresholds. If confident enough this is a real attack, it sends a block command back to the Ryu Controller over ZeroMQ.',
+      desc: 'The final judge. It weighs the Isolation Forest score and the Random Forest classification together against configured thresholds. If confident enough this is a real attack, it sends enforcement commands back to the Ryu Controller over ZeroMQ.',
       input: 'IF anomaly score plus\nRF class and confidence',
-      output: 'OpenFlow drop-rule command,\nsent back to Ryu'
+      output: 'Enforcement commands: rate_limit, block, clear, redirect, proto_block',
+      formula: [
+        { f: 'cmd = rate_limit if probation else block if ban else clear if released else redirect if sinkhole else proto_block if CRIT', note: 'command type depends on phase and resource state' }
+      ]
+    },
+    deception: {
+      num: 9, color: '#8B5CF6',
+      title: 'Deception / Sinkhole',
+      file: 'backend/mitigation/deception.py',
+      desc: 'Redirects suspicious traffic to a dummy host (h21) for safe observation. Measures attack persistence and confidence over 30s. Escalates to Phase 1 if traffic persists with high confidence, or releases if traffic stops.',
+      input: 'Quarantined IPs with unresolved\nattack vector / low confidence',
+      output: 'OpenFlow redirect to sinkhole,\nescalation to Phase 1 or release',
+      formula: [
+        { f: 'escalate if pps > 1.0 AND (conf >= 0.70 OR cumulative_time >= 90s)', note: 'persistent attack with resolved confidence or time ceiling' },
+        { f: 'release if pps <= 1.0 OR conf < 0.70', note: 'traffic stopped or confidence unresolved' }
+      ]
+    },
+    resource_guard: {
+      num: 10, color: '#EC4899',
+      title: 'Resource Guard',
+      file: 'backend/mitigation/resource_guard.py',
+      desc: 'Monitors Ryu controller CPU/memory. At HIGH: throttles detection rate (20ms delay). At CRIT: installs OVS proto_block rules to shed excess packet-in load. Auto-recovers when resources normalize.',
+      input: 'Ryu CPU/memory metrics (polled every 2s)',
+      output: 'Throttle delay (20ms/50ms) + proto_block rules on attack protocol',
+      formula: [
+        { f: 'tier = CRIT if CPU>=99% or MEM>=95% else HIGH if CPU>=95% or MEM>=85% else WARN if CPU>=85% or MEM>=70% else NORMAL', note: 'tier determines response' },
+        { f: 'HIGH: throttle_delay=20ms (after 2 consecutive HIGH). CRIT: throttle_delay=50ms + proto_block on attack proto', note: 'progressive response' }
+      ]
     }
   },
 
@@ -265,10 +320,12 @@ var ExpertPipeline = {
   ctx: null,
   container: null,
   particles: [],
+  feedbackParticles: [],
   VIRTUAL_W: 950,
   VIRTUAL_H: 560,
   reducedMotion: false,
   _animFrame: null,
+  latchState: { locked: false, streak: 0 },
 
   nodes: {
     mininet:  { x: 150, y: 200, label: 'Mininet' },
@@ -278,7 +335,9 @@ var ExpertPipeline = {
     entropy:  { x: 800, y: 360, label: 'Entropy Analyzer' },
     if_node:  { x: 600, y: 460, label: 'Isolation Forest' },
     rf:       { x: 350, y: 460, label: 'Random Forest' },
-    decision: { x: 150, y: 360, label: 'Decision + Block' }
+    decision: { x: 150, y: 360, label: 'Decision + Mitigation' },
+    deception: { x: 50, y: 480, label: 'Deception / Sinkhole' },
+    resource_guard: { x: 50, y: 120, label: 'Resource Guard' }
   },
 
   paths: [
@@ -290,7 +349,9 @@ var ExpertPipeline = {
     { from: 'if_node', to: 'rf' },
     { from: 'rf', to: 'decision' },
     { from: 'decision', to: 'ryu', feedback: true, kind: 'enforce', curve: -190 },
-    { from: 'if_node', to: 'entropy', feedback: true, kind: 'learn', curve: 70 }
+    { from: 'if_node', to: 'entropy', feedback: true, kind: 'learn', curve: -60 },
+    { from: 'decision', to: 'deception' },
+    { from: 'decision', to: 'resource_guard' }
   ],
 
   nodeGlow: {},
@@ -347,11 +408,47 @@ var ExpertPipeline = {
                 attackClass.indexOf('UDP') >= 0 ? '#14B8A6' : '#94A3B8';
 
     var forwardPaths = this.paths.filter(function(p) { return !p.feedback; });
-    var path = forwardPaths[Math.floor(Math.random() * forwardPaths.length)];
-    this.particles.push({
-      from: path.from, to: path.to, progress: 0,
-      speed: 0.014 + Math.random() * 0.008,
-      color: color, isFeedback: false
+    forwardPaths.forEach(function(path, index) {
+      this.particles.push({
+        from: path.from, to: path.to, progress: -index * 1.1,
+        speed: 0.022,
+        color: color, isFeedback: false
+      });
+    }.bind(this));
+  },
+
+  spawnFeedbackParticle: function(isAnomaly) {
+    if (this.reducedMotion) return;
+    var learnPath = this.paths.find(function(p) { return p.feedback && p.kind === 'learn'; });
+    if (!learnPath) return;
+    var color = isAnomaly ? '#E11D48' : '#10B981';
+    this.feedbackParticles.push({
+      from: learnPath.from, to: learnPath.to, progress: 0,
+      speed: 0.02 + Math.random() * 0.01,
+      color: color, isFeedback: true
+    });
+  },
+
+  spawnEnforceParticle: function(action) {
+    if (this.reducedMotion) return;
+    this.lastEnforceAction = action || 'block';
+    var enforcePath = this.paths.find(function(p) { return p.feedback && p.kind === 'enforce'; });
+    if (!enforcePath) return;
+    this.feedbackParticles.push({
+      from: enforcePath.from, to: enforcePath.to, progress: 0,
+      speed: 0.018 + Math.random() * 0.008,
+      color: '#F59E0B', isFeedback: true
+    });
+  },
+
+  spawnRedirectParticle: function() {
+    if (this.reducedMotion) return;
+    var redirectPath = this.paths.find(function(p) { return p.feedback && p.kind === 'redirect'; });
+    if (!redirectPath) return;
+    this.feedbackParticles.push({
+      from: redirectPath.from, to: redirectPath.to, progress: 0,
+      speed: 0.016 + Math.random() * 0.008,
+      color: '#8B5CF6', isFeedback: true
     });
   },
 
@@ -359,17 +456,37 @@ var ExpertPipeline = {
     var flagged = (pollData.pipeline && pollData.pipeline.flood_prefilter_flagged) || 0;
     var ifAnomalies = (pollData.if && pollData.if.score_distribution) ? pollData.if.score_distribution.anomaly || 0 : 0;
     var smCount = pollData.state_machine ? Object.keys(pollData.state_machine).length : 0;
+    var sinkholeCount = pollData.deception && pollData.deception.active_sinkholes ? pollData.deception.active_sinkholes.length : 0;
+    var rgTier = pollData.resource_guard && pollData.resource_guard.tier ? pollData.resource_guard.tier : 'NORMAL';
 
+    var qSize = (pollData.pipeline && pollData.pipeline.worker_queue_size) || 0;
+    var activeWorkers = (pollData.pipeline && pollData.pipeline.workers_active) || 0;
+    var isLive = (qSize > 0 || activeWorkers > 0);
+
+    this.nodeGlow.mininet = isLive ? 0.6 : 0;
+    this.nodeGlow.ryu = isLive ? 0.6 : 0;
+    this.nodeGlow.zmq_rx = Math.min(qSize / 500, 1) || (isLive ? 0.3 : 0);
     this.nodeGlow.flood = Math.min(flagged / 10, 1);
     this.nodeGlow.if_node = Math.min(ifAnomalies / 5, 1);
     this.nodeGlow.decision = Math.min(smCount / 3, 1);
     this.nodeGlow.entropy = (pollData.tea && pollData.tea.global && pollData.tea.global.is_attack) ? 0.8 : 0;
     this.nodeGlow.rf = (pollData.rf && pollData.rf.recent_classifications && pollData.rf.recent_classifications.length > 0) ? 0.6 : 0;
+    this.nodeGlow.deception = Math.min(sinkholeCount / 3, 1);
+    this.nodeGlow.resource_guard = rgTier === 'CRIT' ? 1 : rgTier === 'HIGH' ? 0.7 : rgTier === 'WARN' ? 0.4 : 0;
+
+    var teaGlobal = pollData.tea && pollData.tea.global;
+    if (teaGlobal) {
+      this.latchState = {
+        locked: !!teaGlobal._locked,
+        streak: teaGlobal._fb_normal_streak || 0
+      };
+    }
   },
 
   drawScene: function() {
     var ctx = this.ctx;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    var scaleY = this.canvas.height / this.VIRTUAL_H;
 
     this.paths.forEach(function(path) {
       var start = this._coords(this.nodes[path.from].x, this.nodes[path.from].y);
@@ -378,7 +495,7 @@ var ExpertPipeline = {
       ctx.moveTo(start.x, start.y);
       if (path.feedback) {
         var cX = (start.x + end.x) / 2;
-        var cY = (start.y + end.y) / 2 + path.curve;
+        var cY = (start.y + end.y) / 2 + path.curve * scaleY;
         ctx.quadraticCurveTo(cX, cY, end.x, end.y);
         ctx.strokeStyle = path.kind === 'learn'
           ? (this.isLightMode ? 'rgba(13,148,136,0.5)' : 'rgba(20,184,166,0.4)')
@@ -395,15 +512,34 @@ var ExpertPipeline = {
 
       if (path.feedback) {
         var cX2 = (start.x + end.x) / 2;
-        var cY2 = (start.y + end.y) / 2 + path.curve;
+        var cY2 = (start.y + end.y) / 2 + path.curve * scaleY;
         var lx = 0.25 * start.x + 0.5 * cX2 + 0.25 * end.x;
         var ly = 0.25 * start.y + 0.5 * cY2 + 0.25 * end.y;
         ctx.font = '600 9px "Fira Code", monospace';
         ctx.textAlign = 'center';
-        ctx.fillStyle = path.kind === 'learn'
+        ctx.textBaseline = 'middle';
+        var label = path.kind === 'learn' ? 'learns baseline' : path.kind === 'redirect' ? 'redirects to sinkhole' : 'Sends decisions';
+        var color = path.kind === 'learn'
           ? (this.isLightMode ? 'rgba(13,148,136,0.8)' : 'rgba(20,184,166,0.6)')
+          : path.kind === 'redirect'
+          ? (this.isLightMode ? 'rgba(139,92,246,0.8)' : 'rgba(168,120,255,0.6)')
           : (this.isLightMode ? 'rgba(180,83,9,0.8)' : 'rgba(245,158,11,0.6)');
-        ctx.fillText(path.kind === 'learn' ? 'learns baseline' : 'sends block', lx, ly);
+        ctx.fillStyle = color;
+        ctx.fillText(label, lx, ly);
+        if (path.kind === 'learn' && this.latchState) {
+          var badgeX = lx;
+          var badgeY = ly + 18;
+          var locked = this.latchState.locked;
+          var streak = this.latchState.streak || 0;
+          var badgeText = locked ? 'learning frozen' : 'learning active';
+          badgeText += ' (' + streak + '/10)';
+          ctx.font = '500 8px "Fira Code", monospace';
+          ctx.textAlign = 'center';
+          ctx.fillStyle = locked
+            ? (this.isLightMode ? 'rgba(225,29,72,0.9)' : 'rgba(255,80,80,0.9)')
+            : (this.isLightMode ? 'rgba(16,185,129,0.9)' : 'rgba(80,255,80,0.9)');
+          ctx.fillText(badgeText, badgeX, badgeY);
+        }
       }
     }.bind(this));
 
@@ -411,6 +547,7 @@ var ExpertPipeline = {
       var p = this.particles[i];
       p.progress += p.speed;
       if (p.progress >= 1) { this.particles.splice(i, 1); continue; }
+      if (p.progress < 0) continue;
       var s = this._coords(this.nodes[p.from].x, this.nodes[p.from].y);
       var e = this._coords(this.nodes[p.to].x, this.nodes[p.to].y);
       var px = s.x + (e.x - s.x) * p.progress;
@@ -420,6 +557,31 @@ var ExpertPipeline = {
       ctx.fillStyle = p.color;
       ctx.shadowColor = p.color;
       ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+    }
+
+    for (var i = this.feedbackParticles.length - 1; i >= 0; i--) {
+      var fp = this.feedbackParticles[i];
+      fp.progress += fp.speed;
+      if (fp.progress >= 1) { this.feedbackParticles.splice(i, 1); continue; }
+      var s = this._coords(this.nodes[fp.from].x, this.nodes[fp.from].y);
+      var e = this._coords(this.nodes[fp.to].x, this.nodes[fp.to].y);
+      var path = this.paths.find(function(p) { return p.feedback && p.from === fp.from && p.to === fp.to; });
+      var curve = (path ? path.curve : -60) * scaleY;
+      var cX = (s.x + e.x) / 2;
+      var cY = (s.y + e.y) / 2 + curve;
+      var px = s.x + (cX - s.x) * fp.progress * 2;
+      var py = s.y + (cY - s.y) * fp.progress * 2;
+      if (fp.progress > 0.5) {
+        px = cX + (e.x - cX) * (fp.progress - 0.5) * 2;
+        py = cY + (e.y - cY) * (fp.progress - 0.5) * 2;
+      }
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fillStyle = fp.color;
+      ctx.shadowColor = fp.color;
+      ctx.shadowBlur = 12;
       ctx.fill();
       ctx.shadowBlur = 0;
     }
@@ -520,8 +682,8 @@ var ExpertMetrics = {
       '<div class="expert-metrics-title">Live pipeline readout</div>' +
       '<div class="expert-metrics-row">' +
         '<div class="expert-stat"><span class="lbl">Packets / sec</span><span class="val" id="ep-pps" style="color:var(--text)">0</span><span class="note">pipeline input</span></div>' +
-        '<div class="expert-stat"><span class="lbl">IP entropy</span><span class="val" id="ep-entropy" style="color:var(--text)">0.00</span><span class="note">traffic diversity</span></div>' +
-        '<div class="expert-stat"><span class="lbl">Model verdict</span><span class="val" id="ep-verdict" style="color:var(--green);font-size:15px">Normal</span><span class="note">IF + RF combined</span></div>' +
+        '<div class="expert-stat"><span class="lbl">Size variance</span><span class="val" id="ep-entropy" style="color:var(--text)">0.00</span><span class="note">diversity variance</span></div>' +
+        '<div class="expert-stat"><span class="lbl">TEA verdict</span><span class="val" id="ep-verdict" style="color:var(--green);font-size:15px">Normal</span><span class="note">TEA global verdict</span></div>' +
       '</div>' +
       '<div class="expert-proto-row">' +
         '<span class="expert-proto-title">Flood Prefilter, per protocol</span>' +
@@ -694,60 +856,127 @@ function renderMLPanel(ifData, rfData, teaData) {
   </div>`;
   if (rfWrap) rfWrap.innerHTML = rfHtml;
 
-  // TEA Global Feature Entropy
-  const teaGlobal = teaData.global || null;
-  if (teaGlobal && Object.keys(teaGlobal).length > 0) {
-    const totalIps = teaGlobal.unique_ips || 0;
+    // TEA Global Feature Entropy
+    const teaGlobal = teaData.global || null;
+    if (teaGlobal && Object.keys(teaGlobal).length > 0) {
+      const totalIps = teaGlobal.unique_ips || 0;
 
-    const isAttack = teaGlobal.is_attack;
-    const isFlash = teaGlobal.is_flash_crowd;
-    const isLearned = teaGlobal.learned;
+      const isAttack = teaGlobal.is_attack;
+      const isFlash = teaGlobal.is_flash_crowd;
+      const isLearned = teaGlobal.learned;
 
-    const statusClass = isAttack ? 'attack' : isFlash ? 'flash-crowd' : !isLearned ? 'learning' : 'learned';
-    const statusText = isAttack ? 'ATTACK' : isFlash ? 'FLASH CROWD' : !isLearned ? 'LEARNING' : 'NORMAL';
+      const statusClass = isAttack ? 'attack' : isFlash ? 'flash-crowd' : !isLearned ? 'learning' : 'learned';
+      const statusText = isAttack ? 'ATTACK' : isFlash ? 'FLASH CROWD' : !isLearned ? 'LEARNING' : 'NORMAL';
 
-    const maxSizeZ = teaGlobal.size_z || 0;
-    const maxIntZ = teaGlobal.intensity_z || 0;
+      const maxSizeZ = teaGlobal.size_z || 0;
+      const maxIntZ = teaGlobal.intensity_z || 0;
 
-    // Clamp fill to [0, 100] using a -3..+3 z-score window mapped to 0..100%
-    const sizeZPct = Math.min(Math.max((maxSizeZ + 3) / 6 * 100, 0), 100);
-    const intZPct = Math.min(Math.max((maxIntZ + 3) / 6 * 100, 0), 100);
+      // Clamp fill to [0, 100] using a -3..+3 z-score window mapped to 0..100%
+      const sizeZPct = Math.min(Math.max((maxSizeZ + 3) / 6 * 100, 0), 100);
+      const intZPct = Math.min(Math.max((maxIntZ + 3) / 6 * 100, 0), 100);
 
-    const existingCard = teaWrap.querySelector('.controller-tea-card');
-    if (!existingCard) {
-      teaWrap.innerHTML = `
-        <div class="ml-section">
-          <div class="ml-section-title"><span class="accent-dot tea-dot"></span>Temporal Entropy Analysis</div>
-          <div class="tea-switch-card controller-tea-card">
-            <div class="tea-switch-header">
-              <span class="tea-switch-title">Aggregation <span class="tea-unique-ips"></span></span>
-              <span class="tea-switch-status ${statusClass}">${statusText}</span>
-            </div>
-            <div class="zscore-container">
-              <div class="zscore-row" id="tea-size">
-                <div class="zscore-label">Avg Div Entropy <span class="zscore-val">${teaGlobal.size_var.toFixed(4)}</span></div>
-                <div class="zscore-track">
-                  <div class="zscore-midline"></div>
-                  <div class="zscore-fill ${maxSizeZ >= 2 ? 'anomaly' : ''}" style="width: ${sizeZPct}%"></div>
-                </div>
-                <div class="zscore-num">${maxSizeZ >= 0 ? '+' : ''}${maxSizeZ.toFixed(1)}z<br><span style="font-size:9px;font-weight:400;color:var(--sub2)">(Max)</span></div>
+      // Single threshold marker position (attack sigma)
+      const attackSigma = teaGlobal.dynamic_attack_sigma || 2.5;
+      const thresholdPct = Math.min(Math.max((attackSigma + 3) / 6 * 100, 0), 100);
+
+      // Confidence chip
+      const confidence = teaGlobal.confidence || 'LOW';
+      const confidenceClass = confidence === 'HIGH' ? 'conf-high' : confidence === 'MODERATE' ? 'conf-moderate' : 'conf-low';
+
+      // Learning progress
+      const learningInterval = teaGlobal.learning_interval;
+      const learningProgress = !isLearned && learningInterval ? `${learningInterval}/15` : '';
+
+      // Baseline history for sparklines
+      const sizeBaselineHist = teaGlobal.size_baseline_history || [];
+      const intBaselineHist = teaGlobal.intensity_baseline_history || [];
+
+      // Sparkline SVG generation
+      function makeSparkline(data, color) {
+        if (!data || data.length < 1) return '<div class="sparkline-placeholder">—</div>';
+        if (data.length === 1) {
+          return `<svg class="sparkline" viewBox="0 0 120 30" preserveAspectRatio="none">
+            <polyline fill="none" stroke="${color}" stroke-width="1.5" points="0,15 120,15"/>
+          </svg>`;
+        }
+        const max = Math.max(...data);
+        const min = Math.min(...data);
+        const range = max - min || 1;
+        const w = 120, h = 30;
+        const points = data.map((v, i) => {
+          const x = (i / (data.length - 1)) * w;
+          const y = h - ((v - min) / range) * h;
+          return `${x.toFixed(1)},${y.toFixed(1)}`;
+        }).join(' ');
+        return `<svg class="sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
+          <polyline fill="none" stroke="${color}" stroke-width="1.5" points="${points}"/>
+        </svg>`;
+      }
+
+      const existingCard = teaWrap.querySelector('.controller-tea-card');
+      if (!existingCard) {
+        teaWrap.innerHTML = `
+          <div class="ml-section">
+            <div class="ml-section-title"><span class="accent-dot tea-dot"></span>Temporal Entropy Analysis</div>
+            <div class="tea-switch-card controller-tea-card">
+              <div class="tea-switch-header">
+                <span class="tea-switch-title">Aggregation <span class="tea-unique-ips">${totalIps > 0 ? '(' + totalIps + ' IPs)' : ''}</span></span>
+                <span class="tea-switch-status ${statusClass}">${statusText}</span>
+                <span class="tea-confidence-chip ${confidenceClass}">${confidence}</span>
+                ${learningProgress ? '<span class="tea-learning-progress">' + learningProgress + '</span>' : ''}
               </div>
-              <div class="zscore-row" id="tea-int">
-                <div class="zscore-label">Avg Pkt Intensity <span class="zscore-val">${teaGlobal.intensity_var.toFixed(4)}</span></div>
-                <div class="zscore-track">
-                  <div class="zscore-midline"></div>
-                  <div class="zscore-fill ${maxIntZ >= 2 ? 'anomaly' : ''}" style="width: ${intZPct}%"></div>
+              <div class="zscore-container">
+                <div class="zscore-row" id="tea-size">
+                  <div class="zscore-header">
+                    <div class="zscore-label">Avg Div Entropy <span class="zscore-val">${teaGlobal.size_var.toFixed(4)}</span></div>
+                  </div>
+                  <div class="zscore-track">
+                    <div class="zscore-midline" title="Baseline (z=0)"></div>
+                    <div class="zscore-threshold" style="left: ${thresholdPct}%;" title="Attack threshold (${attackSigma.toFixed(1)}σ)"></div>
+                    <div class="zscore-fill ${maxSizeZ >= 2 ? 'anomaly' : ''}" style="width: ${sizeZPct}%"></div>
+                  </div>
+                  <div class="zscore-stats">
+                    <span>Z-score: ${maxSizeZ >= 0 ? '+' : ''}${maxSizeZ.toFixed(1)}z</span>
+                    <span>Threshold: ${attackSigma.toFixed(1)}σ</span>
+                  </div>
                 </div>
-                <div class="zscore-num">${maxIntZ >= 0 ? '+' : ''}${maxIntZ.toFixed(1)}z<br><span style="font-size:9px;font-weight:400;color:var(--sub2)">(Max)</span></div>
+                <div class="zscore-row" id="tea-int">
+                  <div class="zscore-header">
+                    <div class="zscore-label">Avg Pkt Intensity <span class="zscore-val">${teaGlobal.intensity_var.toFixed(4)}</span></div>
+                  </div>
+                  <div class="zscore-track">
+                    <div class="zscore-midline" title="Baseline (z=0)"></div>
+                    <div class="zscore-threshold" style="left: ${thresholdPct}%;" title="Attack threshold (${attackSigma.toFixed(1)}σ)"></div>
+                    <div class="zscore-fill ${maxIntZ >= 2 ? 'anomaly' : ''}" style="width: ${intZPct}%"></div>
+                  </div>
+                  <div class="zscore-stats">
+                    <span>Z-score: ${maxIntZ >= 0 ? '+' : ''}${maxIntZ.toFixed(1)}z</span>
+                    <span>Threshold: ${attackSigma.toFixed(1)}σ</span>
+                  </div>
+                </div>
+              </div>
+              <div class="tea-caption">Z-score tracks: current variance vs baseline. Line = baseline (z=0). Marker = attack threshold. Fill = current z-score.</div>
+              <div class="tea-sparklines">
+                <div class="sparkline-row">
+                  <span class="sparkline-label">Size baseline</span>
+                  ${makeSparkline(sizeBaselineHist, '#14B8A6')}
+                </div>
+                <div class="sparkline-row">
+                  <span class="sparkline-label">Intensity baseline</span>
+                  ${makeSparkline(intBaselineHist, '#F59E0B')}
+                </div>
               </div>
             </div>
-          </div>
-        </div>`;
+          </div>`;
     } else {
       const titleEl = existingCard.querySelector('.tea-unique-ips');
       const statusEl = existingCard.querySelector('.tea-switch-status');
-      if (titleEl) titleEl.textContent = '';
+      const confEl = existingCard.querySelector('.tea-confidence-chip');
+      const progEl = existingCard.querySelector('.tea-learning-progress');
+      if (titleEl) titleEl.textContent = totalIps > 0 ? '(' + totalIps + ' IPs)' : '';
       if (statusEl) { statusEl.className = `tea-switch-status ${statusClass}`; statusEl.textContent = statusText; }
+      if (confEl) { confEl.className = `tea-confidence-chip ${confidenceClass}`; confEl.textContent = confidence; }
+      if (progEl) { progEl.textContent = learningProgress; progEl.style.display = learningProgress ? 'inline' : 'none'; }
 
       const sizeRow = document.getElementById('tea-size');
       if (sizeRow) {
@@ -755,7 +984,10 @@ function renderMLPanel(ifData, rfData, teaData) {
         const sf = sizeRow.querySelector('.zscore-fill');
         sf.className = `zscore-fill ${maxSizeZ >= 2 ? 'anomaly' : ''}`;
         sf.style.width = `${sizeZPct}%`;
-        sizeRow.querySelector('.zscore-num').innerHTML = `${maxSizeZ >= 0 ? '+' : ''}${maxSizeZ.toFixed(1)}z<br><span style="font-size:9px;font-weight:400;color:var(--sub2)">(Max)</span>`;
+        const sStats = sizeRow.querySelector('.zscore-stats');
+        if (sStats) sStats.querySelector('span:first-child').textContent = `Z-score: ${maxSizeZ >= 0 ? '+' : ''}${maxSizeZ.toFixed(1)}z`;
+        const threshold = sizeRow.querySelector('.zscore-threshold');
+        if (threshold) { threshold.style.left = thresholdPct + '%'; }
       }
       const intRow = document.getElementById('tea-int');
       if (intRow) {
@@ -763,35 +995,101 @@ function renderMLPanel(ifData, rfData, teaData) {
         const ifill = intRow.querySelector('.zscore-fill');
         ifill.className = `zscore-fill ${maxIntZ >= 2 ? 'anomaly' : ''}`;
         ifill.style.width = `${intZPct}%`;
-        intRow.querySelector('.zscore-num').innerHTML = `${maxIntZ >= 0 ? '+' : ''}${maxIntZ.toFixed(1)}z<br><span style="font-size:9px;font-weight:400;color:var(--sub2)">(Max)</span>`;
+        const iStats = intRow.querySelector('.zscore-stats');
+        if (iStats) iStats.querySelector('span:first-child').textContent = `Z-score: ${maxIntZ >= 0 ? '+' : ''}${maxIntZ.toFixed(1)}z`;
+        const threshold = intRow.querySelector('.zscore-threshold');
+        if (threshold) { threshold.style.left = thresholdPct + '%'; }
       }
+
+      // Update sparklines
+      const sizeSpark = existingCard.querySelector('.sparkline-row:first-child .sparkline');
+      const intSpark = existingCard.querySelector('.sparkline-row:last-child .sparkline');
+      if (sizeSpark) sizeSpark.outerHTML = makeSparkline(sizeBaselineHist, '#14B8A6');
+      if (intSpark) intSpark.outerHTML = makeSparkline(intBaselineHist, '#F59E0B');
     }
   } else {
     if (teaWrap) teaWrap.innerHTML = '';
   }
 
-  // TEA per-IP verdicts
-  const ipVerdicts = teaData.per_ip_verdicts || {};
-  let verdictHtml = '';
-  if (Object.keys(ipVerdicts).length) {
-    verdictHtml += '<div class="ml-section"><div class="ml-section-title">TEA Per-IP Verdicts</div><div class="tea-ip-list">';
-    Object.entries(ipVerdicts).forEach(([ip, verdict]) => {
-      verdictHtml += `<span class="tea-ip-pill ${verdict}">${ip} \u2192 ${verdict.toUpperCase()}</span>`;
-    });
-    verdictHtml += '</div></div>';
-  }
-  if (verdictWrap) verdictWrap.innerHTML = verdictHtml;
+  // TEA per-IP verdicts section removed per B7 scope reduction — use ip-drawer for per-IP detail
+if (verdictWrap) verdictWrap.innerHTML = '';
 }
 
 
 function updateTEASwitch(tea) {
-  // Disabling individual switch updates via SSE because we are now rendering a global aggregation based on the REST poll.
-  // The SSE payload only contains a single switch, so we can't accurately compute the global mean here without caching all switch states.
-  // We rely on fetchExpert() (poll) for the controller-wide UI instead.
+  // Real-time update from SSE tea_update events
+  if (!tea) return;
+  
+  // Update latch state for feedback edge visualization
+  if (ExpertPipeline.latchState) {
+    if (tea._locked !== undefined) ExpertPipeline.latchState.locked = tea._locked;
+    if (tea._fb_normal_streak !== undefined) ExpertPipeline.latchState.streak = tea._fb_normal_streak;
+  }
+  
+  // Update TEA card z-score values in real-time
+  const sizeRow = document.getElementById('tea-size');
+  const intRow = document.getElementById('tea-int');
+  
+  if (sizeRow && tea.size_z != null) {
+    const fill = sizeRow.querySelector('.zscore-fill');
+    if (fill) {
+      const pct = Math.min(Math.max((tea.size_z + 3) / 6 * 100, 0), 100);
+      fill.style.width = pct + '%';
+      fill.className = 'zscore-fill' + (tea.size_z >= 2 ? ' anomaly' : '');
+    }
+    const statsEl = sizeRow.querySelector('.zscore-stats span:first-child');
+    if (statsEl) statsEl.textContent = 'Z-score: ' + (tea.size_z >= 0 ? '+' : '') + tea.size_z.toFixed(1) + 'z';
+  }
+
+  if (intRow && tea.intensity_z != null) {
+    const fill = intRow.querySelector('.zscore-fill');
+    if (fill) {
+      const pct = Math.min(Math.max((tea.intensity_z + 3) / 6 * 100, 0), 100);
+      fill.style.width = pct + '%';
+      fill.className = 'zscore-fill' + (tea.intensity_z >= 2 ? ' anomaly' : '');
+    }
+    const statsEl = intRow.querySelector('.zscore-stats span:first-child');
+    if (statsEl) statsEl.textContent = 'Z-score: ' + (tea.intensity_z >= 0 ? '+' : '') + tea.intensity_z.toFixed(1) + 'z';
+  }
+  
+  // Update status badge
+  const statusEl = document.querySelector('.tea-switch-status');
+  if (statusEl) {
+    if (tea.is_attack) {
+      statusEl.className = 'tea-switch-status attack';
+      statusEl.textContent = 'ATTACK';
+    } else if (tea.is_flash_crowd) {
+      statusEl.className = 'tea-switch-status flash-crowd';
+      statusEl.textContent = 'FLASH CROWD';
+    } else if (!tea.is_learned) {
+      statusEl.className = 'tea-switch-status learning';
+      statusEl.textContent = 'LEARNING';
+    } else {
+      statusEl.className = 'tea-switch-status learned';
+      statusEl.textContent = 'NORMAL';
+    }
+  }
 }
 
 function updateIFBar(inf) {
-  // Disabling individual IF updates via SSE because we are now rendering an aggregated thermometer based on the REST poll.
+  // Real-time update from SSE inference events
+  if (!inf) return;
+  
+  // Update IF thermometer
+  const thermometer = document.querySelector('.if-thermometer-fill');
+  if (thermometer) {
+    const score = inf.if_score || 0;
+    const threshold = 0.6092;
+    const fillPct = Math.min((score / (threshold * 2)) * 100, 100);
+    thermometer.style.width = fillPct + '%';
+    thermometer.className = 'if-thermometer-fill' + (inf.is_anomaly ? ' anomaly' : ' normal');
+  }
+  
+  // Update max score display
+  const statsEl = document.querySelector('.if-stats span:first-child');
+  if (statsEl && inf.if_score != null) {
+    statsEl.textContent = 'Max: ' + inf.if_score.toFixed(4);
+  }
 }
 
 // ── Panel 3: Mitigation State Machine ────────────────────────────────────
@@ -820,7 +1118,7 @@ function renderMitigationPanel(smStates, deception, rg) {
     <div class="phase-box blackhole">
       <div class="phase-label">Blackhole</div>
       <div class="phase-count">${phaseCounts[3]}</div>
-      <div class="phase-action">24h TTL</div>
+      <div class="phase-action">1h TTL</div>
     </div>
     <div class="phase-box probation">
       <div class="phase-label">Probation</div>
@@ -849,34 +1147,11 @@ function renderMitigationPanel(smStates, deception, rg) {
     html += '</div></div>';
   }
 
-  // Deception sinkholes
-  if (deception.active_sinkholes?.length) {
-    html += '<div class="ml-section"><div class="ml-section-title"><span class="accent-dot tea-dot"></span>Active Sinkholes</div><div class="terminal-feed">';
-    deception.active_sinkholes.forEach(sh => {
-      const now = new Date().toLocaleTimeString('en-US', { hour12: false });
-      const pct = Math.min((sh.obs_sec / sh.escalate_at_sec) * 100, 100);
-      html += `
-        <div class="terminal-line">
-          <span class="t-time">[${now}]</span>
-          <span class="t-ip">${sh.src_ip}</span>
-          <span class="t-alert">HONEYPOT</span>
-          <span class="t-stat">VECTOR=${sh.attack_vector}</span>
-          <div class="sinkhole-progress"><div class="sinkhole-progress-fill" style="width:${pct}%"></div></div>
-        </div>`;
-    });
-    html += '</div></div>';
-  }
+  // Deception sinkholes section removed per B7 scope reduction — use ip-drawer for per-IP detail
 
-  // Resource guard tier
-  const tier = rg?.tier || 'OK';
-  const tierClass = tier.toLowerCase();
-  html += `
-    <div class="ml-section">
-      <div class="ml-section-title">Resource Guard</div>
-      <div class="rg-tier ${tierClass}">${tier}</div>
-    </div>
-  `;
-
+  // Resource guard tier removed from expert panel per Item 1
+  // (node remains on canvas)
+  
   el.innerHTML = html;
 }
 

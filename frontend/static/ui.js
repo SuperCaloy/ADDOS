@@ -50,15 +50,14 @@ function showToast(msg, isErr = false) {
 
 let isLight = false;
 
-function toggleTheme() {
-  isLight = !isLight;
-  document.body.classList.toggle('light', isLight);
-  document.getElementById('theme-btn').textContent = isLight ? 'Dark Mode' : 'Light Mode';
+function _applyTheme(light) {
+  document.body.classList.toggle('light', light);
+  document.body.classList.toggle('dark', !light);
+  document.getElementById('theme-btn').textContent = light ? 'Dark Mode' : 'Light Mode';
 
-  /* Update chart colors to match theme */
-  const gridColor   = isLight ? '#d8dce8' : '#1e2235';
-  const tickColor   = isLight ? '#6b7280' : '#5c6080';
-  const legendColor = isLight ? '#4b5563' : '#5c6080';
+  const gridColor   = light ? '#d8dce8' : '#1e2235';
+  const tickColor   = light ? '#6b7280' : '#5c6080';
+  const legendColor = light ? '#4b5563' : '#5c6080';
 
   if (window._chart) {
     window._chart.options.scales.x.grid.color         = gridColor;
@@ -66,19 +65,37 @@ function toggleTheme() {
     window._chart.options.scales.x.ticks.color        = tickColor;
     window._chart.options.scales.y.ticks.color        = tickColor;
     window._chart.options.plugins.legend.labels.color = legendColor;
-    window._chart.options.plugins.tooltip.backgroundColor = isLight ? '#ffffff' : '#111320';
-    window._chart.options.plugins.tooltip.titleColor      = isLight ? '#6b7280' : '#8890b0';
-    window._chart.options.plugins.tooltip.bodyColor       = isLight ? '#111827' : '#e8eaf6';
-    window._chart.options.plugins.tooltip.borderColor     = isLight ? '#d8dce8' : '#1e2235';
+    window._chart.options.plugins.tooltip.backgroundColor = light ? '#ffffff' : '#111320';
+    window._chart.options.plugins.tooltip.titleColor      = light ? '#6b7280' : '#8890b0';
+    window._chart.options.plugins.tooltip.bodyColor       = light ? '#111827' : '#e8eaf6';
+    window._chart.options.plugins.tooltip.borderColor     = light ? '#d8dce8' : '#1e2235';
     window._chart.update();
   }
 
-  localStorage.setItem('adddos-theme', isLight ? 'light' : 'dark');
+  if (window.ExpertPipeline && window.ExpertPipeline.canvas) {
+    window.ExpertPipeline.isLightMode = light;
+  }
+
+  localStorage.setItem('adddos-theme', light ? 'light' : 'dark');
+}
+
+function toggleTheme() {
+  isLight = !isLight;
+  _applyTheme(isLight);
 }
 
 /* Restore saved theme on load — defer so window._chart exists first */
 window.addEventListener('DOMContentLoaded', () => {
-  if (localStorage.getItem('adddos-theme') === 'light') toggleTheme();
+  const saved = localStorage.getItem('adddos-theme');
+  if (saved === 'light') {
+    isLight = true;
+    _applyTheme(true);
+  } else if (saved === 'dark') {
+    isLight = false;
+    _applyTheme(false);
+  } else {
+    _applyTheme(false);
+  }
 });
 
 /* ── Report modal ──────────────────────────────────────────────────────────── */

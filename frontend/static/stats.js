@@ -56,9 +56,9 @@ async function fetchStats() {
   } catch (_) {}
 }
 
-/* fetchModelInfo — now delegates to pollModelInfo (polled every 30s) */
+/* fetchModelInfo — now delegates to pollModelInfo (polled every 1s) */
 async function fetchModelInfo() { await pollModelInfo(); }
-/* Poll system metrics (CPU/Memory) every 5s */
+/* Poll system metrics (CPU/Memory) every 1s */
 async function fetchSystemMetrics() {
   try {
     const m = await apiFetch('/api/system_metrics');

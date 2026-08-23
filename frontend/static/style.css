@@ -80,6 +80,31 @@ body.light {
   --line-border: rgba(0,0,0,0.07);
 }
 
+body.dark {
+  /* DARK MODE (MANUAL TOGGLE) — overrides prefers-color-scheme: light */
+  --bg:       #0F172A;
+  --surface:  #1E293B;
+  --card:     #1E293B;
+  --border:   #334155;
+  --border2:  #475569;
+  --text:     #F8FAFC;
+  --sub:      #CBD5E1;
+  --sub2:     #94A3B8;
+  --blue:     #14B8A6;
+  --blue-g:   rgba(20, 184, 166, 0.15);
+  --red:      #E11D48;
+  --red-g:    rgba(225, 29, 72, 0.15);
+  --green:    #10B981;
+  --green-g:  rgba(16, 185, 129, 0.15);
+  --amber:    #F59E0B;
+  --amber-g:  rgba(245, 158, 11, 0.15);
+  --grid-opacity: 0.08;
+  --terminal-bg: rgba(0,0,0,0.3);
+  --track-bg: rgba(255,255,255,0.05);
+  --track-mid: rgba(255,255,255,0.1);
+  --line-border: rgba(255,255,255,0.05);
+}
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html { scroll-behavior: smooth; }
 
@@ -203,7 +228,7 @@ table { width: 100%; border-collapse: collapse; }
 thead { position: sticky; top: 0; z-index: 2; }
 thead th { background: var(--card); padding: 13px 18px; text-align: left; font-size: 12px; font-weight: 700; color: var(--sub); text-transform: uppercase; letter-spacing: .1em; border-bottom: 1px solid var(--border); white-space: nowrap; }
 tbody tr { border-bottom: 1px solid var(--border); transition: background .14s; }
-tbody tr:hover { background: rgba(255,255,255,.018); }
+tbody tr:hover { background: rgba(128,128,128,.06); }
 tbody tr.tr-clickable { cursor: pointer; }
 tbody tr.tr-clickable:hover { background: rgba(61,108,255,.06) !important; }
 tbody tr.tr-clickable:hover td.ip { color: var(--blue); text-decoration: underline; text-underline-offset: 3px; }
@@ -375,21 +400,50 @@ body.light .cal-nav:hover { background: var(--border); color: var(--text); }
 .tea-switch-status.learned { background: var(--green-g); color: var(--green); border: 1px solid rgba(16,185,129,0.3); }
 
 /* Z-Score Tracks */
-.zscore-container { display: flex; flex-direction: column; gap: 12px; }
-.zscore-row { display: flex; align-items: center; gap: 12px; font-family: var(--mono); font-size: 11px; }
-.zscore-label { width: 140px; color: var(--sub); }
-.zscore-val { color: var(--text); font-weight: 600; margin-left: 4px; }
+.zscore-container { display: flex; flex-direction: column; gap: 16px; }
+.zscore-row { display: flex; flex-direction: column; gap: 4px; font-family: var(--mono); font-size: 11px; }
+.zscore-header { display: flex; justify-content: flex-start; align-items: baseline; gap: 6px; }
+.zscore-label { color: var(--sub); }
+.zscore-val { color: var(--text); font-weight: 600; }
 .zscore-track {
-  flex: 1; height: 6px; background: var(--track-bg); border-radius: 3px; position: relative; overflow: hidden;
+  position: relative; height: 8px; background: var(--track-bg); border-radius: 4px; overflow: hidden; margin-top: 8px;
 }
 .zscore-midline {
-  position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--track-mid);
+  position: absolute; left: 50%; top: -2px; bottom: -2px; width: 2px; background: var(--track-mid); border-radius: 1px;
 }
 .zscore-fill {
-  position: absolute; left: 50%; top: 0; bottom: 0; background: var(--blue); transition: width 0.3s ease;
+  position: absolute; left: 50%; top: 0; bottom: 0; background: var(--blue); transition: width 0.3s ease; border-radius: 0 4px 4px 0;
 }
 .zscore-fill.anomaly { background: var(--red); }
-.zscore-num { width: 60px; text-align: right; font-weight: 700; color: var(--text); }
+.zscore-stats { display: flex; gap: 16px; font-size: 11px; color: var(--sub2); font-family: var(--mono); margin-top: 4px; }
+
+/* TEA Card Enhancements */
+.tea-switch-header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tea-confidence-chip {
+  padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700; font-family: var(--mono); text-transform: uppercase;
+}
+.tea-confidence-chip.conf-high { background: var(--red-g); color: var(--red); border: 1px solid rgba(225,29,72,0.3); }
+.tea-confidence-chip.conf-moderate { background: var(--amber-g); color: var(--amber); border: 1px solid rgba(245,158,11,0.3); }
+.tea-confidence-chip.conf-low { background: var(--track-bg); color: var(--sub2); border: 1px solid var(--border2); }
+.tea-learning-progress {
+  font-size: 10px; font-weight: 600; font-family: var(--mono); color: var(--blue);
+  background: var(--blue-g); padding: 2px 6px; border-radius: 4px; border: 1px solid rgba(59,130,246,0.3);
+}
+.zscore-threshold {
+  position: absolute; top: -3px; bottom: -3px; width: 2px;
+  background: var(--red); opacity: 0.7; border-radius: 2px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.tea-caption {
+  margin-top: 10px; padding: 8px 10px; background: var(--card); border: 1px solid var(--border2); border-radius: 6px;
+  font-size: 10px; color: var(--sub); font-family: var(--mono); line-height: 1.5;
+}
+.tea-sparklines { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.sparkline-row { display: flex; align-items: center; gap: 10px; }
+.sparkline-label { width: 110px; font-size: 10px; color: var(--sub); font-family: var(--mono); }
+.sparkline { width: 120px; height: 30px; }
+.sparkline-placeholder { width: 120px; height: 30px; display: flex; align-items: center; justify-content: center; color: var(--sub2); font-size: 10px; font-family: var(--mono); }
 
 /* Mitigation Phases */
 .mitigation-phases { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
@@ -405,10 +459,27 @@ body.light .cal-nav:hover { background: var(--border); color: var(--text); }
   background: var(--terminal-bg);
   border-radius: 8px;
   padding: 16px;
-  height: 200px;
+  min-height: 200px;
+  height: auto;
+  flex-grow: 1;
   overflow-y: auto;
   font-family: var(--mono);
   font-size: 12px;
+}
+
+#expert-mitigation {
+  display: flex;
+  flex-direction: column;
+}
+#expert-mitigation-content {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+}
+#expert-mitigation-content .ml-section {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
 }
 .log-entry { margin-bottom: 6px; display: flex; gap: 8px; }
 .log-entry .ts { color: var(--sub2); }

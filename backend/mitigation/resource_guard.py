@@ -30,6 +30,7 @@ class ResourceGuard:
         self._throttle_delay    = 0.0
         self._attack_proto      = None  # nw_proto of current attack (1=ICMP, 6=TCP, 17=UDP)
         self._installed_proto   = None  # nw_proto actually installed via OVS rule
+        self._tier              = "NORMAL"
 
     @property
     def throttle_delay(self) -> float:
@@ -40,6 +41,10 @@ class ResourceGuard:
     def is_paused(self) -> bool:
         # Always False — ML is never paused under this design.
         return False
+
+    @property
+    def tier(self) -> str:
+        return self._tier
 
     def set_attack_proto(self, attack_class: str) -> None:
         # Map ML attack class to IP protocol number.
@@ -90,6 +95,7 @@ class ResourceGuard:
 
         cpu_pct, mem_pct = self._sample()
         level = self._classify(cpu_pct, mem_pct)
+        self._tier = level
 
         if level == "CRIT":
             # Tier 3 — install OVS packet-in rate-limit rules.

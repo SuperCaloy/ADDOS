@@ -26,6 +26,7 @@ TEA_EMA_ALPHA_MAX     = 0.10
 TEA_VARIANCE_STABLE_THRESHOLD = 0.01
 TEA_ROBUST_REJECT_SIGMA = 3.0
 TEA_FEEDBACK_UNLOCK_STREAK = 10
+TEA_BASELINE_HISTORY_MAX = 60
 
 
 def _shannon_entropy(values: list[float]) -> float:
@@ -50,6 +51,7 @@ class _AdaptiveBaseline:
         self._learned      = False
         self._alpha        = TEA_EMA_ALPHA_MIN
         self._locked        = False
+        self._baseline_history = []
 
     @property
     def is_learned(self) -> bool:
@@ -85,6 +87,7 @@ class _AdaptiveBaseline:
                 self._variance = sum(variance_vals) / len(variance_vals)
                 self._alpha    = self._compute_alpha()
                 self._learned  = True
+                self._baseline_history.append(self._mean)
                 log.info(
                     "TEA baseline learned - mean=%.4f  std=%.4f  alpha=%.4f  (n=%d samples)",
                     self._mean, self._std, self._alpha, len(self._samples)
@@ -103,6 +106,9 @@ class _AdaptiveBaseline:
         self._mean     = self._alpha * value + (1 - self._alpha) * self._mean
         err            = (value - self._mean) ** 2
         self._variance = self._alpha * err + (1 - self._alpha) * self._variance
+        self._baseline_history.append(self._mean)
+        if len(self._baseline_history) > TEA_BASELINE_HISTORY_MAX:
+            self._baseline_history.pop(0)
 
     def lock(self) -> None:
         self._locked = True
@@ -142,6 +148,18 @@ class _AdaptiveBaseline:
 
     def is_high(self, value: float, sigma: float) -> bool:
         return self._learned and self.z_score(value) >= sigma
+
+    @property
+    def locked(self) -> bool:
+        return self._locked
+
+    @property
+    def alpha(self) -> float:
+        return self._alpha
+
+    @property
+    def baseline_history(self) -> list[float]:
+        return list(self._baseline_history)
 
 
 class _GlobalEntropyState:
@@ -256,7 +274,7 @@ class _IpEntropyProfile:
 class EntropyAnalyzer:
 
     def __init__(self):
-        self._lock   = threading.Lock()
+        self._lock   = threading.RLock()
         self._global_state = _GlobalEntropyState(TEA_WINDOW_SIZE)
         self._ip_profiles: dict[str, _IpEntropyProfile] = {}
         self._fb_normal_streak = 0
@@ -264,6 +282,20 @@ class EntropyAnalyzer:
         self._flow_buffer = deque(maxlen=2000)
         self._last_eval_time = 0.0
         self._eval_interval = 1.0
+
+    @property
+    def fb_normal_streak(self) -> int:
+        with self._lock:
+            return self._fb_normal_streak
+
+    @property
+    def is_locked(self) -> bool:
+        with self._lock:
+            return (
+                self._global_state.size_base.locked
+                and self._global_state.intensity_base.locked
+                and self._global_state.proto_base.locked
+            )
 
     def update(self, dpid: int, flows: list[dict]) -> dict:
         with self._lock:
@@ -275,6 +307,7 @@ class EntropyAnalyzer:
             
             self._last_eval_time = now
             current_flows = list(self._flow_buffer)
+            self._flow_buffer.clear()
 
         if not current_flows:
             res = self._neutral(0.0, 0.0, learned=False)
@@ -418,6 +451,8 @@ class EntropyAnalyzer:
                 "is_flash_crowd": is_flash_crowd,
                 "is_learned": True,
                 "confidence": confidence,
+                "_locked": self.is_locked,
+                "_fb_normal_streak": self.fb_normal_streak,
             }
         })
 

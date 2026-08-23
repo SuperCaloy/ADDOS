@@ -243,7 +243,7 @@ def _speed_up_reconnect(edge_switches, core) -> None:
     for sw in [core] + edge_switches:
         subprocess.run(
             f"ovs-vsctl set controller {sw.name} "
-            f"inactivity_probe=1000 max_backoff=1000",
+            f"inactivity_probe=5000 max_backoff=2000",
             shell=True
         )
 
@@ -478,30 +478,38 @@ def _hping_cmd(attacker_num: int, target: str, count: int = None) -> str:
 
 
 def _notify_attack_start(ip: str, attack_type: str) -> None:
-    try:
-        req = urllib.request.Request(
-            f"{BACKEND_API}/api/attack_ground_truth/start",
-            data=_json.dumps({"ip": ip, "attack_type": attack_type}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=2):
-            pass
-    except Exception:
-        pass
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                f"{BACKEND_API}/api/attack_ground_truth/start",
+                data=_json.dumps({"ip": ip, "attack_type": attack_type}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2):
+                pass
+            return
+        except Exception as e:
+            if attempt == 2:
+                info(f"*** Error: Failed to notify attack start for {ip}: {e}\n")
+            time.sleep(1.0)
 
 
 def _notify_attack_stop(ip: str) -> None:
     _active_attackers.discard(ip)
-    try:
-        req = urllib.request.Request(
-            f"{BACKEND_API}/api/attack_ground_truth/stop",
-            data=_json.dumps({"ip": ip}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=2):
-            pass
-    except Exception:
-        pass
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(
+                f"{BACKEND_API}/api/attack_ground_truth/stop",
+                data=_json.dumps({"ip": ip}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2):
+                pass
+            return
+        except Exception as e:
+            if attempt == 2:
+                info(f"*** Error: Failed to notify attack stop for {ip}: {e}\n")
+            time.sleep(1.0)
 
 
 

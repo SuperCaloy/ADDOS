@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>A-DDoS</title>
 <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/style.css?v=8"/>
+<link rel="stylesheet" href="/static/style.css?v=10"/>
 <script src="/static/chart.umd.min.js"></script>
 <style>
 /* ── Modal sizing ── */
@@ -237,7 +237,7 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
   <div id="expert-pipeline-panel" class="expert-hidden">
     <div class="expert-pipeline-canvas-wrap">
       <div class="expert-pipeline-header">
-        <span class="expert-pipeline-eyebrow">8-stage detection cascade &middot; click a stage to inspect</span>
+        <span class="expert-pipeline-eyebrow">Detection and Mitigation Pipeline &middot; click a stage to inspect</span>
         <span class="expert-pipeline-live"><span class="expert-pipeline-live-dot"></span>streaming</span>
       </div>
       <canvas id="expert-pipeline-canvas"></canvas>
@@ -337,11 +337,11 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
   window.POLL_MS      = {{ poll_ms }};
   window.MAX_PTS      = {{ max_pts }};
   window.MAX_LOG      = {{ max_log }};
-  window.EXPERT_MODE  = false;
+  window.EXPERT_MODE  = localStorage.getItem('addos-expert') === '1';
 </script>
 <!-- Load order matters: api → ui → chart → stats → quarantine → log → main -->
 <script src="/static/api.js?v=8"></script>
-<script src="/static/ui.js?v=8"></script>
+<script src="/static/ui.js?v=9"></script>
 <script src="/static/chart.js?v=8"></script>
 <script src="/static/stats.js?v=7"></script>
 <script src="/static/mitigation.js?v=7"></script>
@@ -355,6 +355,6 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
   setInterval(pollModelInfo, 1000);
 </script>
 <script src="/static/ip-drawer.js?v=8"></script>
-<script src="/static/expert.js?v=11"></script>
+<script src="/static/expert.js?v=13"></script>
 </body>
 </html>

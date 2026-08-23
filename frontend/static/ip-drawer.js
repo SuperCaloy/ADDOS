@@ -896,41 +896,41 @@ function _renderExpertTrace(d, ml, st, f, th) {
 
   // IF feature vector (all 16)
   const ifFeatures = [
-    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4) },
-    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString() },
-    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s','') },
-    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s' },
-    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v) },
-    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString() },
-    { key: 'tp_src', label: 'Src Port', fmt: v => v.toLocaleString() },
-    { key: 'tp_dst', label: 'Dst Port', fmt: v => v.toLocaleString() },
-    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v) },
-    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4) },
-    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B' },
-    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4) },
-    { key: 'port_entropy', label: 'Port Entropy', fmt: v => v.toFixed(3) },
-    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2) },
-    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4) },
-    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4) },
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Time elapsed since the first packet of the flow.' },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed.' },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume in bytes.' },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Packets per second; high values indicate potential floods.' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Bytes per second; indicates bandwidth consumption.' },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows from this IP.' },
+    { key: 'tp_src', label: 'Src Port', fmt: v => v.toLocaleString(), desc: 'Source port number used by the traffic.' },
+    { key: 'tp_dst', label: 'Dst Port', fmt: v => v.toLocaleString(), desc: 'Destination port number targeted.' },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport protocol (e.g. TCP, UDP, ICMP).' },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate.' },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size; helps identify specific flood types.' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and byte rate.' },
+    { key: 'port_entropy', label: 'Port Entropy', fmt: v => v.toFixed(3), desc: 'Distribution of source vs destination ports.' },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration.' },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Variance in packet sizes; low variance often means automated attack traffic.' },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and packet rate.' },
   ];
 
   // RF feature vector (all 15)
   const rfFeatures = [
-    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4) },
-    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString() },
-    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s','') },
-    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s' },
-    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v) },
-    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString() },
-    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v) },
-    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4) },
-    { key: 'duration_pkt_ratio', label: 'Duration/Pkt Ratio', fmt: v => v.toFixed(4) },
-    { key: 'pkt_rate_per_duration', label: 'Pkt Rate/Duration', fmt: v => v.toFixed(4) },
-    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B' },
-    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4) },
-    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2) },
-    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4) },
-    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4) },
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Time elapsed since the first packet of the flow.' },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed.' },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume in bytes.' },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Packets per second; high values indicate potential floods.' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Bytes per second; indicates bandwidth consumption.' },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows from this IP.' },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport protocol (e.g. TCP, UDP, ICMP).' },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate.' },
+    { key: 'duration_pkt_ratio', label: 'Duration/Pkt Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of flow duration to packet count.' },
+    { key: 'pkt_rate_per_duration', label: 'Pkt Rate/Duration', fmt: v => v.toFixed(4), desc: 'Rate of packets scaled by flow duration.' },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size; helps identify specific flood types.' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and byte rate.' },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration.' },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Variance in packet sizes; low variance often means automated attack traffic.' },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and packet rate.' },
   ];
 
   // Flat feature lookup
@@ -956,27 +956,31 @@ function _renderExpertTrace(d, ml, st, f, th) {
   };
 
   // IF feature cards
-  let ifHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
+  let ifHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Isolation Forest model evaluated 16 features to detect anomalous deviations from normal traffic baselines.</div>';
+  ifHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
   ifFeatures.forEach(feat => {
     const val = vals[feat.key];
     const fmtVal = feat.fmt(val);
     ifHtml += `
       <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);border-radius:8px;padding:12px 14px;">
         <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${feat.label}</div>
-        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e)">${fmtVal}</div>
+        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e);margin-bottom:4px">${fmtVal}</div>
+        <div style="font-size:10px;color:var(--sub2);font-family:var(--mono);line-height:1.4">${feat.desc}</div>
       </div>`;
   });
   ifHtml += '</div>';
 
   // RF feature cards
-  let rfHtml = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
+  let rfHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Random Forest model classified the anomaly by analyzing 15 flow characteristics against known attack signatures.</div>';
+  rfHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
   rfFeatures.forEach(feat => {
     const val = vals[feat.key];
     const fmtVal = feat.fmt(val);
     rfHtml += `
       <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);border-radius:8px;padding:12px 14px;">
         <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${feat.label}</div>
-        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e)">${fmtVal}</div>
+        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e);margin-bottom:4px">${fmtVal}</div>
+        <div style="font-size:10px;color:var(--sub2);font-family:var(--mono);line-height:1.4">${feat.desc}</div>
       </div>`;
   });
   rfHtml += '</div>';
