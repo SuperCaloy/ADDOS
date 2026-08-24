@@ -872,8 +872,6 @@ function renderMLPanel(ifData, rfData, teaData) {
     // TEA Global Feature Entropy
     const teaGlobal = teaData.global || null;
     if (teaGlobal && Object.keys(teaGlobal).length > 0) {
-      const totalIps = teaGlobal.unique_ips || 0;
-
       const isAttack = teaGlobal.is_attack;
       const isFlash = teaGlobal.is_flash_crowd;
       const isLearned = teaGlobal.learned;
@@ -933,7 +931,7 @@ function renderMLPanel(ifData, rfData, teaData) {
             <div class="ml-section-title"><span class="accent-dot tea-dot"></span>Temporal Entropy Analysis</div>
             <div class="tea-switch-card controller-tea-card">
               <div class="tea-switch-header">
-                <span class="tea-switch-title">Aggregation <span class="tea-unique-ips">${totalIps > 0 ? '(' + totalIps + ' IPs)' : ''}</span></span>
+                <span class="tea-switch-title">Aggregation</span>
                 <span class="tea-switch-status ${statusClass}">${statusText}</span>
                 <span class="tea-confidence-chip ${confidenceClass}">${confidence}</span>
                 ${learningProgress ? '<span class="tea-learning-progress">' + learningProgress + '</span>' : ''}
@@ -982,11 +980,9 @@ function renderMLPanel(ifData, rfData, teaData) {
             </div>
           </div>`;
     } else {
-      const titleEl = existingCard.querySelector('.tea-unique-ips');
       const statusEl = existingCard.querySelector('.tea-switch-status');
       const confEl = existingCard.querySelector('.tea-confidence-chip');
       const progEl = existingCard.querySelector('.tea-learning-progress');
-      if (titleEl) titleEl.textContent = totalIps > 0 ? '(' + totalIps + ' IPs)' : '';
       if (statusEl) { statusEl.className = `tea-switch-status ${statusClass}`; statusEl.textContent = statusText; }
       if (confEl) { confEl.className = `tea-confidence-chip ${confidenceClass}`; confEl.textContent = confidence; }
       if (progEl) { progEl.textContent = learningProgress; progEl.style.display = learningProgress ? 'inline' : 'none'; }
