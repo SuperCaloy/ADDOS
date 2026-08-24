@@ -266,3 +266,4 @@ This is a design tradeoff (TEA runs once per poll cycle, not per flow), but it m
 - [[tasks/tea-desensitization-fix]]: the prior fix that addressed baseline drift
 - [[bugs/tea-if-feedback-loop-missing]]: TEA's output has no effect on the pipeline
 - [[backend/mitigation]]: state machine phases that skip TEA
+- [[tasks/regression-fix-plan-2026-08-24]]: P5 fix addresses remaining per-IP AND gate, dead code, and sigma cap

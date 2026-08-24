@@ -209,7 +209,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             unblocked_at    TEXT    NOT NULL,
             duration_sec    INTEGER NOT NULL DEFAULT 0,
             unblock_reason  TEXT    NOT NULL,
-            ban_level       INTEGER NOT NULL DEFAULT 0
+            ban_level       INTEGER NOT NULL DEFAULT 0,
+            offence_count   INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_history_ip
@@ -262,6 +263,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         pass
     try:
         conn.execute("ALTER TABLE ip_attack_history ADD COLUMN ban_level INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    try:
+        conn.execute("ALTER TABLE ip_attack_history ADD COLUMN offence_count INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     except sqlite3.OperationalError:
         pass

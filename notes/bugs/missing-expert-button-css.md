@@ -41,3 +41,9 @@ Two related CSS gaps caused visual issues visible in the dashboard:
 ## Fix
 
 Added all missing classes to `style.css` (appended after the Export section, above the trailing blank line). Also added light-mode overrides for the new expert panel classes and header buttons. Bumped `style.css` cache-bust version from `v=4` to `v=5` in `dashboard.html`.
+
+## Related Notes
+
+- [[bugs/infinite-scroll-chartjs]]: related ChartJS layout fix
+- [[frontend/design-system]]: design system and CSS conventions
+- [[tasks/expert-mode-tea-visualization-plan]]: expert mode plan that introduced these classes

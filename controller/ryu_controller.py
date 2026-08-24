@@ -306,22 +306,19 @@ class FatTreeController(app_manager.RyuApp):
         })
 
         self._mac_to_port[dpid][eth.src] = in_port
-        out_port = self._mac_to_port[dpid].get(eth.dst, ofp.OFPP_FLOOD)
+        out_port = self._mac_to_port[dpid].get(eth.dst, ofp.OFPP_NORMAL)
         actions  = [parser.OFPActionOutput(out_port)]
 
-        # Install forwarding rule at priority=10 — ipv4_src only match.
-        # Priority=10 beats table-miss (1) and stays below block rules (80+).
-        if out_port != ofp.OFPP_FLOOD:
-            match  = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
-            inst   = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-            buf_id = msg.buffer_id if msg.buffer_id != ofp.OFP_NO_BUFFER else ofp.OFP_NO_BUFFER
-            dp.send_msg(parser.OFPFlowMod(
-                datapath=dp, priority=10,
-                idle_timeout=60, hard_timeout=0,
-                buffer_id=buf_id, match=match, instructions=inst,
-            ))
-            if msg.buffer_id != ofp.OFP_NO_BUFFER:
-                return  # buffer already consumed by FlowMod
+        match  = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
+        inst   = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+        buf_id = msg.buffer_id if msg.buffer_id != ofp.OFP_NO_BUFFER else ofp.OFP_NO_BUFFER
+        dp.send_msg(parser.OFPFlowMod(
+            datapath=dp, priority=10,
+            idle_timeout=60, hard_timeout=0,
+            buffer_id=buf_id, match=match, instructions=inst,
+        ))
+        if msg.buffer_id != ofp.OFP_NO_BUFFER:
+            return
 
         self._send_packet_out(dp, ofp, parser, msg, in_port, actions)
 

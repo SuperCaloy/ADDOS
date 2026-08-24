@@ -109,7 +109,9 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     # Falls back to pps < 0.05 floor when TEA has not learned yet.
     if not is_flagged:
         try:
-            _dynamic_min = 0.05
+            from backend.pipeline.entropy_analyzer import entropy_analyzer
+            _tea_mean = entropy_analyzer._global_state.size_base.mean
+            _dynamic_min = max(0.05, _tea_mean * 0.1) if _tea_mean > 0 else 0.05
         except Exception:
             _dynamic_min = 0.05
         if pps < _dynamic_min:

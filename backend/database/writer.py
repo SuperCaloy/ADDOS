@@ -392,7 +392,8 @@ def start_flush_thread() -> None:
 def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
                        confidence: float, priority: str, phase_reached: int,
                        first_seen: str, unblock_reason: str,
-                       ban_level: int = 0) -> None:
+                       ban_level: int = 0,
+                       offence_count: int = 0) -> None:
     """Write a completed attack session to ip_attack_history.
 
     Called by state_machine._clear() (TTL expiry) and manual_release().
@@ -412,8 +413,8 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
             INSERT INTO ip_attack_history
                 (src_ip, attack_vector, if_score, confidence, priority,
                  phase_reached, first_seen, unblocked_at, duration_sec, unblock_reason,
-                 ban_level)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ban_level, offence_count)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             src_ip,
             attack_vector,
@@ -426,6 +427,7 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
             duration_s,
             unblock_reason,
             ban_level,
+            offence_count,
         ))
     except Exception:
         log.exception("Failed to write attack history for %s", src_ip)

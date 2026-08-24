@@ -109,7 +109,7 @@ def _build_live_features(src_ip: str) -> dict | None:
             "if_score":     cached.if_score,
             "is_anomaly":   cached.is_anomaly,
             "attack_class": cached.attack_class,
-            "confidence":   round(cached.confidence * 100, 1),
+            "confidence":   round(cached.confidence * 100, 4),
         },
         "state": {
             "phase":            phase,

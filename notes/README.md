@@ -1,3 +1,9 @@
+---
+created: 2026-08-24
+last-updated: 2026-08-24
+status: verified
+---
+
 # Project Knowledge Base
 
 This `notes/` folder is the project's AI-maintained knowledge base, organized as an Obsidian vault.

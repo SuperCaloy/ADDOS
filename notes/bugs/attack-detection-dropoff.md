@@ -62,6 +62,7 @@ Recommended first step: **Option 1**, since it breaks the feedback loop that mak
 - [[backend/transport]]: ZMQ receiver Phase 2/3 skip.
 - [[controller/ryu-controller]]: packet-in rate limiter.
 - [[topology/topology-simulation]]: attacker topology (20 attackers).
+- [[bugs/detection-dropoff-after-ban-expiry]]: P12 fix - safety net for still-flooding IPs
 
 ## Resolution (2026-08-21)
 

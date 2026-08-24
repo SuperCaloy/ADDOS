@@ -195,3 +195,7 @@ Spoofing would make ML metrics meaningless.
 Updates applied to permanent notes: [[bugs/audit-log-re-attack-update]]
 ### Post-fix update (2026-08-24 Session 2)
 The `session_id` keying in `log.js` caused a regression where unmitigated traffic (which does not have a `session_id` in SSE events) fell back to timestamp keying, causing an explosion of new rows. The frontend `_logRows` key has been reverted to `ip`, and the `isRelease` check was correctly implemented to untrack the IP, fulfilling the true intent of Option 3 without the `session_id` side effects.
+
+## See Also
+
+- [[tasks/regression-fix-plan-2026-08-24]]: comprehensive regression fix plan covering all known bugs

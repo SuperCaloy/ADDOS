@@ -132,3 +132,8 @@ Alternatively, if Fix A is implemented (recording offenses on escalation), the D
 - [[backend/mitigation]]: state machine and behavioral reputation design
 - [[backend/models]]: IF threshold and scoring
 - [[tasks/tea-desensitization-fix]]: prior fix that touched some of the same code paths
+- [[bugs/ip-details-zero-values]]: IP details drawer shows zero for reputation/offences
+- [[mitigation/reputation-scoring-fix]]: prior fix attempt that left the offence_count gap
+- [[tasks/regression-fix-plan-2026-08-24]]: P0 fix for the offence_count column gap
+- [[bugs/unscored-hold-blackhole-bypass]]: P11 fix - unscored hold was bypassing reputation threshold
+- [[bugs/reputation-blackhole-bypass]]: P13 fix - reputation >= 10 now triggers blackhole in all paths

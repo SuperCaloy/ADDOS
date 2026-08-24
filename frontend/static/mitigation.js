@@ -28,7 +28,7 @@ async function fetchQuarantine() {
     data.forEach(e => {
       const sc   = e.if_score || 0;
       const ts   = e.time_in_phase_sec || 0;
-      const conf = e.confidence || '—';
+      const conf = e.confidence != null ? Number(e.confidence).toFixed(4) : '—';
       const time = ts < 60 ? `${ts}s` : `${Math.floor(ts / 60)}m ${ts % 60}s`;
 
       /* IF score color class based on threshold */

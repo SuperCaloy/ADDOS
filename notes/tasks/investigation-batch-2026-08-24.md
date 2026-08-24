@@ -91,7 +91,7 @@ The prior fixes (1a/1b/1c, 2a/2b from the existing note) addressed parts of this
 
 ### Fix Plan
 
-- [ ] **Primary fix:** In `ryu_controller.py:258-272`, when dst MAC is unknown under throttle, install a forward rule with `OFPP_NORMAL` output instead of falling through to flood. This lets the switch forward normally while still creating a flow entry for flow_stats.
+- [x] **Primary fix:** In `ryu_controller.py:258-272`, when dst MAC is unknown under throttle, install a forward rule with `OFPP_NORMAL` output instead of falling through to flood. This lets the switch forward normally while still creating a flow entry for flow_stats.
 - [ ] **Safety net:** Lower the probation re-ban threshold or use `is_anomaly` + elevated pps as the re-ban criterion instead of requiring `if_score >= threshold * 0.8`
 - [ ] **Optional:** Consider scoring banned IPs during Phase 2/3 so the ban can be extended with live evidence
 - [ ] Verify with a 20-attacker simulation run that `active_threats` stays at ~20
@@ -169,3 +169,7 @@ This is primarily a **feature issue** (per-IP verdict uses different logic than 
 2. **Issue 4** (TEA inconsistency) -- high impact, affects detection accuracy. Frontend fix to show 3 states.
 3. **Issue 1** (score cap) -- medium impact, affects behavioral escalation correctness. Cap reputation_score at 10.0, fix offence_count cap in on_reoffence.
 4. **Issue 3** (Active States scroll) -- low impact, UI polish. CSS fix for max-height.
+
+## See Also
+
+- [[tasks/regression-fix-plan-2026-08-24]]: comprehensive regression fix plan covering all known bugs

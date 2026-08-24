@@ -69,5 +69,5 @@ Rewrite all explanatory text in the IP Details drawer and Expert Mode pipeline v
 
 ## Related notes
 
-- [[notes/ui-ux/]] - UI/UX design decisions
-- [[notes/frontend/]] - Frontend architecture
+- [[ui-ux/]] - UI/UX design decisions
+- [[frontend/]] - Frontend architecture
