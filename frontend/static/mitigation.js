@@ -42,10 +42,13 @@ async function fetchQuarantine() {
         ? ` <span style="color:var(--amber,#ffb300);font-size:11px;font-family:var(--mono)">[${Math.floor(e.ttl_remaining_sec/60)}m ${e.ttl_remaining_sec%60}s]</span>`
         : '';
 
-      /* High priority badge */
-      const priBadge = e.priority === 'High'
-        ? `<span class="p-high">HIGH </span>`
-        : '';
+      /* Priority badge */
+      const _priMap = {
+        'Critical': '<span class="p-crit">CRITICAL </span>',
+        'High':     '<span class="p-high">HIGH </span>',
+        'Medium':   '<span class="p-med">MEDIUM </span>',
+      };
+      const priBadge = _priMap[e.priority] || '';
 
       /* Use phase_label if available, otherwise fall back to phase */
       const phaseDisplay = e.phase_label || e.phase || '—';

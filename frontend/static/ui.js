@@ -28,9 +28,13 @@ function renderAction(v) {
 }
 
 function renderPriority(v) {
-  return v === 'High'
-    ? '<span class="p-high">HIGH</span>'
-    : '<span class="p-low">LOW</span>';
+  const map = {
+    'Critical': '<span class="p-crit">CRITICAL</span>',
+    'High':     '<span class="p-high">HIGH</span>',
+    'Medium':   '<span class="p-med">MEDIUM</span>',
+    'Low':      '<span class="p-low">LOW</span>',
+  };
+  return map[v] || `<span class="p-low">${v}</span>`;
 }
 
 /* ── Toast ─────────────────────────────────────────────────────────────────── */
