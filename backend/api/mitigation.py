@@ -21,7 +21,7 @@ def quarantine_list():
             "confidence":        e["confidence"],
             "time_in_phase_sec": e.get("elapsed_sec", 0),
             "priority":          "Low",
-            "offence_count":     0,
+
         })
     return jsonify(rows)
 

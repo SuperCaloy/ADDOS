@@ -229,6 +229,15 @@ class _IpEntropyProfile:
         return _shannon_entropy(vals)
 
     def verdict(self) -> str:
+        """
+        Evaluate traffic profile for a specific IP.
+        
+        Note: The per-IP verdict relies on fine-grained trend/entropy analysis
+        over a short sliding window, whereas the global gate (is_attack_pattern) 
+        relies on aggregate variance collapse across all traffic. They are kept
+        separate because the global gate detects the onset of a large attack, 
+        while this method tracks individual IP behavior.
+        """
         if len(self._pps_samples) < IP_PROFILE_MIN_SAMPLES:
             return "uncertain"
 
@@ -281,7 +290,7 @@ class EntropyAnalyzer:
         
         self._flow_buffer = deque(maxlen=2000)
         self._last_eval_time = 0.0
-        self._eval_interval = 1.0
+        self._eval_interval = 0.5
 
     @property
     def fb_normal_streak(self) -> int:
@@ -411,8 +420,6 @@ class EntropyAnalyzer:
                 confidence = "high"  # Proto + one other
             else:
                 confidence = "moderate"  # Only one collapsed
-        elif size_collapsed or intensity_collapsed or proto_collapsed:
-            confidence = "moderate"
         else:
             confidence = "low"
 

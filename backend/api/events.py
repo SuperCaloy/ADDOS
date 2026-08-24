@@ -70,7 +70,7 @@ def recent_events():
     if since:
         rows = query("""
             SELECT timestamp, src_ip, predicted_class, attack_vector,
-                   confidence, priority, action_taken, event_type, reason
+                   confidence, priority, action_taken, event_type, reason, session_id
             FROM mitigation_events
             WHERE timestamp > ?
             ORDER BY timestamp DESC
@@ -79,7 +79,7 @@ def recent_events():
     else:
         rows = query("""
             SELECT timestamp, src_ip, predicted_class, attack_vector,
-                   confidence, priority, action_taken, event_type, reason
+                   confidence, priority, action_taken, event_type, reason, session_id
             FROM mitigation_events
             ORDER BY timestamp DESC
             LIMIT ?
@@ -104,6 +104,7 @@ def recent_events():
             "action_taken":    r["action_taken"],
             "event_type":      r["event_type"],
             "reason":          r["reason"],
+            "session_id":      r["session_id"],
         })
 
     # Reverse to chronological order (oldest first) so frontend prepends correctly

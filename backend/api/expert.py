@@ -159,7 +159,7 @@ def expert_live():
             "action": ip_state.action_taken,
             "ttl_sec": int(ip_state.ttl_expires_at - time.monotonic()) if ip_state.ttl_expires_at else None,
             "ban_level": ip_state.ban_level,
-            "offence_count": ip_state.offence_count,
+
             "priority": ip_state.priority,
             "attack_vector": ip_state.attack_vector,
             "if_score": round(ip_state.if_score, 4),

@@ -13,7 +13,7 @@ bp = Blueprint("ip_detail", __name__)
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _is_active(src_ip: str) -> bool:
-    # Check if IP is currently in state machine (phase 1-4 = active mitigation)
+    # Check if IP is currently in state machine (phase 1-3 = active mitigation)
     try:
         state = state_machine._states.get(src_ip)
         return state is not None
@@ -116,9 +116,10 @@ def _build_live_features(src_ip: str) -> dict | None:
             "phase_label":      state.phase_label() if state else "—",
             "priority":         priority,
             "action_taken":     action,
-            "offence_count":    getattr(state, "offence_count", 0) if state else 0,
+
             "ban_level":        getattr(state, "ban_level", 0)     if state else 0,
             "reputation_score": behavioral.get_decay_score(src_ip),
+            "offence_count":    behavioral.get_offence_count(src_ip),
             "first_seen":       state.first_seen if state else None,
             "last_seen":        None,
         },
@@ -194,7 +195,7 @@ def _build_db_features(src_ip: str) -> dict | None:
 
     # ip_attack_history — offence/ban/phase metadata
     hist = query("""
-        SELECT offence_count, ban_level, phase_reached, first_seen, priority
+        SELECT ban_level, phase_reached, first_seen, priority
         FROM ip_attack_history
         WHERE src_ip = ?
         ORDER BY unblocked_at DESC LIMIT 1
@@ -253,10 +254,10 @@ def _build_db_features(src_ip: str) -> dict | None:
     # DB phase is string label, convert to numeric
     db_phase = 0
     if ev.get("phase"):
-        phase_map = {"Quarantined": 1, "Time Ban": 2, "Blackhole": 3, "Probation": 4}
+        phase_map = {"Quarantined": 1, "Time Ban": 2, "Blackhole": 3}
         db_phase = phase_map.get(ev.get("phase"), 0)
     if not db_phase and h.get("phase_reached"):
-        phase_map = {"Quarantined": 1, "Time Ban": 2, "Blackhole": 3, "Probation": 4}
+        phase_map = {"Quarantined": 1, "Time Ban": 2, "Blackhole": 3}
         db_phase = phase_map.get(h.get("phase_reached"), 0)
 
     return {
@@ -291,9 +292,10 @@ def _build_db_features(src_ip: str) -> dict | None:
             "phase":            db_phase,
             "priority":         ev.get("priority") or h.get("priority") or "—",
             "action_taken":     ev.get("action_taken") or "—",
-            "offence_count":    h.get("offence_count", 0),
+
             "ban_level":        h.get("ban_level", 0),
             "reputation_score": behavioral.get_decay_score(src_ip),
+            "offence_count":    behavioral.get_offence_count(src_ip),
             "first_seen":       h.get("first_seen"),
             "last_seen":        h.get("last_seen"),
         },

@@ -20,3 +20,4 @@ skills-lock.json
 .opencode/
 logs/*
 !logs/.gitkeep
+RF_ACCURACY_BUG_ANALYSIS.md

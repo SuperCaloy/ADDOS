@@ -1,51 +1,51 @@
 const _FEAT_TOOLTIPS = {
-  "Flow Rate (pps)": "Packets transmitted per second for this flow. Flood attacks are characterized by abnormally high packet rates compared to legitimate traffic baselines.",
-  "Byte Rate":       "Volume of data transmitted per second. A sharp increase indicates potential bandwidth exhaustion, a primary goal of volumetric DDoS attacks.",
-  "Bytes / Packet":  "Average packet size (byte count ÷ packet count). Each attack type tends to produce a consistent packet size signature, useful for classification.",
-  "Port Entropy":    "Ratio of source port activity to destination port activity. UDP floods often spray traffic across many ports, producing a distinct ratio compared to normal traffic.",
-  "Pkt Size Uniformity": "A model-derived measure of how consistent packet sizes are within this flow. SYN packets carry no payload, so a SYN flood produces near-identical packet sizes, a low, tightly clustered value here.",
-  "Packet Count":    "Cumulative packets observed in this flow. Rapid accumulation within a short window is a strong indicator of flooding behavior.",
-  "Byte Count":      "Cumulative data volume observed in this flow, in bytes.",
+  "Flow Rate (pps)": "Packet rate for this flow, measured in packets per second (pps). Significantly elevated rates relative to normal baselines are indicative of flood-based attacks.",
+  "Byte Rate":       "Data throughput for this flow, measured in bytes per second. Sharp increases may indicate volumetric attacks targeting bandwidth exhaustion.",
+  "Bytes / Packet":  "Average packet size (byte count divided by packet count). Different attack types produce characteristic packet size signatures, aiding classification.",
+  "Port Entropy":    "Quantifies the distribution of traffic across source and destination ports. UDP flood attacks typically spray packets across many destination ports, producing a markedly higher entropy value than legitimate single-session traffic.",
+  "Pkt Size Uniformity": "Measures the consistency of packet sizes within this flow. Lower values indicate highly uniform packets, as expected from SYN flood traffic where packets carry no payload and are constructed with near-identical sizes.",
+  "Packet Count":    "Total number of packets observed in this flow. Rapid accumulation within a short observation window is a strong indicator of flooding behavior.",
+  "Byte Count":      "Total data volume observed in this flow, measured in bytes.",
 };
 
 const _ATTACK_CONTEXT = {
   "ICMP Flood": {
     color: 'var(--red,#ff3d5a)',
-    desc: 'An ICMP Flood overwhelms the target with a high volume of ping (echo request) packets, consuming bandwidth and processing resources until legitimate traffic can no longer be served.',
+    desc: 'An ICMP Flood saturates the target with a high volume of ICMP Echo Request packets, consuming bandwidth and host processing resources to the point that legitimate traffic is denied service.',
     rows: [
-      ['Flow Rate (pps)', 'Very high', 'Sending way more pings than normal'],
-      ['Byte Rate',       'Moderate',  'Small messages, but a lot of them'],
-      ['Bytes / Packet',  'Fixed size','Matches a typical ping packet'],
+      ['Flow Rate (pps)', 'Very high', 'Packet rate significantly exceeds normal baseline'],
+      ['Byte Rate',       'Moderate',  'Low per-packet volume, high aggregate count'],
+      ['Bytes / Packet',  'Fixed size','Consistent with standard ICMP Echo Request size'],
     ],
   },
   "SYN Flood": {
     color: 'var(--red,#ff3d5a)',
-    desc: 'A SYN Flood exploits the TCP three-way handshake by initiating many connections without completing them, exhausting the server\'s connection table and denying service to legitimate users.',
+    desc: 'A SYN Flood exploits the TCP three-way handshake by initiating a high volume of connection requests without completing them, exhausting the server connection table and denying service to legitimate clients.',
     rows: [
-      ['Flow Rate (pps)', 'Very high', 'Opening connections rapidly'],
-      ['Bytes / Packet',  'Small',     'Just a connection request, no data'],
-      ['Byte Rate',       'Low',       'Small packets despite the high rate'],
+      ['Flow Rate (pps)', 'Very high', 'Connection initiation rate far above normal'],
+      ['Bytes / Packet',  'Small',     'TCP SYN only, no payload data'],
+      ['Byte Rate',       'Low',       'Minimal byte volume despite elevated packet rate'],
     ],
   },
   "UDP Flood": {
     color: 'var(--amber,#ffb02e)',
-    desc: 'A UDP Flood sends a high volume of connectionless packets to random or targeted ports, forcing the target to process and respond to traffic that consumes bandwidth with no legitimate purpose.',
+    desc: 'A UDP Flood transmits a high volume of connectionless packets to random or targeted ports, forcing the target to process and respond to traffic that consumes bandwidth without legitimate purpose.',
     rows: [
-      ['Byte Rate',       'Very high', 'Sending a lot of data quickly'],
-      ['Bytes / Packet',  'Large',     'Each message carries more data'],
-      ['Flow Rate (pps)', 'High',      'Frequent messages'],
+      ['Byte Rate',       'Very high', 'High data throughput in short duration'],
+      ['Bytes / Packet',  'Large',     'Substantial payload per packet'],
+      ['Flow Rate (pps)', 'High',      'Elevated packet transmission rate'],
     ],
   },
   "Anomalous": {
     color: 'var(--sub2,#8890b0)',
-    desc: 'Traffic deviates from the established normal baseline but does not match a known attack signature with sufficient confidence for classification.',
+    desc: 'Traffic deviates significantly from the established normal baseline but does not match a known attack signature with sufficient confidence for definitive classification.',
     rows: [
-      ['Flow Rate (pps)', 'Elevated',  'Higher than typical traffic'],
+      ['Flow Rate (pps)', 'Elevated',  'Exceeds typical traffic volume for this source'],
     ],
   },
   "Uncertain": {
     color: 'var(--sub,#5c6080)',
-    desc: 'The anomaly detector flagged this traffic, but classifier confidence fell below the threshold required to assign a specific attack label.',
+    desc: 'The anomaly detector flagged this traffic as suspicious, but classifier confidence fell below the threshold required to assign a specific attack type.',
     rows: [],
   },
 };
@@ -619,11 +619,11 @@ function _renderMlBars(ml, th) {
   const rfOver = rfGate   != null ? rfConf  >= rfGate * 100 : false;
 
   const ifThrLabel = ifThrVal != null
-    ? `Threshold ${ifThrVal.toFixed(4)} ${ifOver ? '— score exceeds threshold' : '— score below threshold'}`
-    : 'Threshold: not available';
+    ? `Detection threshold: ${ifThrVal.toFixed(4)} ${ifOver ? '(score exceeds threshold, flow flagged as anomalous)' : '(score below threshold, flow classified as normal)'}`
+    : 'Detection threshold: unavailable';
   const rfThrLabel = rfGate != null
-    ? `Threshold ${(rfGate * 100).toFixed(0)}% ${rfOver ? '— confirms attack class' : '— below confirmation threshold'}`
-    : 'Threshold: not available';
+    ? `Classification gate: ${(rfGate * 100).toFixed(0)}% ${rfOver ? '(confidence meets gate, attack class assigned)' : '(confidence below gate, classification uncertain)'}`
+    : 'Classification gate: unavailable';
 
   /* IF bar: scale so threshold sits at 50% visual position */
   const ifScale  = ifThrVal ? ifThrVal * 2 : 1;
@@ -896,41 +896,41 @@ function _renderExpertTrace(d, ml, st, f, th) {
 
   // IF feature vector (all 16)
   const ifFeatures = [
-    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Time elapsed since the first packet of the flow.' },
-    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed.' },
-    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume in bytes.' },
-    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Packets per second; high values indicate potential floods.' },
-    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Bytes per second; indicates bandwidth consumption.' },
-    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows from this IP.' },
-    { key: 'tp_src', label: 'Src Port', fmt: v => v.toLocaleString(), desc: 'Source port number used by the traffic.' },
-    { key: 'tp_dst', label: 'Dst Port', fmt: v => v.toLocaleString(), desc: 'Destination port number targeted.' },
-    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport protocol (e.g. TCP, UDP, ICMP).' },
-    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate.' },
-    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size; helps identify specific flood types.' },
-    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and byte rate.' },
-    { key: 'port_entropy', label: 'Port Entropy', fmt: v => v.toFixed(3), desc: 'Distribution of source vs destination ports.' },
-    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration.' },
-    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Variance in packet sizes; low variance often means automated attack traffic.' },
-    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and packet rate.' },
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Elapsed time since the first packet of this flow was observed.' },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed in this flow.' },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume transmitted in this flow, measured in bytes.' },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Current packet rate for this flow. Sustained high values are characteristic of flood-based attacks.' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Current data throughput for this flow. Elevated values indicate high bandwidth consumption.' },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows originating from this source IP.' },
+    { key: 'tp_src', label: 'Src Port', fmt: v => v.toLocaleString(), desc: 'Source port number used by the traffic source.' },
+    { key: 'tp_dst', label: 'Dst Port', fmt: v => v.toLocaleString(), desc: 'Destination port number targeted by the traffic.' },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport layer protocol (TCP, UDP, or ICMP).' },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate. Deviations from normal indicate unusual traffic composition.' },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size. Different attack types produce characteristic packet size signatures.' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Composite metric combining packet count and byte rate on a logarithmic scale. High values indicate flows that are both voluminous and fast, a strong attack indicator.' },
+    { key: 'port_entropy', label: 'Port Entropy', fmt: v => v.toFixed(3), desc: 'Distribution of traffic across source and destination ports. Higher entropy indicates port scanning or flood behavior.' },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration. Indicates sustained throughput over the flow lifetime.' },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Measures consistency of packet sizes within the flow. Attack-generated traffic typically exhibits very low variance, as packets are constructed programmatically with uniform payloads.' },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Composite metric combining packet count and packet rate on a logarithmic scale. High values indicate aggressive, high-rate sources.' },
   ];
 
   // RF feature vector (all 15)
   const rfFeatures = [
-    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Time elapsed since the first packet of the flow.' },
-    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed.' },
-    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume in bytes.' },
-    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Packets per second; high values indicate potential floods.' },
-    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Bytes per second; indicates bandwidth consumption.' },
-    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows from this IP.' },
-    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport protocol (e.g. TCP, UDP, ICMP).' },
-    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate.' },
-    { key: 'duration_pkt_ratio', label: 'Duration/Pkt Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of flow duration to packet count.' },
-    { key: 'pkt_rate_per_duration', label: 'Pkt Rate/Duration', fmt: v => v.toFixed(4), desc: 'Rate of packets scaled by flow duration.' },
-    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size; helps identify specific flood types.' },
-    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and byte rate.' },
-    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration.' },
-    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Variance in packet sizes; low variance often means automated attack traffic.' },
-    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Log-scaled product of packet count and packet rate.' },
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Elapsed time since the first packet of this flow was observed.' },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed in this flow.' },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume transmitted in this flow, measured in bytes.' },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Current packet rate for this flow. Sustained high values are characteristic of flood-based attacks.' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Current data throughput for this flow. Elevated values indicate high bandwidth consumption.' },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows originating from this source IP.' },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport layer protocol (TCP, UDP, or ICMP).' },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate. Deviations from normal indicate unusual traffic composition.' },
+    { key: 'duration_pkt_ratio', label: 'Duration/Pkt Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of flow duration to packet count. Low values indicate high packet density over short durations.' },
+    { key: 'pkt_rate_per_duration', label: 'Pkt Rate/Duration', fmt: v => v.toFixed(4), desc: 'Packet rate scaled by flow duration. Indicates acceleration or deceleration of packet transmission.' },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size. Different attack types produce characteristic packet size signatures.' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Composite metric combining packet count and byte rate on a logarithmic scale. High values indicate flows that are both voluminous and fast, a strong attack indicator.' },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration. Indicates sustained throughput over the flow lifetime.' },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Measures consistency of packet sizes within the flow. Attack-generated traffic typically exhibits very low variance, as packets are constructed programmatically with uniform payloads.' },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Composite metric combining packet count and packet rate on a logarithmic scale. High values indicate aggressive, high-rate sources.' },
   ];
 
   // Flat feature lookup
@@ -956,7 +956,7 @@ function _renderExpertTrace(d, ml, st, f, th) {
   };
 
   // IF feature cards
-  let ifHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Isolation Forest model evaluated 16 features to detect anomalous deviations from normal traffic baselines.</div>';
+  let ifHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Isolation Forest (IF) model evaluated 16 flow features. IF is an unsupervised anomaly detector that scores each flow by how distinctly it separates from normal traffic patterns; higher scores indicate greater deviation.</div>';
   ifHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
   ifFeatures.forEach(feat => {
     const val = vals[feat.key];
@@ -971,7 +971,7 @@ function _renderExpertTrace(d, ml, st, f, th) {
   ifHtml += '</div>';
 
   // RF feature cards
-  let rfHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Random Forest model classified the anomaly by analyzing 15 flow characteristics against known attack signatures.</div>';
+  let rfHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Random Forest (RF) model classified the flagged anomaly using 15 flow features. RF is a supervised classifier that matches traffic patterns against known attack profiles, producing an attack type and confidence score.</div>';
   rfHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
   rfFeatures.forEach(feat => {
     const val = vals[feat.key];
@@ -1016,14 +1016,14 @@ function _renderExpertTrace(d, ml, st, f, th) {
   // Decision trace
   let decisionHtml = '';
   const reasons = [];
-  if (isAnomaly) reasons.push(`IF anomaly score ${ifScore.toFixed(4)} ≥ threshold ${ifThr.toFixed(4)}`);
-  else reasons.push(`IF score ${ifScore.toFixed(4)} < threshold ${ifThr.toFixed(4)} → Normal`);
+  if (isAnomaly) reasons.push(`IF anomaly score (${ifScore.toFixed(4)}) meets or exceeds detection threshold (${ifThr.toFixed(4)}), flagging this flow as anomalous`);
+  else reasons.push(`IF score (${ifScore.toFixed(4)}) below detection threshold (${ifThr.toFixed(4)}), flow classified as normal`);
   if (isAnomaly) {
-    if (rfConf >= rfGate * 100) reasons.push(`RF confidence ${rfConf.toFixed(1)}% ≥ gate ${(rfGate*100).toFixed(0)}% → ${attackClass}`);
-    else reasons.push(`RF confidence ${rfConf.toFixed(1)}% < gate ${(rfGate*100).toFixed(0)}% → Uncertain`);
+    if (rfConf >= rfGate * 100) reasons.push(`RF confidence (${rfConf.toFixed(1)}%) meets or exceeds classification gate (${(rfGate*100).toFixed(0)}%), assigning attack class: ${attackClass}`);
+    else reasons.push(`RF confidence (${rfConf.toFixed(1)}%) below classification gate (${(rfGate*100).toFixed(0)}%), classification remains uncertain`);
   }
-  if (st.phase >= 2) reasons.push(`State machine: Phase ${st.phase} (${st.action_taken}) active`);
-  if (f.is_flood_prefilter_flagged) reasons.push(`Flood prefilter: FLAGGED (overrode IF)`);
+  if (st.phase >= 2) reasons.push(`State machine is in Phase ${st.phase} (${st.action_taken}), enforcement active`);
+  if (f.is_flood_prefilter_flagged) reasons.push(`Flood prefilter flagged this source (overrode IF assessment)`);
 
   decisionHtml = `
     <div style="margin-top:16px;">

@@ -307,8 +307,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "action":      "pending",
     })
     # Always refresh a tracked IP's live telemetry, even if it falls below the
-    # anomaly threshold. This allows probation (Phase 4) to monitor and re-ban
-    # attackers that try to evade by hovering just below the threshold.
+    # anomaly threshold. This keeps recent_pps current for phase evaluation.
     state_machine.update_observation(
         src_ip, if_score, attack_class or "Normal", confidence or 0.0,
         float((flow_stats or {}).get("packet_count_per_second", 0.0)),
