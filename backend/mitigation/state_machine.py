@@ -18,8 +18,10 @@ from backend.config import SIMULATION_MODE
 log = logging.getLogger(__name__)
 
 # ── Phase 1 observation durations ─────────────────────────────────────────
-PHASE1_DURATION_LOW  = 10.0
-PHASE1_DURATION_HIGH = 20.0
+PHASE1_DURATION_LOW      = 10.0
+PHASE1_DURATION_MEDIUM   = 15.0
+PHASE1_DURATION_HIGH     = 20.0
+PHASE1_DURATION_CRITICAL = 5.0
 
 # Simulation: 60s watch. Production: 5 min watch.
 # 60s gives ML pipeline enough time to re-score rate_limited traffic during probation.
@@ -68,10 +70,13 @@ class IpState:
         return time.monotonic() - self.phase_entered
 
     def phase1_duration(self) -> float:
-        # 30s for Uncertain vector, PHASE1_DURATION_HIGH/LOW for known vectors
-        if self.attack_vector == "Uncertain":
-            return 30.0
-        return PHASE1_DURATION_HIGH if self.priority == "High" else PHASE1_DURATION_LOW
+        if self.priority == "Critical":
+            return PHASE1_DURATION_CRITICAL
+        if self.priority == "High":
+            return PHASE1_DURATION_HIGH
+        if self.priority == "Medium":
+            return PHASE1_DURATION_MEDIUM
+        return PHASE1_DURATION_LOW
 
     def to_api_dict(self) -> dict:
         d = {
@@ -278,6 +283,7 @@ class StateMachine:
                 _prio          = behavioral.assign_priority(
                     if_score, confidence, src_ip,
                     attack_class=attack_class,
+                    recent_pps=0.0,
                 )
                 _prior_offense = behavioral.get_offences(src_ip)
                 _prior_ban     = behavioral.get_ban_level(src_ip)
@@ -694,7 +700,10 @@ class StateMachine:
         # Checks weighted offense score first - if >= threshold → blackhole directly.
         # Otherwise escalates ban level by +1.
         with self._lock:
-            _prio       = behavioral.assign_priority(if_score, confidence, src_ip)
+            _prio       = behavioral.assign_priority(
+                if_score, confidence, src_ip,
+                attack_class=attack_class,
+            )
             new_ban_lvl = min(prev_ban_level + 1, MAX_BAN_LEVEL)
 
             # Weighted score >= 5.0 → skip ban, go straight to blackhole
