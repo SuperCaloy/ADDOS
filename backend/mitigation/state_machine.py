@@ -594,24 +594,23 @@ class StateMachine:
                  src_ip, state.attack_vector, state.confidence * 100)
 
     def _advance_to_probation(self, src_ip: str, state: IpState) -> None:
-        # Move IP from Phase 2 to Phase 4 Probation.
-        # Install rate_limit so ML can observe traffic without flood risk.
-        # If ML flags re-attack during probation, jumps straight to Phase 2.
-        state.transition_reason = "Time ban complete - moved to probation for observation"
-        state.phase         = 4
-        state.phase_entered = time.monotonic()
-        state.action_taken  = "Probation"
-        state.permanent     = False
-        state.ttl_expires_at = None
+        # Ban expired. Record the completed offense so behavioral
+        # scoring accumulates, then fully release the IP.
+        # Re-detection will route through on_reoffence() via the
+        # DB history check in decision_engine.on_result().
+        state.transition_reason = "Time ban expired - offense recorded and released"
 
-        # Remove block rule first, then rate_limit for throttled observation.
-        # rate_limit allows traffic so zmq_receiver can score it via ML.
-        self._push_command(src_ip, resolve_release_action())
-        self._push_command(src_ip, "rate_limit")
-        writer.delete_quarantine_state(src_ip)
-
-        log.info("Phase 4 Probation: %s  ban_level=%d  watch=%.0fs",
-                 src_ip, state.ban_level, PROBATION_DURATION)
+        behavioral.record_offense(
+            src_ip         = src_ip,
+            attack_vector  = state.attack_vector,
+            if_score       = state.if_score,
+            confidence     = state.confidence,
+            priority       = state.priority,
+            phase_reached  = state.phase,
+            first_seen     = state.first_seen,
+            unblock_reason = "Ban Expired",
+            ban_level      = state.ban_level,
+        )
 
         writer.log_mitigation_event({
             "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -620,11 +619,34 @@ class StateMachine:
             "attack_vector":   state.attack_vector,
             "confidence":      state.confidence,
             "priority":        state.priority,
-            "action_taken":    "Probation",
+            "action_taken":    "Released",
             "if_score":        state.if_score,
-            "phase":           "Probation",
+            "phase":           "Time Ban",
             "is_manual":       False,
+            "event_type":      "released",
+            "reason":          "Ban Expired",
+            "session_id":      state.session_id,
         })
+
+        from backend.pipeline.decision_engine import _push_sse_event
+        _push_sse_event({
+            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "src_ip":          src_ip,
+            "predicted_class": "DDoS",
+            "attack_vector":   state.attack_vector,
+            "confidence":      f"{state.confidence * 100:.1f}%",
+            "priority":        state.priority,
+            "action_taken":    "Released",
+            "event_type":      "released",
+            "session_id":      state.session_id,
+        }, force=True)
+
+        self._push_command(src_ip, resolve_release_action())
+        self._states.pop(src_ip, None)
+        writer.delete_quarantine_state(src_ip)
+
+        log.info("Ban expired: %s (level %d) - offense recorded, released",
+                 src_ip, state.ban_level)
 
     def _advance_to_blackhole(self, state: IpState) -> None:
         # Escalate to Phase 3 Blackhole - max severity, 1hr TTL.
