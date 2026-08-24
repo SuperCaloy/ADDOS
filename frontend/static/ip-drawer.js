@@ -326,7 +326,7 @@ function _startLivePolling(ip) {
       if (_drawerCurrentIp !== ip) return;
       _updateLiveSection(data);
     } catch (_) {}
-  }, 2000);
+  }, 5000);
 }
 
 function _stopLivePolling() {
