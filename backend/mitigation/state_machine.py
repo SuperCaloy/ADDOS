@@ -31,7 +31,6 @@ PHASE_LABELS = {
     1: "Quarantined",
     2: "Time Ban",
     3: "Blackhole",
-    4: "Probation",
 }
 
 
@@ -244,25 +243,13 @@ class StateMachine:
         # the full mitigation-decision path in on_detection. Called on every
         # IF/RF result regardless of the TEA gate, so a Phase 1 entry never
         # freezes just because a given tick got flagged flash crowd.
-        # Phase 4 (probation) also gets live updates so tick() can decide
-        # whether to re-ban or release based on current evidence.
         with self._lock:
             state = self._states.get(src_ip)
-            if state is None or state.phase not in (1, 2, 3, 4):
+            if state is None or state.phase not in (1, 2, 3):
                 return
             state.if_score   = if_score
             state.recent_pps = recent_pps
-            
-            if state.phase == 4:
-                # Mid-probation re-attack check
-                from backend.models import loader
-                _thr = loader.if_threshold if loader._loaded else 0.6004
-                if recent_pps > 1.0 and if_score >= (_thr * 0.8):
-                    log.info("Probation mid-observation re-attack: %s (pps=%.1f, IF=%.4f) - re-banning",
-                             src_ip, recent_pps, if_score)
-                    # Use a thread timer so we don't hold the lock during escalation
-                    threading.Timer(0.1, lambda: self._handle_mid_probation_reattack(src_ip)).start()
-                    
+
             if state.phase == 1:
                 # Best evidence wins - only overwrite vector/confidence on a
                 # stronger read, same rule on_detection already uses.
@@ -360,39 +347,28 @@ class StateMachine:
                         self._persist(state)
 
             else:
-                # Phase 4 probation - re-attack detected.
-                # Skip Phase 1, go straight to next ban level.
-                if state.phase == 4:
-                    log.info("Probation re-attack: %s - escalating ban", src_ip)
+                # Unscored hold getting its first real evidence -
+                # confirmed strong attack escalates immediately instead of
+                # waiting for TTL. Weak/uncertain evidence just backfills.
+                _was_unscored = state.action_taken.startswith(self._UNSCORED_TAG)
+                if _was_unscored:
+                    self._hold_stats["rescored"] += 1
+                    writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=0, rescored=1)
+                if _was_unscored and attack_class != "Uncertain" and confidence >= 0.70:
                     state.if_score      = if_score
                     state.attack_vector = attack_class
                     state.confidence    = confidence
-                    state.permanent     = True
-                    self._advance_to_ban(state)
-
+                    self._advance_to_blackhole(state)
                 else:
-                    # Unscored hold getting its first real evidence -
-                    # confirmed strong attack escalates immediately instead of
-                    # waiting for TTL. Weak/uncertain evidence just backfills.
-                    _was_unscored = state.action_taken.startswith(self._UNSCORED_TAG)
-                    if _was_unscored:
-                        self._hold_stats["rescored"] += 1
-                        writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=0, rescored=1)
-                    if _was_unscored and attack_class != "Uncertain" and confidence >= 0.70:
-                        state.if_score      = if_score
+                    # Update vector only if new confidence beats prior - best evidence wins
+                    _better_evidence = confidence > state.confidence
+                    state.if_score   = if_score
+                    if _better_evidence:
                         state.attack_vector = attack_class
-                        state.confidence    = confidence
-                        self._advance_to_blackhole(state)
+                        state.confidence     = confidence
                     else:
-                        # Update vector only if new confidence beats prior - best evidence wins
-                        _better_evidence = confidence > state.confidence
-                        state.if_score   = if_score
-                        if _better_evidence:
-                            state.attack_vector = attack_class
-                            state.confidence     = confidence
-                        else:
-                            state.confidence = confidence
-                        self._persist(state)
+                        state.confidence = confidence
+                    self._persist(state)
 
             if state is not None:
                 return state.action_taken
@@ -446,26 +422,6 @@ class StateMachine:
                         log.info("Blackhole TTL expired: %s → releasing", src_ip)
                         self._clear(src_ip, reason="Blackhole TTL Expired")
 
-                elif state.phase == 4 and elapsed >= PROBATION_DURATION:
-                    # Safety net: if IP is still flooding during probation,
-                    # re-ban instead of releasing. Uses a lower threshold
-                    # (80% of normal) so a sustained flood is never released
-                    # mid-attack just because its frozen if_score sits slightly
-                    # below the decision boundary.
-                    from backend.models import loader
-                    _thr = loader.if_threshold if loader._loaded else 0.6004
-                    _recent_pps = getattr(state, "recent_pps", None)
-                    _pps_elevated = (_recent_pps is not None) and (_recent_pps > 1.0)
-                    _score_near = state.if_score >= (_thr * 0.8)
-
-                    if _pps_elevated and _score_near:
-                        log.info("Probation re-offence: %s still flooding "
-                                 "(pps=%.1f, IF=%.4f) - re-banning",
-                                 src_ip, _recent_pps, state.if_score)
-                        self._advance_to_ban(state)
-                    else:
-                        self._clear(src_ip, reason="Probation Complete")
-
         # Also tick the deception module observation windows
         if self._deception:
             self._deception.tick()
@@ -500,13 +456,6 @@ class StateMachine:
             log.info("Phase1 complete: %s %s - releasing", src_ip, reason)
             state.transition_reason = reason
             self._clear(src_ip, reason="Attack Stopped")
-
-    def _handle_mid_probation_reattack(self, src_ip: str) -> None:
-        with self._lock:
-            state = self._states.get(src_ip)
-            if state and state.phase == 4:
-                state.permanent = True
-                self._advance_to_ban(state)
 
     def _advance_to_ban(self, state: IpState) -> None:
         # Escalate to Phase 2 time ban.
