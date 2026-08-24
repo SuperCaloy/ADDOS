@@ -201,6 +201,9 @@ Reduce `TEA_LEARN_INTERVALS` or use a faster initial learning path (e.g., seed b
 
 ## Remaining Issues After Task 2 Fix (added 2026-08-24)
 
+> [!warning] Superseded
+> The four issues below were re-investigated on 2026-08-24 and folded into six root causes with a new fix plan. See [[tasks/tea-verdict-fix-plan-2026-08-24]] for the current analysis and plan.
+
 Re-investigation of the current code found four issues still causing inconsistent TEA verdicts for attacker traffic.
 
 ### Issue 1: Per-IP verdict still uses AND (not relaxed to OR)
@@ -262,6 +265,7 @@ This is a design tradeoff (TEA runs once per poll cycle, not per flow), but it m
 
 ## Related Notes
 
+- [[tasks/tea-verdict-fix-plan-2026-08-24]]: fourth-round root causes (mixture blindness, frozen baselines, armed veto) and the active fix plan
 - [[backend/tea-analysis]]: TEA design and detection logic
 - [[tasks/tea-desensitization-fix]]: the prior fix that addressed baseline drift
 - [[bugs/tea-if-feedback-loop-missing]]: TEA's output has no effect on the pipeline

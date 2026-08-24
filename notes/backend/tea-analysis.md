@@ -1,6 +1,6 @@
 ---
 created: 2026-08-19
-last-updated: 2026-08-23
+last-updated: 2026-08-24
 status: verified
 tags:
   - backend
@@ -106,3 +106,21 @@ This provides a second detection path for low-volume attackers that do not pertu
 > The per-IP verdict check is placed *after* the global `tea_result` fields are written to `flow_stats`, so a per-IP "attack" verdict can override a non-attack global result. Placing it before the global attachment would cause the global result to overwrite the per-IP verdict.
 
 Verified by `python3 -c "from backend.transport import zmq_receiver; print('ok')"`.
+
+---
+
+## 6. Detection Rework (added 2026-08-24, implemented)
+
+Root-cause measurement ([[tasks/tea-verdict-fix-plan-2026-08-24]]) showed all three legacy dimensions fail on real captured traffic: 0.0% of attack-heavy windows reach collapse on any dimension; size/intensity variance and proto entropy all RISE during attacks (proto inverted because benign traffic is single-proto dominated). End-to-end replay: 5 global flags in 1,531 windows, 99.7% post-learning confidence "low".
+
+Implemented changes in `backend/pipeline/entropy_analyzer.py`:
+
+- **Conditional learning restored**: `state.learn(snapshot)` runs only on non-flagged windows; baselines freeze during gate-flagged windows. Latch covers all four baselines.
+- **Input normalization**: `pkt_size_uniformity = log1p(avg_bytes_per_pkt)` (was divided by bps), `flow_intensity = log1p(pps * bps)` (was cumulative packet_count times bps).
+- **New channels**: `mechanized_cluster` (uniform_share high side, MAD tolerances around window median) and `proto_surge` (protocol entropy high side). Gate is an OR over seven channels; confidence high requires paired dimensions.
+- **Surge channels**: `size_surge` / `intensity_surge` (high-side dynamic sigma on the variance baselines). These carry real-data detection: surge z>=+2 in 100% (size) and 74.4% (intensity) of attack windows.
+- **Advisory gate**: `should_submit` always returns True and counts `would_block_count`; the veto that suppressed IF-confirmed attackers is disarmed.
+
+Known limitations: static 1.5-sigma thresholds on share/proto-surge channels (tune toward dynamic sigma if live false-fires appear); cold-start learning phase ignores the lock for ~10-15 windows; poisoned-low baselines self-heal probabilistically via EMA once any window lands inside the sigma band. Uniform_share no longer separates upward on current traffic (attacker size diversity) and is kept as observability plus a mixture-sensitive synthetic channel.
+
+Verification: `scratch/verify_tea_revamp.py` (7 scenarios incl. real-data regression guard over `logs/ddos.db`) 7/7 OK; legacy `scratch/verify_tea_fix.py` still passes. Manual browser check of the expert page pending a live stack run.

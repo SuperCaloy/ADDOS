@@ -1,6 +1,6 @@
 ---
 created: 2026-08-19
-last-updated: 2026-08-23
+last-updated: 2026-08-24
 status: verified
 tags:
   - backend
@@ -22,7 +22,7 @@ Four cooperating modules under `backend/pipeline/`, plus the decision engine tha
   3. **Low-rate gate**: skip flows below 0.05 pps; reported Normal without IF scoring.
   4. **Stale handling** (> `WORKER_ITEM_TIMEOUT_S` = 3s): flagged IPs get 1 priority requeue then a `timed_out=True` fallback callback (`state_machine.hold_ip()`); non-flagged silently dropped.
   5. **Inference cache** (`tracker.get_cached`): banned / high-confidence (`conf >= 0.70` and class != Uncertain) results locked + replayed; banned IPs recheck every 10s window.
-  6. Run **IF** → **TEA feedback** (`confirm_attack` / `confirm_normal`).
+  6. Run **IF** → **TEA feedback** (`feedback(is_anomaly)`: locks baselines on first anomaly, unlocks after `TEA_FEEDBACK_UNLOCK_STREAK = 10` consecutive normal results).
   7. **Flood prefilter override**: flagged IP + IF score ≥ threshold → forced anomaly.
   8. Run **RF** only if IF flagged anomaly (merges flow+switch stats, forces `ip_proto`); restores prior confident class if RF says "Uncertain" and prior conf ≥ 0.70.
   9. Log `[SCAN]` line; push `decision_engine.push_scan_result`; update/clear cache; fire result callback.
@@ -51,13 +51,13 @@ Fast, packet-level, sub-second detection ahead of the 1s stats poll.
 
 - `_shannon_entropy()`: classic Shannon entropy (still available for protocols/ports).
 - `_AdaptiveBaseline`: per-dimension online baseline.
-  - **Learning phase:** up to `TEA_LEARN_INTERVALS = 30` samples, early-stop when variance stabilizes.
-  - **Adaptive phase:** dynamic EMA alpha (0.02-0.10, inverse of coefficient of variation); **robust EMA** rejects samples beyond 3.0 dynamic-sigma.
-  - **IF feedback lock:** `confirm_attack()` freezes baseline updates; `confirm_normal()` unlocks.
-- `_GlobalEntropyState`: aggregates all network telemetry into a rolling window, tracking two baselines (`size_base` for `pkt_size_uniformity` variance, `intensity_base` for `flow_intensity` variance).
-- `_IpEntropyProfile`: per-IP pps/bps trend + entropy (min 5 samples, window 20); `verdict()` → `attack`/`normal`/`uncertain`; `_last_verdict` keeps steady-state attackers classified.
-- `update(0, flows)` → calculates `size_var` + `intensity_var` globally; **attack pattern** = both collapsed below dynamic sigma (indicating highly mechanized, uniform botnet traffic). Returns rich dict with z-scores, baselines, confidence.
-- `should_submit(...)`: **TEA mitigation gate**: always submits flood-flagged; submits everything while learning; always submits attack patterns.
+  - **Learning phase:** up to `TEA_LEARN_INTERVALS = 15` samples, early-stop when variance stabilizes (observed at window 10 on real traffic).
+  - **Adaptive phase:** dynamic EMA alpha (0.02-0.10, inverse of coefficient of variation); **robust EMA** rejects samples beyond 3.0 dynamic-sigma. Learning-phase pushes ignore the lock until baselines declare learned (cold-start window).
+  - **Latched feedback lock:** `feedback(True)` freezes baseline updates; `feedback(False)` unlocks after a 10-result normal streak. All four baselines (size, intensity, proto, share) latch together via `feedback`/`confirm_*`/`is_locked`.
+- `_GlobalEntropyState`: aggregates all network telemetry into a rolling window; baselines: `size_base` (packet-size uniformity), `intensity_base` (flow intensity), `proto_base` (protocol entropy), `share_base` (uniform-share fraction).
+- `_IpEntropyProfile`: per-IP pps/bps trend + entropy (min 5 samples, window 20); `verdict()` → `attack`/`normal`/`uncertain`; wired into `zmq_receiver` (`update_ip` / `get_ip_verdict`, attack verdict overrides the global result per flow). Measured on real capture: 43.3% attack-verdict share on known attackers, 0.0% on benign, with flapping across states.
+- `update(0, flows)` → rate-normalized features (`log1p(avg_bytes_per_pkt)`, `log1p(pps*bps)`); global gate is an OR over seven channels: size/intensity collapse AND surge (dynamic sigma), proto collapse and proto surge (static sigma), plus mechanized_cluster (uniform-share high side). Baselines learn only on non-flagged windows. Real-data evidence and residual limitations in [[tasks/tea-verdict-fix-plan-2026-08-24]].
+- `should_submit(...)`: **advisory** - always returns True; counts `would_block_count` when it would have vetoed (learned + quiet + unflagged). Expert payload exposes it as `_would_block_count`.
 
 ## Decision engine: `pipeline/decision_engine.py`
 

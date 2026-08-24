@@ -734,12 +734,12 @@ var ExpertMetrics = {
     if (tea && tea.global && tea.global.is_attack) {
       verdictEl.textContent = 'Anomaly';
       verdictEl.style.color = 'var(--red)';
-    } else if (tea && tea.global && tea.global.confidence === 'low') {
+    } else if (tea && tea.global && !tea.global.learned) {
+      verdictEl.textContent = 'Learning';
+      verdictEl.style.color = '#4a9eff';
+    } else if (tea && tea.global && tea.global._locked) {
       verdictEl.textContent = 'Uncertain';
       verdictEl.style.color = 'var(--yellow)';
-    } else if (tea && tea.global && !tea.global.is_learned) {
-      verdictEl.textContent = 'Learning';
-      verdictEl.style.color = 'var(--blue, #4a9eff)';
     } else {
       verdictEl.textContent = 'Normal';
       verdictEl.style.color = 'var(--green)';
@@ -808,7 +808,6 @@ function renderMLPanel(ifData, rfData, teaData) {
       <div class="ml-if-wrap"></div>
       <div class="ml-rf-wrap"></div>
       <div class="ml-tea-wrap"></div>
-      <div class="ml-verdict-wrap"></div>
     `;
     el.dataset.init = '1';
   }
@@ -816,7 +815,6 @@ function renderMLPanel(ifData, rfData, teaData) {
   const ifWrap = el.querySelector('.ml-if-wrap');
   const rfWrap = el.querySelector('.ml-rf-wrap');
   const teaWrap = el.querySelector('.ml-tea-wrap');
-  const verdictWrap = el.querySelector('.ml-verdict-wrap');
 
   // IF Anomaly Thermometer
   const thr = ifData.threshold || 0.5992;
@@ -1025,9 +1023,6 @@ function renderMLPanel(ifData, rfData, teaData) {
   } else {
     if (teaWrap) teaWrap.innerHTML = '';
   }
-
-  // TEA per-IP verdicts section removed per B7 scope reduction — use ip-drawer for per-IP detail
-if (verdictWrap) verdictWrap.innerHTML = '';
 }
 
 

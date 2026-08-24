@@ -121,7 +121,7 @@ def expert_live():
             crowd_sigma = size_base.dynamic_crowd_sigma()
             confidence = curr.get("confidence", "low").upper()
             tea_global = {
-                "learned": size_base.is_learned,
+                "learned": state.is_learned,
                 "size_var": round(curr.get("size_var", 0), 4),
                 "intensity_var": round(curr.get("intensity_var", 0), 4),
                 "proto_entropy": round(curr.get("proto_entropy", 0), 4),
@@ -133,10 +133,13 @@ def expert_live():
                 "proto_baseline": round(proto_base.mean, 4) if proto_base.mean is not None else None,
                 "is_attack": curr.get("is_attack_pattern", False),
                 "is_flash_crowd": curr.get("is_flash_crowd", False),
+                "uniform_share": round(curr.get("uniform_share", 0), 4),
+                "mechanized_cluster": curr.get("mechanized_cluster", False),
                 "unique_ips": curr.get("unique_ips", 0),
                 "learning_interval": len(size_base._samples) if not size_base.is_learned else None,
                 "_locked": entropy_analyzer.is_locked,
                 "_fb_normal_streak": entropy_analyzer.fb_normal_streak,
+                "_would_block_count": entropy_analyzer.would_block_count,
                 "dynamic_attack_sigma": round(attack_sigma, 2),
                 "dynamic_crowd_sigma": round(crowd_sigma, 2),
                 "alpha": round(size_base.alpha, 4),
@@ -145,8 +148,6 @@ def expert_live():
                 "intensity_baseline_history": [round(v, 4) for v in int_base.baseline_history],
                 "proto_baseline_history": [round(v, 4) for v in proto_base.baseline_history],
             }
-
-    # TEA per-IP verdicts section removed per B7 scope reduction — use /api/ip_detail/<ip> for per-IP detail
 
     # State machine active states
     sm_states = {}

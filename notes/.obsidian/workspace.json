@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "tasks/regression-fix-plan-2026-08-24.md",
+                "file": "tasks/tea-verdict-fix-plan-2026-08-24.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "regression-fix-plan-2026-08-24"
+              "title": "tea-verdict-fix-plan-2026-08-24"
             }
           }
         ],
@@ -202,6 +202,10 @@
   },
   "active": "4562981150c7325f",
   "lastOpenFiles": [
+    "decisions/tea-state-persistence-session-only.md",
+    "decisions/mitigation-event-logging-strategy.md",
+    "tasks/tea-verdict-fix-plan-2026-08-24.md",
+    "tasks/regression-fix-plan-2026-08-24.md",
     "bugs/offence-counter-bug-fix.md",
     "bugs/attacker-count-dropoff.md",
     "bugs/reputation-blackhole-bypass.md",
@@ -209,7 +213,6 @@
     "bugs/unscored-hold-blackhole-bypass.md",
     "index.md",
     "README.md",
-    "tasks/regression-fix-plan-2026-08-24.md",
     "ui-ux/ui-ux-audit.md",
     "ui-ux/redesign-plan.md",
     "ui-ux/glassmorphism-redesign.md",
@@ -226,9 +229,6 @@
     "tasks/bug-fixes-batch-2026-08-24.md",
     "tasks/bug-fixes-batch-2026-08-23.md",
     "tasks/mitigation-event-logging.md",
-    "tasks/expert-pipeline-modularization.md",
-    "tasks/expert-mode-tea-visualization-plan.md",
-    "bugs/expert-mode-flow-reading-bug.md",
     "mitigation",
     "tasks/sed5m97Pp",
     "tasks",
