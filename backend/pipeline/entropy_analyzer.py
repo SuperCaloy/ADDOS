@@ -129,7 +129,7 @@ class _AdaptiveBaseline:
             return TEA_ATTACK_SIGMA
         cv = self._std / (abs(self._mean) + 1e-9)
         sigma = TEA_ATTACK_SIGMA + cv * 1.5
-        return max(2.0, min(3.0, sigma))
+        return max(2.0, min(2.8, sigma))
 
     def dynamic_crowd_sigma(self) -> float:
         if self._variance is None or self._mean is None or self._mean == 0:
@@ -266,6 +266,10 @@ class _IpEntropyProfile:
         low_mean  = pps_mean < (sum(list(self._pps_samples)[:3]) / 3 + 1e-9) * 0.5
 
         if rising and repetitive:
+            self._last_verdict = "attack"
+            return "attack"
+
+        if rising or repetitive:
             self._last_verdict = "attack"
             return "attack"
 
@@ -408,10 +412,6 @@ class EntropyAnalyzer:
 
         is_attack_pattern = size_collapsed or intensity_collapsed or proto_collapsed
         is_flash_crowd    = False
-
-        if not is_attack_pattern:
-            with self._lock:
-                state.learn(snapshot)
 
         if is_attack_pattern:
             if size_collapsed and intensity_collapsed:

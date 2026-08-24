@@ -16,3 +16,7 @@ area: [mitigation, backend]
 - [x] Run verification
 
 Result: [[mitigation/reputation-scoring-fix|Reputation scoring fix]]
+
+## See Also
+
+- [[tasks/regression-fix-plan-2026-08-24]]: P0 extends this fix with the offence_count column addition

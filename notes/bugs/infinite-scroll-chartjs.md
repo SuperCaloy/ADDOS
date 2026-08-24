@@ -26,3 +26,8 @@ Because the parent containers did not have a strict height constraint, Chart.js 
 3. Removed the CSS height classes directly from the `<canvas>` elements themselves so Chart.js automatically fills the relative wrapper without looping.
 
 Additionally, `#expert-panels` was moved inside the `#app` layout container in `dashboard.html` to inherit the global `1600px` max-width and `80px` bottom padding.
+
+## Related Notes
+
+- [[frontend/dashboard]]: dashboard layout and components
+- [[bugs/missing-expert-button-css]]: related CSS fix for expert panel

@@ -31,3 +31,9 @@ We introduced a `last_result` property on `_SwitchEntropyState` that stores the 
 
 1. **`entropy_analyzer.py`**: Added `self.last_result = {}` in `_SwitchEntropyState.__init__`, and saved `result` to `state.last_result` at the end of the `update()` method (including the early neutral return path).
 2. **`expert.py`**: Updated the reference to `curr = getattr(state, 'last_result', {})`, which provides the correct dictionary with all pre-computed anomaly z-scores, baselines, and booleans needed for the frontend visualization without needing to recompute them or face missing attributes.
+
+## Related Notes
+
+- [[bugs/expert-mode-flow-reading-bug]]: subsequent expert mode flow reading issue
+- [[tasks/expert-mode-tea-visualization-plan]]: original TEA visualization plan
+- [[frontend/expert-pipeline-visualization]]: expert pipeline UI design

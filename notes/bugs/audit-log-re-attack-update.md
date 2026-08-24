@@ -172,3 +172,4 @@ Option 2 is simpler but fragile (relies on action text matching). Option 1 chang
 - [[decisions/mitigation-event-logging-strategy]]: why mitigation_events became a lifecycle ledger
 - [[backend/mitigation]]: state machine phases and lifecycle events
 - [[backend/api]]: REST and SSE API endpoints
+- [[tasks/regression-fix-plan-2026-08-24]]: P3 fix adds SSE push on all phase transitions

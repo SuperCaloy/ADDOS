@@ -343,12 +343,17 @@ def on_result(src_ip: str, if_score, is_anomaly,
         writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1)
         log.warning("FALSE POSITIVE detected: %s is a known legit host!", src_ip)
 
-    # Confidence lock - only update attack_class/confidence if new > locked
     with _conf_lock_mutex:
         prev = _conf_lock.get(src_ip)
-        if prev is not None and confidence < prev[0]:
-            confidence   = prev[0]
-            attack_class = prev[1]
+        if prev is not None:
+            locked_conf, locked_class = prev
+            if locked_class == "Uncertain" and attack_class != "Uncertain" and confidence >= locked_conf:
+                _conf_lock[src_ip] = (confidence, attack_class)
+            elif confidence < locked_conf:
+                confidence   = locked_conf
+                attack_class = locked_class
+            else:
+                _conf_lock[src_ip] = (confidence, attack_class)
         else:
             _conf_lock[src_ip] = (confidence, attack_class)
 
@@ -395,19 +400,19 @@ def on_result(src_ip: str, if_score, is_anomaly,
         # Mitigation response time, result ready to FlowMod dispatched.
         t_mitigate_start = time.monotonic()
 
-        # Check if IP was previously banned and is re-offending
-        existing = state_machine._states.get(src_ip)
+        with state_machine._lock:
+            existing = state_machine._states.get(src_ip)
         if existing is None:
-            # Check history for prior bans on this IP
             from backend.database.db import query as _q
             prior = _q(
-                "SELECT ban_level FROM ip_attack_history WHERE src_ip=? ORDER BY id DESC LIMIT 1",
+                "SELECT ban_level, offence_count FROM ip_attack_history WHERE src_ip=? ORDER BY id DESC LIMIT 1",
                 (src_ip,)
             )
             if prior and prior[0].get("ban_level", 0) is not None:
                 prev_ban   = int(prior[0].get("ban_level", 0) or 0)
-                if prev_ban > 0:  # only re-offence if previously banned, not just quarantined
-                    state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban)
+                prev_occ   = int(prior[0].get("offence_count", 0) or 0)
+                if prev_ban > 0:
+                    state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_occ)
                     action_taken = state_machine._states[src_ip].action_taken if src_ip in state_machine._states else "Quarantined"
                 else:
                     action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
@@ -418,8 +423,9 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
         mitigation_ms = (time.monotonic() - t_mitigate_start) * 1000.0
 
+        _pkt_count = int((flow_stats or {}).get("packet_count", 0)) or _estimate_pkt_count(flow_stats)
         with _lock:
-            _stats["malicious_dropped"] += 1
+            _stats["malicious_dropped"] += _pkt_count
     else:
         log.debug("TEA mitigation gate: flash crowd, logging only - %s", src_ip)
 

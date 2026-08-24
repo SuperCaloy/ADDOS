@@ -737,6 +737,9 @@ var ExpertMetrics = {
     } else if (tea && tea.global && tea.global.confidence === 'low') {
       verdictEl.textContent = 'Uncertain';
       verdictEl.style.color = 'var(--yellow)';
+    } else if (tea && tea.global && !tea.global.is_learned) {
+      verdictEl.textContent = 'Learning';
+      verdictEl.style.color = 'var(--blue, #4a9eff)';
     } else {
       verdictEl.textContent = 'Normal';
       verdictEl.style.color = 'var(--green)';

@@ -147,3 +147,5 @@ All fixes verified via Python syntax checks, import validation, and runtime test
 ## Related
 
 - [[tasks/fix-expert-mode-flow-reading]]
+- [[bugs/expert-attribute-error]]: prior expert API attribute crash
+- [[bugs/tea-bar-layout-and-ip-drawer]]: TEA bar and IP drawer layout issues

@@ -29,3 +29,7 @@ Repeat offender reputation scores stayed flat because offenses were only recorde
 ## Note
 
 The verbatim scratch script as written requires `PYTHONPATH` set to the repo root when invoked as `python3 scratch/verify_reputation_fix.py`, because Python adds the script directory to `sys.path`, not the current working directory.
+
+## See Also
+
+- [[tasks/regression-fix-plan-2026-08-24]]: P0 extends this fix with the offence_count column in the DB schema and writer
