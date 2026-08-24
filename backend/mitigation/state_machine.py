@@ -2,6 +2,7 @@ import time
 import datetime
 import threading
 import logging
+import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -23,9 +24,6 @@ PHASE1_DURATION_MEDIUM   = 15.0
 PHASE1_DURATION_HIGH     = 20.0
 PHASE1_DURATION_CRITICAL = 5.0
 
-# Simulation: 60s watch. Production: 5 min watch.
-# 60s gives ML pipeline enough time to re-score rate_limited traffic during probation.
-PROBATION_DURATION = 60.0 if SIMULATION_MODE else 300.0
 MIN_QUARANTINE_CONFIDENCE = 0.70
 CONFIDENCE_LOCK_THRESHOLD = 0.80
 
@@ -62,6 +60,7 @@ class IpState:
     recent_pps:         float = 0.0
     # Last transition reason for audit/visualization
     transition_reason:  str   = ""
+    session_id:         str   = field(default_factory=lambda: uuid.uuid4().hex[:12])
 
     def phase_label(self) -> str:
         return PHASE_LABELS.get(self.phase, "Unknown")
@@ -415,11 +414,11 @@ class StateMachine:
                         if state.action_taken.startswith(self._UNSCORED_TAG):
                             self._hold_stats["expired_unscored"] += 1
                             writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=0, expired_unscored=1)
-                            log.info("Hold expired unscored: %s → probation", src_ip)
+                            log.info("Hold expired unscored: %s → released", src_ip)
                         else:
-                            # Ban expired - move to probation, unblock traffic.
-                            # IP is still watched; re-attack skips Phase 1.
-                            log.info("Time ban expired: %s (level %d) → probation",
+                            # Ban expired - record offense and release.
+                            # Re-detection routes through on_reoffence() via DB history.
+                            log.info("Time ban expired: %s (level %d) → released",
                                      src_ip, state.ban_level)
                         self._advance_to_probation(src_ip, state)
 
@@ -859,7 +858,7 @@ class StateMachine:
         # Temporary mitigation for a flagged IP that could not be scored in time,
         # even after priority retry. Not a blind permanent block:
         # - Uses real evidence that exists (flood prefilter flag), not a fake score.
-        # - TTL bound, auto releases to probation via tick() if never scored.
+        # - TTL bound, auto releases via tick() if never scored.
         # - Real IF/RF score, if it arrives later, updates this state through
         #   on_detection(), and escalates early to Blackhole if confirmed strong.
         with self._lock:

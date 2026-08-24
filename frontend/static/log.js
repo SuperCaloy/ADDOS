@@ -1,7 +1,7 @@
 /* log.js - SSE live events, audit log table DOM updates, recent events replay
  * Tracks rows by src_ip to detect phase escalations and update in-place. */
 
-/* Row map -- src_ip|event_type -> { tr, action } -- detects escalation for insert-vs-update */
+/* Row map -- `${ip}|${event_type}` -> { tr, action } -- composite key so re-attacks create new rows */
 const _logRows = new Map();
 let logCt = 0;
 
@@ -29,27 +29,25 @@ function addLogRow(ev) {
     <td>${renderPriority(ev.priority      || 'Low')}</td>
     <td>${renderAction(actionLabel)}</td>`;
 
-  /* Released events end an incident; clear keys so the next attack creates
-   * a fresh row rather than updating the old transition in-place. */
-  if (ev.event_type === 'released') {
-    for (const key of _logRows.keys()) {
-      if (key.startsWith(`${ip}|`)) _logRows.delete(key);
-    }
-  }
+  /* Same incident -- update in-place with flash */
+  const key = ip + '|' + (ev.event_type || 'transition');
+  const isRelease = ev.event_type === 'released' || (ev.event_type === 'manual' && /release/i.test(newAction));
 
-  /* Same IP, same action, same incident -- update in-place with flash */
-  const key = `${ip}|${ev.event_type || 'transition'}|${ev.timestamp || ''}`;
   if (_logRows.has(key)) {
     const existing = _logRows.get(key);
-    if (existing.action === newAction) {
-      existing.tr.dataset.ip         = ip;
-      existing.tr.innerHTML          = html;
-      existing.tr.style.transition   = 'background 0.3s';
-      existing.tr.style.background   = 'rgba(61,108,255,0.15)';
-      setTimeout(() => { existing.tr.style.background = ''; }, 600);
-      return;
+    // Overwrite the existing row for the session, even if action escalates
+    existing.tr.dataset.ip         = ip;
+    existing.tr.innerHTML          = html;
+    existing.tr.style.transition   = 'background 0.3s';
+    existing.tr.style.background   = 'rgba(61,108,255,0.15)';
+    setTimeout(() => { existing.tr.style.background = ''; }, 600);
+    existing.action = newAction;
+    
+    /* Released events end an incident; clear key so next attack creates a fresh row */
+    if (isRelease) {
+      _logRows.delete(key);
     }
-    /* Action escalated - fall through to insert new row at top */
+    return;
   }
 
   /* Evict oldest row if log is full */
@@ -57,7 +55,7 @@ function addLogRow(ev) {
     const oldest = tb.querySelector('tr:last-child');
     if (oldest) {
       const oldIp = oldest.querySelector('.ip');
-      if (oldIp) _logRows.delete(oldIp.textContent.trim());
+      if (oldIp) _logRows.delete(oldIp.textContent.trim() + '|' + (oldest.dataset.eventType || 'transition'));
       oldest.remove();
     }
   } else {
@@ -69,8 +67,13 @@ function addLogRow(ev) {
   const tr      = document.createElement('tr');
   tr.className  = 'row-in tr-clickable';
   tr.dataset.ip = ip;
+  tr.dataset.eventType = ev.event_type || 'transition';
   tr.innerHTML  = html;
-  _logRows.set(key, { tr, action: newAction });
+  
+  if (!isRelease) {
+    _logRows.set(key, { tr, action: newAction });
+  }
+  
   tb.insertBefore(tr, tb.firstChild);
 }
 

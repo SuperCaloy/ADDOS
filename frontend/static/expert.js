@@ -169,15 +169,15 @@ var ExpertStages = {
       num: 1, color: '#14B8A6',
       title: 'Mininet Network Topology',
       file: 'topology/topology.py',
-      desc: 'This is the practice network. It emulates OpenFlow-capable virtual switches and hosts, generating ordinary IP/TCP/UDP traffic between them, or a high-volume SYN/UDP/ICMP flood from designated attacker hosts. It exists so the whole pipeline can be tested against both everyday traffic and a real flood pattern, safely, without touching a live network.',
-      input: '1 core switch (s0) plus 8 edge switches\n20 hosts (h1 to h20) plus sinkhole h21\nh1 to h5: legit TCP/UDP/ICMP traffic\nh6 to h19: 14 attackers, SYN/ICMP/UDP/mixed\nh20: server (10.0.0.20), whitelisted, never scored',
+      desc: 'Emulated network environment providing OpenFlow-capable virtual switches and hosts. Generates both legitimate IP/TCP/UDP traffic and high-volume SYN/UDP/ICMP flood patterns from designated attacker hosts, enabling safe pipeline testing without production network exposure.',
+      input: '1 core switch (s0) plus 8 edge switches\n27 hosts (h1 to h27) plus sinkhole h21\nh1 to h5: legit TCP/UDP/ICMP traffic\nh6 to h19 + h22 to h27: 20 attackers, SYN/ICMP/UDP/mixed\nh20: server (10.0.0.20), whitelisted, never scored',
       output: 'Raw packets crossing\nOpenFlow switches toward h20'
     },
     ryu: {
       num: 2, color: '#14B8A6',
       title: 'Ryu SDN Controller',
       file: 'controller/ryu_controller.py',
-      desc: 'The traffic officer for the network, and the final enforcement point. It sits above the switch and speaks OpenFlow, repeatedly asking for flow statistics (packet counts, byte counts, durations) for every active connection. It also receives the block command from the Decision Coordinator and installs the actual drop rule on the switch.',
+      desc: 'SDN controller serving as the network enforcement point. Polls the switch via OpenFlow for per-flow statistics (packet count, byte count, duration) and receives mitigation commands from the Decision Engine, installing corresponding drop rules on the switch.',
       input: 'OpenFlow Packet-In events\nplus per-flow stat replies',
       output: 'Structured flow stats:\npacket_count, byte_count, duration, ports'
     },
@@ -185,7 +185,7 @@ var ExpertStages = {
       num: 3, color: '#14B8A6',
       title: 'ZeroMQ Transport',
       file: 'backend/transport/zmq_receiver.py',
-      desc: 'A fast, non-blocking delivery pipe between the controller and the detection backend. Flow reports get queued and delivered asynchronously, keeping the network running even when the analysis side is briefly busy.',
+      desc: 'Asynchronous message transport layer between the SDN controller and detection backend. Queues flow reports for non-blocking delivery, maintaining network operation during periods of high analysis load.',
       input: 'Serialized JSON flow\nreports from Ryu',
       output: 'Decoded flow dicts pushed\ninto the worker queue'
     },
@@ -193,32 +193,32 @@ var ExpertStages = {
       num: 4, color: '#F59E0B',
       title: 'Flood Prefilter',
       file: 'backend/pipeline/flood_prefilter.py',
-      desc: 'A quick first check that runs before any AI model. It tracks per-IP, per-protocol packet timing (SYN, ICMP, UDP) against configured limits, and flags a source the moment it exceeds a rate limit or a short sub-second burst.',
+      desc: 'Rate-based prefilter operating before ML analysis. Monitors per-IP, per-protocol packet timing (SYN, ICMP, UDP) against configured thresholds, flagging sources that exceed rate limits or exhibit sub-second burst behavior.',
       input: 'Per-packet protocol plus\nsource IP, as flows arrive',
       output: 'Flag: exceeded or not, per\nsource IP and protocol',
       formula: [
         { f: 'trip if count(proto, 1.0s) >= limit', note: 'SYN 100, ICMP 50, UDP 50 per 1s window' },
-        { f: 'burst if count(proto, 0.1s) >= 0.4 * limit', note: 'catches fast opening spike before full window' }
+        { f: 'burst if count(proto, 0.1s or 0.5s) >= 0.4 * limit', note: 'catches fast opening spike before full window' }
       ]
     },
     entropy: {
       num: 5, color: '#F59E0B',
       title: 'Entropy Analyzer (TEA)',
       file: 'backend/pipeline/entropy_analyzer.py',
-      desc: 'Learns what normal looks like for this network over time, building a rolling baseline of packet rate and traffic diversity per switch. A sharp entropy drop below the learned baseline signals repetitive, low-diversity attack traffic.',
+      desc: 'Temporal Entropy Analyzer (TEA) builds a rolling baseline of packet rate and traffic diversity per switch over time. A sharp entropy drop below the learned baseline signals repetitive, low-diversity attack traffic characteristic of automated floods.',
       input: 'Flow stream plus per-switch\nrolling packet-rate baseline',
       output: 'Diversity score plus pass or hold\ndecision on which flows continue',
       formula: [
         { f: 'H = -sum(p_i * log2(p_i))', note: 'diversity score across source IPs and ports' },
         { f: 'mu_t = a*x_t + (1-a)*mu_{t-1}', note: 'learned baseline, adapts faster when stable' },
-        { f: 'z = (x - mu) / sigma, flagged when z < -sigma_attack', note: 'baseline learns over 10-interval rolling window' }
+        { f: 'z = (x - mu) / sigma, flagged when z < -sigma_attack', note: 'baseline learns over 15-interval rolling window' }
       ]
     },
     if_node: {
       num: 6, color: '#E11D48',
       title: 'Isolation Forest',
       file: 'backend/models/if_pipeline.py',
-      desc: 'An unsupervised anomaly detector trained on normal traffic only. It scores each flow by how easily it can be isolated from everything else seen: unusual traffic isolates fast and scores high, giving each connection a numeric anomaly score.',
+      desc: 'Unsupervised anomaly detector trained exclusively on normal traffic. Scores each flow by how readily it isolates from the observed distribution; anomalous flows isolate quickly and receive higher scores, producing a numeric anomaly rating per flow.',
       input: '16-feature vector per flow\n(rates, ratios, timing)',
       output: 'Anomaly score (0 to 1) plus\nabove/below threshold flag',
       formula: [
@@ -230,7 +230,7 @@ var ExpertStages = {
       num: 7, color: '#14B8A6',
       title: 'Random Forest',
       file: 'backend/models/rf_pipeline.py',
-      desc: 'A supervised classifier that runs only on flows the Isolation Forest has already flagged as anomalous. It predicts which attack type the traffic matches along with a confidence score.',
+      desc: 'Supervised classifier invoked only on flows flagged as anomalous by the Isolation Forest. Predicts the attack type (ICMP Flood, SYN Flood, UDP Flood) with an associated confidence score based on learned attack signatures.',
       input: '15-feature vector, only for\nflows the IF flagged anomalous',
       output: 'One of: ICMP Flood, SYN Flood,\nUDP Flood, plus confidence',
       formula: [
@@ -242,18 +242,15 @@ var ExpertStages = {
       num: 8, color: '#F59E0B',
       title: 'Decision + Mitigation',
       file: 'backend/pipeline/decision_engine.py',
-      desc: 'The final judge. It weighs the Isolation Forest score and the Random Forest classification together against configured thresholds. If confident enough this is a real attack, it sends enforcement commands back to the Ryu Controller over ZeroMQ.',
+      desc: 'Final arbitration stage. Evaluates the Isolation Forest anomaly score and Random Forest classification against configured thresholds. When attack confidence is sufficient, issues enforcement commands to the Ryu Controller via ZeroMQ.',
       input: 'IF anomaly score plus\nRF class and confidence',
-      output: 'Enforcement commands: rate_limit, block, clear, redirect, proto_block',
-      formula: [
-        { f: 'cmd = rate_limit if probation else block if ban else clear if released else redirect if sinkhole else proto_block if CRIT', note: 'command type depends on phase and resource state' }
-      ]
+      output: 'Enforcement commands: rate_limit, block, clear, redirect, proto_block'
     },
     deception: {
       num: 9, color: '#8B5CF6',
       title: 'Deception / Sinkhole',
       file: 'backend/mitigation/deception.py',
-      desc: 'Redirects suspicious traffic to a dummy host (h21) for safe observation. Measures attack persistence and confidence over 30s. Escalates to Phase 1 if traffic persists with high confidence, or releases if traffic stops.',
+      desc: 'Redirects suspicious traffic to a designated sinkhole host for controlled observation. Measures attack persistence and classifier confidence over a 30-second observation window. Escalates to Phase 1 if traffic persists with high confidence, otherwise releases the source.',
       input: 'Quarantined IPs with unresolved\nattack vector / low confidence',
       output: 'OpenFlow redirect to sinkhole,\nescalation to Phase 1 or release',
       formula: [
@@ -265,7 +262,7 @@ var ExpertStages = {
       num: 10, color: '#EC4899',
       title: 'Resource Guard',
       file: 'backend/mitigation/resource_guard.py',
-      desc: 'Monitors Ryu controller CPU/memory. At HIGH: throttles detection rate (20ms delay). At CRIT: installs OVS proto_block rules to shed excess packet-in load. Auto-recovers when resources normalize.',
+      desc: 'Monitors Ryu controller resource utilization (CPU, memory). At HIGH tier: throttles detection rate with 20ms delay. At CRIT tier: installs OVS proto_block rules to shed excess Packet-In load. Auto-recovers when resources normalize.',
       input: 'Ryu CPU/memory metrics (polled every 2s)',
       output: 'Throttle delay (20ms/50ms) + proto_block rules on attack protocol',
       formula: [
@@ -326,6 +323,7 @@ var ExpertPipeline = {
   reducedMotion: false,
   _animFrame: null,
   latchState: { locked: false, streak: 0 },
+  _hasSinkhole: false,
 
   nodes: {
     mininet:  { x: 150, y: 200, label: 'Mininet' },
@@ -348,9 +346,9 @@ var ExpertPipeline = {
     { from: 'entropy', to: 'if_node' },
     { from: 'if_node', to: 'rf' },
     { from: 'rf', to: 'decision' },
-    { from: 'decision', to: 'ryu', feedback: true, kind: 'enforce', curve: -190 },
+    { from: 'decision', to: 'ryu', kind: 'enforce' },
     { from: 'if_node', to: 'entropy', feedback: true, kind: 'learn', curve: -60 },
-    { from: 'decision', to: 'deception' },
+    { from: 'decision', to: 'deception', kind: 'redirect' },
     { from: 'decision', to: 'resource_guard' }
   ],
 
@@ -407,7 +405,7 @@ var ExpertPipeline = {
                 attackClass.indexOf('ICMP') >= 0 ? '#E11D48' :
                 attackClass.indexOf('UDP') >= 0 ? '#14B8A6' : '#94A3B8';
 
-    var forwardPaths = this.paths.filter(function(p) { return !p.feedback; });
+    var forwardPaths = this.paths.filter(function(p) { return !p.feedback && p.kind !== 'redirect'; });
     forwardPaths.forEach(function(path, index) {
       this.particles.push({
         from: path.from, to: path.to, progress: -index * 1.1,
@@ -472,6 +470,7 @@ var ExpertPipeline = {
     this.nodeGlow.entropy = (pollData.tea && pollData.tea.global && pollData.tea.global.is_attack) ? 0.8 : 0;
     this.nodeGlow.rf = (pollData.rf && pollData.rf.recent_classifications && pollData.rf.recent_classifications.length > 0) ? 0.6 : 0;
     this.nodeGlow.deception = Math.min(sinkholeCount / 3, 1);
+    this._hasSinkhole = sinkholeCount > 0;
     this.nodeGlow.resource_guard = rgTier === 'CRIT' ? 1 : rgTier === 'HIGH' ? 0.7 : rgTier === 'WARN' ? 0.4 : 0;
 
     var teaGlobal = pollData.tea && pollData.tea.global;
@@ -491,17 +490,34 @@ var ExpertPipeline = {
     this.paths.forEach(function(path) {
       var start = this._coords(this.nodes[path.from].x, this.nodes[path.from].y);
       var end = this._coords(this.nodes[path.to].x, this.nodes[path.to].y);
+      var isCurved = path.feedback || path.kind === 'redirect';
+      var isRedirect = path.kind === 'redirect';
+      var redirectActive = isRedirect && this._hasSinkhole;
+      var hasKind = !!path.kind;
       ctx.beginPath();
       ctx.moveTo(start.x, start.y);
-      if (path.feedback) {
+      if (isCurved) {
         var cX = (start.x + end.x) / 2;
-        var cY = (start.y + end.y) / 2 + path.curve * scaleY;
+        var cY = (start.y + end.y) / 2 + (path.curve || -80) * scaleY;
         ctx.quadraticCurveTo(cX, cY, end.x, end.y);
-        ctx.strokeStyle = path.kind === 'learn'
-          ? (this.isLightMode ? 'rgba(13,148,136,0.5)' : 'rgba(20,184,166,0.4)')
-          : (this.isLightMode ? 'rgba(180,83,9,0.5)' : 'rgba(245,158,11,0.4)');
+        if (isRedirect) {
+          ctx.strokeStyle = redirectActive
+            ? (this.isLightMode ? 'rgba(139,92,246,0.7)' : 'rgba(139,92,246,0.6)')
+            : (this.isLightMode ? 'rgba(139,92,246,0.45)' : 'rgba(139,92,246,0.4)');
+        } else if (path.kind === 'learn') {
+          ctx.strokeStyle = this.isLightMode ? 'rgba(13,148,136,0.5)' : 'rgba(20,184,166,0.4)';
+        } else {
+          ctx.strokeStyle = this.isLightMode ? 'rgba(180,83,9,0.5)' : 'rgba(245,158,11,0.4)';
+        }
         ctx.lineWidth = 2;
         ctx.setLineDash([5, 4]);
+      } else if (hasKind) {
+        ctx.lineTo(end.x, end.y);
+        ctx.strokeStyle = path.kind === 'enforce'
+          ? (this.isLightMode ? 'rgba(180,83,9,0.5)' : 'rgba(245,158,11,0.4)')
+          : (this.isLightMode ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.25)');
+        ctx.lineWidth = hasKind ? 2 : 1.4;
+        ctx.setLineDash(hasKind ? [5, 4] : []);
       } else {
         ctx.lineTo(end.x, end.y);
         ctx.strokeStyle = this.isLightMode ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.25)';
@@ -510,36 +526,28 @@ var ExpertPipeline = {
       ctx.stroke();
       ctx.setLineDash([]);
 
-      if (path.feedback) {
-        var cX2 = (start.x + end.x) / 2;
-        var cY2 = (start.y + end.y) / 2 + path.curve * scaleY;
-        var lx = 0.25 * start.x + 0.5 * cX2 + 0.25 * end.x;
-        var ly = 0.25 * start.y + 0.5 * cY2 + 0.25 * end.y;
-        ctx.font = '600 9px "Fira Code", monospace';
+      if (hasKind) {
+        var lx, ly;
+        if (isCurved) {
+          var cX2 = (start.x + end.x) / 2;
+          var cY2 = (start.y + end.y) / 2 + (path.curve || -80) * scaleY;
+          lx = 0.25 * start.x + 0.5 * cX2 + 0.25 * end.x;
+          ly = 0.25 * start.y + 0.5 * cY2 + 0.25 * end.y;
+        } else {
+          lx = (start.x + end.x) / 2;
+          ly = (start.y + end.y) / 2 - 10;
+        }
+        ctx.font = '600 11px "Fira Code", monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         var label = path.kind === 'learn' ? 'learns baseline' : path.kind === 'redirect' ? 'redirects to sinkhole' : 'Sends decisions';
         var color = path.kind === 'learn'
           ? (this.isLightMode ? 'rgba(13,148,136,0.8)' : 'rgba(20,184,166,0.6)')
           : path.kind === 'redirect'
-          ? (this.isLightMode ? 'rgba(139,92,246,0.8)' : 'rgba(168,120,255,0.6)')
+          ? (this.isLightMode ? 'rgba(139,92,246,0.8)' : 'rgba(139,92,246,0.6)')
           : (this.isLightMode ? 'rgba(180,83,9,0.8)' : 'rgba(245,158,11,0.6)');
         ctx.fillStyle = color;
         ctx.fillText(label, lx, ly);
-        if (path.kind === 'learn' && this.latchState) {
-          var badgeX = lx;
-          var badgeY = ly + 18;
-          var locked = this.latchState.locked;
-          var streak = this.latchState.streak || 0;
-          var badgeText = locked ? 'learning frozen' : 'learning active';
-          badgeText += ' (' + streak + '/10)';
-          ctx.font = '500 8px "Fira Code", monospace';
-          ctx.textAlign = 'center';
-          ctx.fillStyle = locked
-            ? (this.isLightMode ? 'rgba(225,29,72,0.9)' : 'rgba(255,80,80,0.9)')
-            : (this.isLightMode ? 'rgba(16,185,129,0.9)' : 'rgba(80,255,80,0.9)');
-          ctx.fillText(badgeText, badgeX, badgeY);
-        }
       }
     }.bind(this));
 
@@ -594,6 +602,7 @@ var ExpertPipeline = {
       var c = this._coords(node.x, node.y);
       var isSel = ExpertState.selectedStage === key;
       var glow = this.nodeGlow[key] || 0;
+      if (key === 'deception') glow = this._hasSinkhole ? glow : 0;
 
       // Glow ring (dark mode only, when active)
       if (!this.isLightMode && glow > 0.05) {
@@ -725,6 +734,9 @@ var ExpertMetrics = {
     if (tea && tea.global && tea.global.is_attack) {
       verdictEl.textContent = 'Anomaly';
       verdictEl.style.color = 'var(--red)';
+    } else if (tea && tea.global && tea.global.confidence === 'low') {
+      verdictEl.textContent = 'Uncertain';
+      verdictEl.style.color = 'var(--yellow)';
     } else {
       verdictEl.textContent = 'Normal';
       verdictEl.style.color = 'var(--green)';
@@ -804,7 +816,7 @@ function renderMLPanel(ifData, rfData, teaData) {
   const verdictWrap = el.querySelector('.ml-verdict-wrap');
 
   // IF Anomaly Thermometer
-  const thr = ifData.threshold || 0.6092;
+  const thr = ifData.threshold || 0.5992;
 
   let highestScore = 0;
   let isAnom = false;
@@ -1079,7 +1091,7 @@ function updateIFBar(inf) {
   const thermometer = document.querySelector('.if-thermometer-fill');
   if (thermometer) {
     const score = inf.if_score || 0;
-    const threshold = 0.6092;
+    const threshold = 0.5992;
     const fillPct = Math.min((score / (threshold * 2)) * 100, 100);
     thermometer.style.width = fillPct + '%';
     thermometer.className = 'if-thermometer-fill' + (inf.is_anomaly ? ' anomaly' : ' normal');
@@ -1098,7 +1110,7 @@ function renderMitigationPanel(smStates, deception, rg) {
   if (!el) return;
 
   // Count IPs per phase
-  const phaseCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  const phaseCounts = { 1: 0, 2: 0, 3: 0 };
   Object.values(smStates).forEach(s => { if (s.phase) phaseCounts[s.phase] = (phaseCounts[s.phase] || 0) + 1; });
 
   const hasActiveFlow = Object.values(smStates).length > 0;
@@ -1120,26 +1132,26 @@ function renderMitigationPanel(smStates, deception, rg) {
       <div class="phase-count">${phaseCounts[3]}</div>
       <div class="phase-action">1h TTL</div>
     </div>
-    <div class="phase-box probation">
-      <div class="phase-label">Probation</div>
-      <div class="phase-count">${phaseCounts[4]}</div>
-      <div class="phase-action">Watched</div>
-    </div>
   </div>`;
 
   // Active IPs detail
   const activeIPs = Object.entries(smStates);
   if (activeIPs.length) {
-    html += '<div class="ml-section"><div class="ml-section-title">Active States</div><div class="terminal-feed">';
-    activeIPs.forEach(([ip, s]) => {
+    const renderIPs = activeIPs.slice(0, 100);
+    const countText = activeIPs.length > 100 ? ` (Showing 100 of ${activeIPs.length})` : '';
+    html += `<div class="ml-section"><div class="ml-section-title">Active States${countText}</div><div class="terminal-feed">`;
+    renderIPs.forEach(([ip, s]) => {
       const now = new Date().toLocaleTimeString('en-US', { hour12: false });
+      const pri = s.priority || 'Low';
+      const priClass = pri === 'Critical' ? 't-crit' : pri === 'High' ? 't-alert' : pri === 'Medium' ? 't-stat' : '';
       html += `
         <div class="terminal-line">
           <span class="t-time">[${now}]</span>
           <span class="t-ip">${ip}</span>
+          ${priClass ? `<span class="${priClass}">${pri.toUpperCase()}</span>` : `<span class="t-stat">${pri.toUpperCase()}</span>`}
           <span class="t-crit">PHASE_${s.phase}</span>
           <span class="t-stat">IF=${s.if_score.toFixed(4)}</span>
-          <span class="t-stat">PPS=${s.recent_pps.toFixed(1)}</span>
+          <span class="t-stat">PPS=${(s.recent_pps || 0).toFixed(1)}</span>
           <span class="t-alert">ACT=${s.action.toUpperCase()}</span>
           ${s.ttl_sec != null ? `<span class="t-stat">TTL=${s.ttl_sec}s</span>` : ''}
         </div>`;

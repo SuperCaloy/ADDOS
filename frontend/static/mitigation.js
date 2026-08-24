@@ -44,18 +44,20 @@ async function fetchQuarantine() {
 
       /* Priority badge */
       const _priMap = {
-        'Critical': '<span class="p-crit">CRITICAL </span>',
-        'High':     '<span class="p-high">HIGH </span>',
-        'Medium':   '<span class="p-med">MEDIUM </span>',
+        'Critical': '<span class="p-crit">CRITICAL</span>',
+        'High':     '<span class="p-high">HIGH</span>',
+        'Medium':   '<span class="p-med">MEDIUM</span>',
+        'Low':      '<span class="p-low">LOW</span>',
       };
-      const priBadge = _priMap[e.priority] || '';
+      const priBadge = _priMap[e.priority] || '<span class="p-low">LOW</span>';
 
       /* Use phase_label if available, otherwise fall back to phase */
       const phaseDisplay = e.phase_label || e.phase || '—';
 
       const inner = `
         <td class="ip">${e.src_ip || '—'}</td>
-        <td style="color:var(--sub2);font-size:13px">${priBadge}${phaseDisplay}${ttlRemaining}</td>
+        <td>${priBadge}</td>
+        <td style="color:var(--sub2);font-size:13px">${phaseDisplay}${ttlRemaining}</td>
         <td>${renderVector(e.attack_vector || '—')}</td>
         <td class="${scCls}">${sc.toFixed(4)}</td>
         <td class="mono">${conf}</td>
