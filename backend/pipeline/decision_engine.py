@@ -194,11 +194,17 @@ def _push_sse_event(event: dict, force: bool = False) -> None:
             del _sse_dedup[k]
 
 
-def _assign_priority(if_score: float, confidence: float) -> str:
-    loader.require_loaded()
-    if if_score >= loader.if_threshold * 1.2 and confidence >= 0.75:
-        return "High"
-    return "Low"
+def _assign_priority(if_score: float, confidence: float,
+                     src_ip: str = "", attack_class: str = "Uncertain",
+                     recent_pps: float = 0.0) -> str:
+    from backend.mitigation.behavioral import assign_priority
+    return assign_priority(
+        if_score=if_score,
+        confidence=confidence,
+        src_ip=src_ip,
+        attack_class=attack_class,
+        recent_pps=recent_pps,
+    )
 
 
 # ── Detection ledger gate: one 'detected' row per phase entry ────────────
@@ -348,7 +354,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
             _conf_lock[src_ip] = (confidence, attack_class)
 
     predicted_class = "DDoS" if attack_class != "Uncertain" else "Anomaly"
-    priority        = _assign_priority(if_score, confidence)
+    _recent_pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
+    priority        = _assign_priority(if_score, confidence, src_ip, attack_class, _recent_pps)
 
     # TEA mitigation gate. Every interval already went through IF/RF.
     # Ground truth counting below always runs, regardless of this decision.
@@ -365,7 +372,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # High confidence attack -> ensure High priority (fast-track)
     if _tea_attack and _tea_confidence == "high":
-        if priority == "Low":
+        if priority in ("Low", "Medium"):
             priority = "High"
             log.info("TEA high-confidence fast-track: %s -> High priority", src_ip)
 
@@ -395,14 +402,13 @@ def on_result(src_ip: str, if_score, is_anomaly,
             # Check history for prior bans on this IP
             from backend.database.db import query as _q
             prior = _q(
-                "SELECT ban_level, offence_count FROM ip_attack_history WHERE src_ip=? ORDER BY id DESC LIMIT 1",
+                "SELECT ban_level FROM ip_attack_history WHERE src_ip=? ORDER BY id DESC LIMIT 1",
                 (src_ip,)
             )
             if prior and prior[0].get("ban_level", 0) is not None:
                 prev_ban   = int(prior[0].get("ban_level", 0) or 0)
-                prev_off   = int(prior[0].get("offence_count", 0) or 0)
                 if prev_ban > 0:  # only re-offence if previously banned, not just quarantined
-                    state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_off)
+                    state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban)
                     action_taken = state_machine._states[src_ip].action_taken if src_ip in state_machine._states else "Quarantined"
                 else:
                     action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
@@ -443,6 +449,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "event_type":      "detected",
         "detection_ms":    detection_ms,
         "mitigation_ms":   mitigation_ms,
+        "session_id":      ip_state.session_id if ip_state else None,
         })
 
     _threat_pps = _estimate_pkt_count(flow_stats)
@@ -550,6 +557,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
             "priority":        priority,
             "action_taken":    action_taken,
             "event_type":      "released" if action_taken == "Released" else "transition",
+            "session_id":      ip_state.session_id if ip_state else None,
         }, force=_phase_upgrade)
 
 
