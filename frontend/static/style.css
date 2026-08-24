@@ -137,11 +137,12 @@ body::before {
   z-index: 0;
 }
 
-#app { position: relative; z-index: 1; max-width: 1600px; margin: 0 auto; padding: 0 36px 80px; }
+#app { position: relative; z-index: 1; max-width: clamp(1200px, 90vw, 2200px); margin: 0 auto; padding: 0 36px 80px; }
 
 /* ── HEADER ─────────────────────────────────────────────────── */
 header {
   display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 12px;
   padding: 26px 0 22px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 32px;
@@ -149,7 +150,7 @@ header {
 .logo-name { font-family: var(--mono); font-size: 24px; font-weight: 700; letter-spacing: -.5px; color: var(--text); }
 .logo-name span { color: var(--blue); }
 .logo-sub { font-size: 12px; color: var(--sub); letter-spacing: .08em; text-transform: uppercase; margin-top: 3px; }
-.header-right { display: flex; align-items: center; gap: 12px; }
+.header-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
 .status-pill {
   display: flex; align-items: center; gap: 7px;
@@ -190,7 +191,7 @@ header {
 .panel-sub { font-size: 12px; color: var(--sub); }
 
 /* ── CHART ───────────────────────────────────────────────────── */
-.chart-wrap { padding: 22px 26px; height: 240px; position: relative; }
+.chart-wrap { padding: 22px 26px; height: clamp(200px, 25vh, 300px); position: relative; }
 .range-tabs { display: flex; gap: 5px; }
 .rt { padding: 5px 13px; border-radius: 7px; cursor: pointer; font-size: 11px; font-weight: 700; font-family: var(--mono); border: 1px solid var(--border2); color: var(--sub2); background: transparent; transition: all .14s; }
 .rt.active { background: var(--blue); border-color: var(--blue); color: #fff; }
@@ -198,7 +199,7 @@ header {
 
 /* ── PERF ROW ────────────────────────────────────────────────── */
 /* perf row: resource card left + 2x2 right */
-.perf-row { display: grid; grid-template-columns: 280px 1fr; gap: 16px; margin-bottom: 22px; align-items: stretch; }
+.perf-row { display: grid; grid-template-columns: minmax(220px, 25%) 1fr; gap: 16px; margin-bottom: 22px; align-items: stretch; }
 .resource-card { height: 100%; box-sizing: border-box; }
 .perf-subgrid { display: grid; grid-template-columns: repeat(2,1fr); gap: 16px; }
 
@@ -220,7 +221,7 @@ header {
 .p-detail { font-size: 12px; color: var(--sub2); }
 
 /* ── TABLE ───────────────────────────────────────────────────── */
-.tbl-scroll { overflow-y: auto; max-height: 380px; }
+.tbl-scroll { overflow-y: auto; overflow-x: auto; max-height: 380px; }
 .tbl-scroll::-webkit-scrollbar { width: 4px; }
 .tbl-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 
@@ -251,7 +252,9 @@ td.ip   { font-family: var(--mono); color: var(--text); font-weight: 600; font-s
 .t-rl      { color:#fb923c; border-color:rgba(251,146,60,.4); background:rgba(251,146,60,.07); }
 .t-blocked { color:var(--red); border-color:rgba(255,61,90,.4); background:rgba(255,61,90,.07); }
 .t-ban     { color:#ffb300; border-color:rgba(255,179,0,.4); background:rgba(255,179,0,.07); }
+.p-crit { color:#ff1744; font-weight:700; font-family:var(--mono); font-size:12px; text-transform:uppercase; }
 .p-high { color:var(--red); font-weight:700; font-family:var(--mono); font-size:12px; }
+.p-med  { color:var(--amber); font-weight:700; font-family:var(--mono); font-size:12px; }
 .p-low  { color:var(--sub2); font-family:var(--mono); font-size:12px; }
 .sc-red { color:var(--red);   font-family:var(--mono); font-weight:700; }
 .sc-amb { color:var(--amber); font-family:var(--mono); font-weight:700; }
@@ -268,7 +271,7 @@ td.ip   { font-family: var(--mono); color: var(--text); font-weight: 600; font-s
 /* ── MODAL ───────────────────────────────────────────────────── */
 .overlay { display: none; position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.72); backdrop-filter: blur(5px); align-items: center; justify-content: center; }
 .overlay.open { display: flex; }
-.modal { background: var(--card); border: 1px solid var(--border2); border-radius: 18px; padding: 36px; min-width: 640px; }
+.modal { background: var(--card); border: 1px solid var(--border2); border-radius: 18px; padding: 36px; width: min(640px, 90vw); }
 .modal h2 { font-family: var(--mono); font-size: 17px; margin-bottom: 28px; color: var(--text); }
 .modal-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 22px; }
 .modal label { display: block; font-size: 11px; color: var(--sub); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 8px; }
@@ -331,8 +334,36 @@ body.light .cal-nav:hover { background: var(--border); color: var(--text); }
 @keyframes tin { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
 
 /* ── RESPONSIVE ──────────────────────────────────────────────── */
-@media (max-width:1100px) { .cards-grid { grid-template-columns: repeat(2,1fr); } .perf-row { grid-template-columns: 1fr; } .perf-subgrid { grid-template-columns: repeat(2,1fr); } }
-@media (max-width:660px)  { .cards-grid, .perf-subgrid { grid-template-columns: 1fr; } }
+@media (min-width: 1920px) {
+  body { font-size: 16px; }
+  .m-value { font-size: 38px; }
+}
+
+@media (min-width: 2400px) {
+  body { font-size: 17px; }
+  .cards-grid { gap: 24px; }
+  .perf-row { gap: 24px; }
+}
+
+@media (max-width: 1366px) {
+  #app { padding: 0 20px 60px; }
+  .metric-card { padding: 20px 22px 18px; }
+  .m-value { font-size: 28px; }
+  #log-body td:nth-child(1), #log-body td:nth-child(4),
+  #q-body td:nth-child(3) {
+    white-space: normal;
+  }
+}
+
+@media (max-width: 1280px) {
+  .cards-grid { grid-template-columns: repeat(2,1fr); }
+  .perf-row { grid-template-columns: 1fr; }
+  .perf-subgrid { grid-template-columns: repeat(2,1fr); }
+}
+
+@media (max-width: 660px) {
+  .cards-grid, .perf-subgrid { grid-template-columns: 1fr; }
+}
 /* ── EXPERT MODE COMPONENTS ────────────────────────────────────────────── */
 
 .expert-metric {
@@ -460,7 +491,7 @@ body.light .cal-nav:hover { background: var(--border); color: var(--text); }
   border-radius: 8px;
   padding: 16px;
   min-height: 200px;
-  height: auto;
+  max-height: calc(15 * 25px + 32px);
   flex-grow: 1;
   overflow-y: auto;
   font-family: var(--mono);
