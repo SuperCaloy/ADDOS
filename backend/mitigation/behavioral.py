@@ -1,4 +1,5 @@
 import logging
+import math
 from backend.database import writer
 
 log = logging.getLogger(__name__)
@@ -6,14 +7,8 @@ log = logging.getLogger(__name__)
 # ── Thresholds ─────────────────────────────────────────────────────────────
 # Weighted offense score that triggers direct blackhole (half-life decay, 24h)
 # Score = sum of (2.0 * 0.5^(hours_elapsed/24)) per offense
-# Needs burst/repeat attacks to reach 5.0 - casual probing decays below threshold
+# 5 rapid attacks = 10.0 = blackhole (max persistence)
 BLACKHOLE_OFFENSE_THRESHOLD = 10.0
-
-# IF score that always forces High priority
-HIGH_PRIORITY_IF_THRESHOLD  = 0.75
-
-# IF score that forces High priority only for repeat offenders (2+ offenses)
-REPEAT_HIGH_PRIORITY_IF     = 0.65
 
 # Attack vector severity weights (higher = more severe)
 VECTOR_SEVERITY = {
@@ -117,18 +112,9 @@ def should_blackhole(src_ip: str, current_ban_level: int) -> bool:
     return False
 
 
-# Tentative reputation threshold. Unconfirmed, prefilter based only.
-# Deliberately higher bar than confirmed repeat offender (2), since this
-# signal has no ML confirmation behind it.
-SINKHOLE_FLAG_HIGH_PRIORITY = 3
-
-
 def assign_priority(if_score: float, confidence: float, src_ip: str = "",
                     attack_class: str = "Uncertain",
-                    recent_pps: float = 0.0,
-                    prior_sinkhole_flags: int = 0) -> str:
-    import math
-
+                    recent_pps: float = 0.0) -> str:
     base = if_score * confidence
 
     severity = VECTOR_SEVERITY.get(attack_class, 0.5)

@@ -277,7 +277,7 @@ class StateMachine:
                 # Check behavioral DB history for priority and prior offenses
                 _prio          = behavioral.assign_priority(
                     if_score, confidence, src_ip,
-                    prior_sinkhole_flags=self._sinkhole_history.get(src_ip, 0),
+                    attack_class=attack_class,
                 )
                 _prior_offense = behavioral.get_offences(src_ip)
                 _prior_ban     = behavioral.get_ban_level(src_ip)
