@@ -4,12 +4,11 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>A-DDoS</title>
-<link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/style.css?v=10"/>
+<link rel="stylesheet" href="/static/style.css?v=11"/>
 <script src="/static/chart.umd.min.js"></script>
 <style>
 /* ── Modal sizing ── */
-.modal{min-width:620px;max-width:720px}
+.modal{max-width:720px}
 
 /* ── Date input row ── */
 .date-field{display:flex;flex-direction:column;gap:6px;flex:1}
@@ -213,6 +212,7 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
         <thead>
           <tr>
             <th>IP Address</th>
+            <th>Priority</th>
             <th>Phase</th>
             <th>Attack Vector</th>
             <th>IF Score</th>
@@ -223,7 +223,7 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
         </thead>
         <tbody id="q-body">
           <tr>
-            <td colspan="7" class="q-empty">
+            <td colspan="8" class="q-empty">
               <div style="font-size:16px;margin-bottom:8px;font-weight:500;">No active mitigations</div>
               <div style="font-size:11px;color:var(--sub2)">System is operating normally.</div>
             </td>

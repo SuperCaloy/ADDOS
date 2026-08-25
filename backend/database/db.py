@@ -40,7 +40,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             event_type      TEXT DEFAULT 'transition',
             reason          TEXT,
             detection_ms    REAL,
-            mitigation_ms   REAL
+            mitigation_ms   REAL,
+            session_id      TEXT
         );
 
         CREATE TABLE IF NOT EXISTS mitigation_events_archive (
@@ -56,7 +57,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             phase           TEXT,
             is_manual       INTEGER DEFAULT 0,
             event_type      TEXT DEFAULT 'transition',
-            reason          TEXT
+            reason          TEXT,
+            session_id      TEXT
         );
 
         CREATE TABLE IF NOT EXISTS traffic_summary (
@@ -208,7 +210,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             duration_sec    INTEGER NOT NULL DEFAULT 0,
             unblock_reason  TEXT    NOT NULL,
             ban_level       INTEGER NOT NULL DEFAULT 0,
-            offence_count   INTEGER NOT NULL DEFAULT 1
+            offence_count   INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_history_ip
@@ -265,11 +267,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
     except sqlite3.OperationalError:
         pass
     try:
-        conn.execute("ALTER TABLE ip_attack_history ADD COLUMN offence_count INTEGER NOT NULL DEFAULT 1")
+        conn.execute("ALTER TABLE ip_attack_history ADD COLUMN offence_count INTEGER NOT NULL DEFAULT 0")
         conn.commit()
     except sqlite3.OperationalError:
         pass
-
     # controller metrics columns
     for col, typ in [("ctrl_cpu_percent", "REAL NOT NULL DEFAULT 0"),
                      ("ctrl_mem_mb",      "REAL NOT NULL DEFAULT 0"),
@@ -324,6 +325,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
             pass
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN reason TEXT")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN session_id TEXT")
             conn.commit()
         except sqlite3.OperationalError:
             pass

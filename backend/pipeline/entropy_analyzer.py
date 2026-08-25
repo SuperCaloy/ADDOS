@@ -27,6 +27,7 @@ TEA_VARIANCE_STABLE_THRESHOLD = 0.01
 TEA_ROBUST_REJECT_SIGMA = 3.0
 TEA_FEEDBACK_UNLOCK_STREAK = 10
 TEA_BASELINE_HISTORY_MAX = 60
+TEA_UNIFORM_SHARE_SIGMA = TEA_CROWD_SIGMA
 
 
 def _shannon_entropy(values: list[float]) -> float:
@@ -129,7 +130,7 @@ class _AdaptiveBaseline:
             return TEA_ATTACK_SIGMA
         cv = self._std / (abs(self._mean) + 1e-9)
         sigma = TEA_ATTACK_SIGMA + cv * 1.5
-        return max(2.0, min(3.0, sigma))
+        return max(2.0, min(2.8, sigma))
 
     def dynamic_crowd_sigma(self) -> float:
         if self._variance is None or self._mean is None or self._mean == 0:
@@ -168,6 +169,7 @@ class _GlobalEntropyState:
         self.size_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.proto_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.share_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.last_result = {}
 
     def observe(self, snapshot: dict) -> None:
@@ -177,6 +179,7 @@ class _GlobalEntropyState:
         self.size_base.push(snapshot["size_var"])
         self.intensity_base.push(snapshot["intensity_var"])
         self.proto_base.push(snapshot["proto_entropy"])
+        self.share_base.push(snapshot["uniform_share"])
 
     def push(self, snapshot: dict) -> None:
         self.observe(snapshot)
@@ -197,6 +200,7 @@ class _GlobalEntropyState:
             self.size_base.is_learned
             and self.intensity_base.is_learned
             and self.proto_base.is_learned
+            and self.share_base.is_learned
         )
 
 
@@ -229,6 +233,15 @@ class _IpEntropyProfile:
         return _shannon_entropy(vals)
 
     def verdict(self) -> str:
+        """
+        Evaluate traffic profile for a specific IP.
+        
+        Note: The per-IP verdict relies on fine-grained trend/entropy analysis
+        over a short sliding window, whereas the global gate (is_attack_pattern) 
+        relies on aggregate variance collapse across all traffic. They are kept
+        separate because the global gate detects the onset of a large attack, 
+        while this method tracks individual IP behavior.
+        """
         if len(self._pps_samples) < IP_PROFILE_MIN_SAMPLES:
             return "uncertain"
 
@@ -260,6 +273,10 @@ class _IpEntropyProfile:
             self._last_verdict = "attack"
             return "attack"
 
+        if rising or repetitive:
+            self._last_verdict = "attack"
+            return "attack"
+
         if declining or low_mean:
             self._last_verdict = "normal"
             return "normal"
@@ -278,15 +295,21 @@ class EntropyAnalyzer:
         self._global_state = _GlobalEntropyState(TEA_WINDOW_SIZE)
         self._ip_profiles: dict[str, _IpEntropyProfile] = {}
         self._fb_normal_streak = 0
+        self._would_block_count = 0
         
         self._flow_buffer = deque(maxlen=2000)
         self._last_eval_time = 0.0
-        self._eval_interval = 1.0
+        self._eval_interval = 0.5
 
     @property
     def fb_normal_streak(self) -> int:
         with self._lock:
             return self._fb_normal_streak
+
+    @property
+    def would_block_count(self) -> int:
+        with self._lock:
+            return self._would_block_count
 
     @property
     def is_locked(self) -> bool:
@@ -295,6 +318,7 @@ class EntropyAnalyzer:
                 self._global_state.size_base.locked
                 and self._global_state.intensity_base.locked
                 and self._global_state.proto_base.locked
+                and self._global_state.share_base.locked
             )
 
     def update(self, dpid: int, flows: list[dict]) -> dict:
@@ -332,8 +356,8 @@ class EntropyAnalyzer:
             bps = float(f.get("byte_count_per_second", 0))
             
             avg_bytes_per_pkt = byt / (pkt + eps)
-            pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt / (bps + eps), 0))
-            flow_intensity = math.log1p(max(pkt * bps, 0))
+            pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt, 0))
+            flow_intensity = math.log1p(max(pps * bps, 0))
             
             sizes.append(pkt_size_uniformity)
             intensities.append(flow_intensity)
@@ -345,10 +369,26 @@ class EntropyAnalyzer:
         intensity_var = float(np.var(intensities)) if intensities else 0.0
         proto_entropy = _shannon_entropy(list(protos.values()))
 
+        if sizes:
+            med_size  = float(np.median(sizes))
+            med_int   = float(np.median(intensities))
+            mad_size  = float(np.median(np.abs(np.array(sizes) - med_size)))
+            mad_int   = float(np.median(np.abs(np.array(intensities) - med_int)))
+            tol_size  = max(0.02, 3.0 * mad_size)
+            tol_int   = max(0.10, 3.0 * mad_int)
+            uniform_n = sum(
+                1 for s, i in zip(sizes, intensities)
+                if abs(s - med_size) <= tol_size and abs(i - med_int) <= tol_int
+            )
+            uniform_share = uniform_n / len(sizes)
+        else:
+            uniform_share = 0.0
+
         snapshot = {
             "size_var":  size_var,
             "intensity_var": intensity_var,
             "proto_entropy": proto_entropy,
+            "uniform_share": uniform_share,
             "unique_ips": len(unique_ips),
         }
 
@@ -360,6 +400,7 @@ class EntropyAnalyzer:
             size_base   = state.size_base
             intensity_base   = state.intensity_base
             proto_base   = state.proto_base
+            share_base   = state.share_base
 
             if not state.is_ready():
                 state.learn(snapshot)
@@ -376,6 +417,9 @@ class EntropyAnalyzer:
                 attack_sigma = TEA_ATTACK_SIGMA
                 size_collapsed  = False
                 intensity_collapsed = False
+                size_surge = False
+                intensity_surge = False
+                mechanized_cluster = False
             else:
                 size_z  = size_base.z_score(curr["size_var"])
                 intensity_z  = intensity_base.z_score(curr["intensity_var"])
@@ -384,6 +428,11 @@ class EntropyAnalyzer:
                 size_collapsed  = size_base.is_low(curr["size_var"], attack_sigma)
                 intensity_collapsed = intensity_base.is_low(curr["intensity_var"], attack_sigma)
                 proto_collapsed = proto_base.is_low(curr["proto_entropy"], attack_sigma)  # protocol concentration lowers entropy
+                size_surge = size_base.is_high(curr["size_var"], attack_sigma)
+                intensity_surge = intensity_base.is_high(curr["intensity_var"], attack_sigma)
+                share_z = share_base.z_score(curr["uniform_share"])
+                mechanized_cluster = share_base.is_high(curr["uniform_share"], TEA_UNIFORM_SHARE_SIGMA)
+                proto_surge = proto_base.is_high(curr["proto_entropy"], TEA_UNIFORM_SHARE_SIGMA)
 
         size_delta  = curr["size_var"]  - prev["size_var"]
         intensity_delta = curr["intensity_var"] - prev["intensity_var"]
@@ -397,24 +446,29 @@ class EntropyAnalyzer:
                 state.last_result = res
             return res
 
-        is_attack_pattern = size_collapsed or intensity_collapsed or proto_collapsed
+        is_attack_pattern = (
+            mechanized_cluster or proto_surge or proto_collapsed
+            or size_collapsed or intensity_collapsed
+            or size_surge or intensity_surge
+        )
         is_flash_crowd    = False
+
+        if is_attack_pattern:
+            if ((size_collapsed or size_surge) and (intensity_collapsed or intensity_surge)) or (
+                mechanized_cluster and (
+                    size_collapsed or size_surge or intensity_collapsed
+                    or intensity_surge or proto_collapsed or proto_surge
+                )
+            ):
+                confidence = "high"  # Multi-dimension confirmation
+            else:
+                confidence = "moderate"  # Single dimension fired
+        else:
+            confidence = "low"
 
         if not is_attack_pattern:
             with self._lock:
                 state.learn(snapshot)
-
-        if is_attack_pattern:
-            if size_collapsed and intensity_collapsed:
-                confidence = "high"  # Both collapsed
-            elif proto_collapsed and (size_collapsed or intensity_collapsed):
-                confidence = "high"  # Proto + one other
-            else:
-                confidence = "moderate"  # Only one collapsed
-        elif size_collapsed or intensity_collapsed or proto_collapsed:
-            confidence = "moderate"
-        else:
-            confidence = "low"
 
         result = {
             "size_var":  round(curr["size_var"],  4),
@@ -425,6 +479,11 @@ class EntropyAnalyzer:
             "size_zscore":   round(size_z,  4),
             "intensity_zscore":  round(intensity_z,  4),
             "proto_zscore":  round(proto_z, 4),
+            "uniform_share": round(curr["uniform_share"], 4),
+            "uniform_share_zscore":  round(share_z, 4),
+            "mechanized_cluster":    mechanized_cluster,
+            "size_surge":    size_surge,
+            "intensity_surge":   intensity_surge,
             "baseline_mean_size":  round(size_base.mean, 4),
             "baseline_mean_intensity":  round(intensity_base.mean, 4),
             "unique_ips":         curr["unique_ips"],
@@ -446,6 +505,8 @@ class EntropyAnalyzer:
                 "size_z": result["size_zscore"],
                 "intensity_z": result["intensity_zscore"],
                 "proto_z": result["proto_zscore"],
+                "uniform_share": result["uniform_share"],
+                "mechanized_cluster": mechanized_cluster,
                 "unique_ips": result["unique_ips"],
                 "is_attack": is_attack_pattern,
                 "is_flash_crowd": is_flash_crowd,
@@ -461,28 +522,31 @@ class EntropyAnalyzer:
         return result
 
     def should_submit(self, tea_result: dict, is_flood_prefilter_flagged: bool) -> bool:
-        if is_flood_prefilter_flagged:
-            return True
-        if not tea_result.get("is_learned", False):
-            return True
-        if tea_result.get("is_attack_pattern"):
-            return True
-        conf = tea_result.get("confidence", "low")
-        if conf == "moderate":
-            return True
-        return False  # TEA confident it's low (flash crowd, normal) -> block gate
+        would_block = (
+            not is_flood_prefilter_flagged
+            and tea_result.get("is_learned", False)
+            and not tea_result.get("is_attack_pattern", False)
+            and tea_result.get("confidence", "low") == "low"
+        )
+        if would_block:
+            with self._lock:
+                self._would_block_count += 1
+            log.info("TEA gate advisory: would have blocked (total=%d)", self._would_block_count)
+        return True
 
     def confirm_normal(self, dpid: int = 0) -> None:
         with self._lock:
             self._global_state.size_base.unlock()
             self._global_state.intensity_base.unlock()
             self._global_state.proto_base.unlock()
+            self._global_state.share_base.unlock()
 
     def confirm_attack(self, dpid: int = 0) -> None:
         with self._lock:
             self._global_state.size_base.lock()
             self._global_state.intensity_base.lock()
             self._global_state.proto_base.lock()
+            self._global_state.share_base.lock()
 
     def feedback(self, is_anomaly: bool) -> None:
         with self._lock:
@@ -491,6 +555,7 @@ class EntropyAnalyzer:
                 self._global_state.size_base.lock()
                 self._global_state.intensity_base.lock()
                 self._global_state.proto_base.lock()
+                self._global_state.share_base.lock()
                 return
             self._fb_normal_streak += 1
             if self._fb_normal_streak >= TEA_FEEDBACK_UNLOCK_STREAK:
@@ -498,6 +563,7 @@ class EntropyAnalyzer:
                 self._global_state.size_base.unlock()
                 self._global_state.intensity_base.unlock()
                 self._global_state.proto_base.unlock()
+                self._global_state.share_base.unlock()
 
     def update_ip(self, src_ip: str, pps: float, bps: float) -> None:
         with self._lock:
@@ -531,6 +597,11 @@ class EntropyAnalyzer:
             "size_zscore":   0.0,
             "intensity_zscore":  0.0,
             "proto_zscore":  0.0,
+            "uniform_share": 0.0,
+            "uniform_share_zscore":  0.0,
+            "mechanized_cluster":    False,
+            "size_surge":    False,
+            "intensity_surge":   False,
             "baseline_mean_size":  0.0,
             "baseline_mean_intensity":  0.0,
             "unique_ips":         0,

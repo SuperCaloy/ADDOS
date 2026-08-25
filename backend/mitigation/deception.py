@@ -118,7 +118,8 @@ class DeceptionModule:
         # and escalation can never react to RF resolving the vector.
         with self._lock:
             if src_ip in self._entries:
-                self._entries[src_ip].if_score   = if_score
+                if if_score > self._entries[src_ip].if_score:
+                    self._entries[src_ip].if_score = if_score
                 self._entries[src_ip].confidence = confidence
 
     def is_sinkholes(self, src_ip: str) -> bool:
@@ -132,7 +133,7 @@ class DeceptionModule:
                     "src_ip":        e.src_ip,
                     "attack_vector": e.attack_vector,
                     "if_score":      round(e.if_score, 4),
-                    "confidence":    round(e.confidence * 100, 1),
+                    "confidence":    round(e.confidence * 100, 4),
                     "elapsed_sec":   int(e.elapsed()),
                     "remaining_sec": max(0, int(SINKHOLE_OBSERVE_SECONDS - e.elapsed())),
                     "recent_pps":    round(e.recent_pps, 2),

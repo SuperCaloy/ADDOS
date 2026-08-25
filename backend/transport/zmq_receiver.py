@@ -173,6 +173,7 @@ def _parse_and_route(raw: bytes) -> None:
                 "packet_count":           float(flow_stats.get("packet_count", 0.0)),
                 "byte_count":             float(flow_stats.get("byte_count", 0.0)),
                 "ip_proto":               int(flow_stats.get("ip_proto", 0)),
+                "_ts":                    time.monotonic(),
             })
 
         # Update per-IP TEA profile for small-attacker detection
@@ -257,9 +258,19 @@ def _parse_and_route(raw: bytes) -> None:
 
 
 def _clear_switch_flow_buffers() -> None:
-    """Clear per-switch flow buffers, called once per poll cycle."""
+    """Evict per-switch flow entries older than one poll cycle.
+
+    Entries newer than 1s are kept so flows arriving between TEA's
+    snapshot and this clear are not lost.
+    """
+    cutoff = time.monotonic() - 1.0
     with _switch_flows_lock:
-        _switch_flows.clear()
+        for dpid in list(_switch_flows):
+            _switch_flows[dpid] = [
+                f for f in _switch_flows[dpid] if f.get("_ts", 0) > cutoff
+            ]
+            if not _switch_flows[dpid]:
+                del _switch_flows[dpid]
 
 
 def _receiver_loop() -> None:

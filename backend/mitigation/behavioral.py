@@ -1,4 +1,5 @@
 import logging
+import math
 from backend.database import writer
 
 log = logging.getLogger(__name__)
@@ -6,14 +7,21 @@ log = logging.getLogger(__name__)
 # ── Thresholds ─────────────────────────────────────────────────────────────
 # Weighted offense score that triggers direct blackhole (half-life decay, 24h)
 # Score = sum of (2.0 * 0.5^(hours_elapsed/24)) per offense
-# Needs burst/repeat attacks to reach 5.0 - casual probing decays below threshold
-BLACKHOLE_OFFENSE_THRESHOLD = 5.0
+# 5 rapid attacks = 10.0 = blackhole (max persistence)
+BLACKHOLE_OFFENSE_THRESHOLD = 10.0
 
-# IF score that always forces High priority
-HIGH_PRIORITY_IF_THRESHOLD  = 0.75
+# Attack vector severity weights (higher = more severe)
+VECTOR_SEVERITY = {
+    "SYN Flood":  1.0,
+    "ICMP Flood": 0.8,
+    "UDP Flood":  0.9,
+    "Uncertain":  0.5,
+}
 
-# IF score that forces High priority only for repeat offenders (2+ offenses)
-REPEAT_HIGH_PRIORITY_IF     = 0.65
+# Priority tier thresholds (composite severity score)
+PRIORITY_CRITICAL_THRESHOLD = 0.85
+PRIORITY_HIGH_THRESHOLD     = 0.65
+PRIORITY_MEDIUM_THRESHOLD   = 0.45
 
 
 def record_offense(src_ip: str, attack_vector: str, if_score: float,
@@ -104,31 +112,29 @@ def should_blackhole(src_ip: str, current_ban_level: int) -> bool:
     return False
 
 
-# Tentative reputation threshold. Unconfirmed, prefilter based only.
-# Deliberately higher bar than confirmed repeat offender (2), since this
-# signal has no ML confirmation behind it.
-SINKHOLE_FLAG_HIGH_PRIORITY = 3
-
-
 def assign_priority(if_score: float, confidence: float, src_ip: str = "",
-                    prior_sinkhole_flags: int = 0) -> str:
-    # High if: confirmed attack (IF>=0.75 AND conf>=0.80)
-    #          repeat offender (2+ offences) - confirmed, ML backed
-    #          persistent attacker (decay score >= 3.0) - confirmed, ML backed
-    #          repeatedly unscored/sinkholed (3+ times) - unconfirmed, tentative
-    if if_score >= HIGH_PRIORITY_IF_THRESHOLD and confidence >= 0.80:
-        return "High"
+                    attack_class: str = "Uncertain",
+                    recent_pps: float = 0.0) -> str:
+    base = if_score * confidence
 
+    severity = VECTOR_SEVERITY.get(attack_class, 0.5)
+    vector_bonus = (severity - 0.5) * 0.5
+
+    volume_factor = 0.0
+    if recent_pps > 10:
+        volume_factor = min(0.15, math.log10(recent_pps / 10) * 0.05)
+
+    reputation_factor = 0.0
     if src_ip:
-        if get_offences(src_ip) >= 2:
-            log.debug("Behavioral: %s → High (repeat offender)", src_ip)
-            return "High"
-        if get_decay_score(src_ip) >= 3.0:
-            log.debug("Behavioral: %s → High (persistent, decay=%.2f)", src_ip, get_decay_score(src_ip))
-            return "High"
-        if prior_sinkhole_flags >= SINKHOLE_FLAG_HIGH_PRIORITY:
-            log.debug("Behavioral: %s → High (tentative, sinkhole_flags=%d, unconfirmed)",
-                      src_ip, prior_sinkhole_flags)
-            return "High"
+        decay = get_decay_score(src_ip)
+        reputation_factor = min(0.2, decay * 0.02)
 
+    composite = min(1.0, base + vector_bonus + volume_factor + reputation_factor)
+
+    if composite >= PRIORITY_CRITICAL_THRESHOLD:
+        return "Critical"
+    if composite >= PRIORITY_HIGH_THRESHOLD:
+        return "High"
+    if composite >= PRIORITY_MEDIUM_THRESHOLD:
+        return "Medium"
     return "Low"
