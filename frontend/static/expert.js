@@ -372,6 +372,54 @@ var ExpertPipeline = {
     this.resize();
     window.addEventListener('resize', this.resize.bind(this));
 
+    this._nodeGlows = {};
+    for (var key in this.nodes) {
+      var node = this.nodes[key];
+      var glowCanvas = document.createElement('canvas');
+      glowCanvas.width = 80;
+      glowCanvas.height = 80;
+      var glowCtx = glowCanvas.getContext('2d');
+      glowCtx.shadowBlur = 20;
+      glowCtx.shadowColor = node.colorHex;
+      glowCtx.fillStyle = node.colorHex + '30';
+      glowCtx.beginPath();
+      glowCtx.arc(40, 40, 30, 0, Math.PI * 2);
+      glowCtx.fill();
+      this._nodeGlows[key] = glowCanvas;
+    }
+
+    this._particleSprites = {};
+    var particleColors = ['#F59E0B', '#E11D48', '#14B8A6', '#94A3B8', '#10B981', '#8B5CF6'];
+    particleColors.forEach(function(color) {
+      var pCanvas = document.createElement('canvas');
+      pCanvas.width = 20;
+      pCanvas.height = 20;
+      var pCtx = pCanvas.getContext('2d');
+      pCtx.shadowBlur = 8;
+      pCtx.shadowColor = color;
+      pCtx.fillStyle = color;
+      pCtx.beginPath();
+      pCtx.arc(10, 10, 3.4, 0, Math.PI * 2);
+      pCtx.fill();
+      this._particleSprites[color] = pCanvas;
+    }.bind(this));
+
+    this._feedbackSprites = {};
+    var feedbackColors = ['#E11D48', '#10B981', '#F59E0B', '#8B5CF6'];
+    feedbackColors.forEach(function(color) {
+      var fCanvas = document.createElement('canvas');
+      fCanvas.width = 24;
+      fCanvas.height = 24;
+      var fCtx = fCanvas.getContext('2d');
+      fCtx.shadowBlur = 12;
+      fCtx.shadowColor = color;
+      fCtx.fillStyle = color;
+      fCtx.beginPath();
+      fCtx.arc(12, 12, 4, 0, Math.PI * 2);
+      fCtx.fill();
+      this._feedbackSprites[color] = fCanvas;
+    }.bind(this));
+
     this.canvas.addEventListener('click', function(e) {
       var rect = this.canvas.getBoundingClientRect();
       var cx = e.clientX - rect.left;
@@ -384,6 +432,15 @@ var ExpertPipeline = {
         }
       }
     }.bind(this));
+
+    this._lastFrameTime = 0;
+    this._frameInterval = 1000 / 30;
+    this._isOffscreen = false;
+
+    var observer = new IntersectionObserver(function(entries) {
+      this._isOffscreen = entries[0].intersectionRatio === 0;
+    }.bind(this), { threshold: 0 });
+    observer.observe(this.canvas);
 
     this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
   },
@@ -405,11 +462,13 @@ var ExpertPipeline = {
                 attackClass.indexOf('ICMP') >= 0 ? '#E11D48' :
                 attackClass.indexOf('UDP') >= 0 ? '#14B8A6' : '#94A3B8';
 
+    var now = performance.now();
     var forwardPaths = this.paths.filter(function(p) { return !p.feedback && p.kind !== 'redirect'; });
     forwardPaths.forEach(function(path, index) {
       this.particles.push({
-        from: path.from, to: path.to, progress: -index * 1.1,
-        speed: 0.022,
+        from: path.from, to: path.to,
+        spawnTime: now, delay: index * 50,
+        speed: 1.32,
         color: color, isFeedback: false
       });
     }.bind(this));
@@ -421,8 +480,9 @@ var ExpertPipeline = {
     if (!learnPath) return;
     var color = isAnomaly ? '#E11D48' : '#10B981';
     this.feedbackParticles.push({
-      from: learnPath.from, to: learnPath.to, progress: 0,
-      speed: 0.02 + Math.random() * 0.01,
+      from: learnPath.from, to: learnPath.to,
+      spawnTime: performance.now(), delay: 0,
+      speed: 1.2 + Math.random() * 0.6,
       color: color, isFeedback: true
     });
   },
@@ -433,8 +493,9 @@ var ExpertPipeline = {
     var enforcePath = this.paths.find(function(p) { return p.feedback && p.kind === 'enforce'; });
     if (!enforcePath) return;
     this.feedbackParticles.push({
-      from: enforcePath.from, to: enforcePath.to, progress: 0,
-      speed: 0.018 + Math.random() * 0.008,
+      from: enforcePath.from, to: enforcePath.to,
+      spawnTime: performance.now(), delay: 0,
+      speed: 1.08 + Math.random() * 0.48,
       color: '#F59E0B', isFeedback: true
     });
   },
@@ -444,8 +505,9 @@ var ExpertPipeline = {
     var redirectPath = this.paths.find(function(p) { return p.feedback && p.kind === 'redirect'; });
     if (!redirectPath) return;
     this.feedbackParticles.push({
-      from: redirectPath.from, to: redirectPath.to, progress: 0,
-      speed: 0.016 + Math.random() * 0.008,
+      from: redirectPath.from, to: redirectPath.to,
+      spawnTime: performance.now(), delay: 0,
+      speed: 0.96 + Math.random() * 0.48,
       color: '#8B5CF6', isFeedback: true
     });
   },
@@ -482,7 +544,22 @@ var ExpertPipeline = {
     }
   },
 
-  drawScene: function() {
+  drawScene: function(timestamp) {
+    if (!timestamp) timestamp = performance.now();
+    var elapsed = timestamp - this._lastFrameTime;
+    if (elapsed < this._frameInterval) {
+      this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
+      return;
+    }
+    this._lastFrameTime = timestamp - (elapsed % this._frameInterval);
+
+    if (this._isOffscreen) {
+      if (this.particles.length > 60) this.particles.splice(0, this.particles.length - 60);
+      if (this.feedbackParticles.length > 30) this.feedbackParticles.splice(0, this.feedbackParticles.length - 30);
+      this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
+      return;
+    }
+
     var ctx = this.ctx;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     var scaleY = this.canvas.height / this.VIRTUAL_H;
@@ -551,27 +628,35 @@ var ExpertPipeline = {
       }
     }.bind(this));
 
+    if (this.particles.length > 60) this.particles.splice(0, this.particles.length - 60);
+    var currentTime = performance.now();
     for (var i = this.particles.length - 1; i >= 0; i--) {
       var p = this.particles[i];
-      p.progress += p.speed;
+      var age = currentTime - p.spawnTime - p.delay;
+      if (age < 0) continue;
+      p.progress = (age / 1000) * p.speed;
       if (p.progress >= 1) { this.particles.splice(i, 1); continue; }
-      if (p.progress < 0) continue;
       var s = this._coords(this.nodes[p.from].x, this.nodes[p.from].y);
       var e = this._coords(this.nodes[p.to].x, this.nodes[p.to].y);
       var px = s.x + (e.x - s.x) * p.progress;
       var py = s.y + (e.y - s.y) * p.progress;
-      ctx.beginPath();
-      ctx.arc(px, py, 3.4, 0, Math.PI * 2);
-      ctx.fillStyle = p.color;
-      ctx.shadowColor = p.color;
-      ctx.shadowBlur = 8;
-      ctx.fill();
-      ctx.shadowBlur = 0;
+      var sprite = this._particleSprites[p.color];
+      if (sprite) {
+        ctx.drawImage(sprite, px - 10, py - 10);
+      } else {
+        ctx.beginPath();
+        ctx.arc(px, py, 3.4, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+      }
     }
 
+    if (this.feedbackParticles.length > 30) this.feedbackParticles.splice(0, this.feedbackParticles.length - 30);
     for (var i = this.feedbackParticles.length - 1; i >= 0; i--) {
       var fp = this.feedbackParticles[i];
-      fp.progress += fp.speed;
+      var fAge = currentTime - fp.spawnTime - fp.delay;
+      if (fAge < 0) continue;
+      fp.progress = (fAge / 1000) * fp.speed;
       if (fp.progress >= 1) { this.feedbackParticles.splice(i, 1); continue; }
       var s = this._coords(this.nodes[fp.from].x, this.nodes[fp.from].y);
       var e = this._coords(this.nodes[fp.to].x, this.nodes[fp.to].y);
@@ -585,13 +670,15 @@ var ExpertPipeline = {
         px = cX + (e.x - cX) * (fp.progress - 0.5) * 2;
         py = cY + (e.y - cY) * (fp.progress - 0.5) * 2;
       }
-      ctx.beginPath();
-      ctx.arc(px, py, 4, 0, Math.PI * 2);
-      ctx.fillStyle = fp.color;
-      ctx.shadowColor = fp.color;
-      ctx.shadowBlur = 12;
-      ctx.fill();
-      ctx.shadowBlur = 0;
+      var fSprite = this._feedbackSprites[fp.color];
+      if (fSprite) {
+        ctx.drawImage(fSprite, px - 12, py - 12);
+      } else {
+        ctx.beginPath();
+        ctx.arc(px, py, 4, 0, Math.PI * 2);
+        ctx.fillStyle = fp.color;
+        ctx.fill();
+      }
     }
 
     var time = Date.now();
@@ -604,17 +691,13 @@ var ExpertPipeline = {
       var glow = this.nodeGlow[key] || 0;
       if (key === 'deception') glow = this._hasSinkhole ? glow : 0;
 
-      // Glow ring (dark mode only, when active)
       if (!this.isLightMode && glow > 0.05) {
-        ctx.beginPath();
-        ctx.arc(c.x, c.y, 30, 0, Math.PI * 2);
-        ctx.shadowBlur = 20;
-        ctx.shadowColor = node.colorHex;
-        var glowHex = Math.round(glow * 60).toString(16);
-        if (glowHex.length < 2) glowHex = '0' + glowHex;
-        ctx.fillStyle = node.colorHex + glowHex;
-        ctx.fill();
-        ctx.shadowBlur = 0;
+        var glowSprite = this._nodeGlows[key];
+        if (glowSprite) {
+          ctx.globalAlpha = glow;
+          ctx.drawImage(glowSprite, c.x - 40, c.y - 40);
+          ctx.globalAlpha = 1;
+        }
       }
 
       // Selected pulsing ring
@@ -990,22 +1073,12 @@ function renderMLPanel(ifData, rfData, teaData) {
       const sizeRow = document.getElementById('tea-size');
       if (sizeRow) {
         sizeRow.querySelector('.zscore-val').textContent = teaGlobal.size_var.toFixed(4);
-        const sf = sizeRow.querySelector('.zscore-fill');
-        sf.className = `zscore-fill ${maxSizeZ >= 2 ? 'anomaly' : ''}`;
-        sf.style.width = `${sizeZPct}%`;
-        const sStats = sizeRow.querySelector('.zscore-stats');
-        if (sStats) sStats.querySelector('span:first-child').textContent = `Z-score: ${maxSizeZ >= 0 ? '+' : ''}${maxSizeZ.toFixed(1)}z`;
         const threshold = sizeRow.querySelector('.zscore-threshold');
         if (threshold) { threshold.style.left = thresholdPct + '%'; }
       }
       const intRow = document.getElementById('tea-int');
       if (intRow) {
         intRow.querySelector('.zscore-val').textContent = teaGlobal.intensity_var.toFixed(4);
-        const ifill = intRow.querySelector('.zscore-fill');
-        ifill.className = `zscore-fill ${maxIntZ >= 2 ? 'anomaly' : ''}`;
-        ifill.style.width = `${intZPct}%`;
-        const iStats = intRow.querySelector('.zscore-stats');
-        if (iStats) iStats.querySelector('span:first-child').textContent = `Z-score: ${maxIntZ >= 0 ? '+' : ''}${maxIntZ.toFixed(1)}z`;
         const threshold = intRow.querySelector('.zscore-threshold');
         if (threshold) { threshold.style.left = thresholdPct + '%'; }
       }
@@ -1103,62 +1176,73 @@ function renderMitigationPanel(smStates, deception, rg) {
   const el = document.getElementById('expert-mitigation-content');
   if (!el) return;
 
-  // Count IPs per phase
   const phaseCounts = { 1: 0, 2: 0, 3: 0 };
   Object.values(smStates).forEach(s => { if (s.phase) phaseCounts[s.phase] = (phaseCounts[s.phase] || 0) + 1; });
 
   const hasActiveFlow = Object.values(smStates).length > 0;
 
-  let html = `<div class="mitigation-phases ${hasActiveFlow ? 'active-flow' : ''}">`;
-  html += `
-    <div class="phase-box quarantine">
-      <div class="phase-label">Quarantine</div>
-      <div class="phase-count">${phaseCounts[1]}</div>
-      <div class="phase-action">Rate Limited</div>
-    </div>
-    <div class="phase-box ban">
-      <div class="phase-label">Time Ban</div>
-      <div class="phase-count">${phaseCounts[2]}</div>
-      <div class="phase-action">Blocked</div>
-    </div>
-    <div class="phase-box blackhole">
-      <div class="phase-label">Blackhole</div>
-      <div class="phase-count">${phaseCounts[3]}</div>
-      <div class="phase-action">1h TTL</div>
-    </div>
-  </div>`;
-
-  // Active IPs detail
-  const activeIPs = Object.entries(smStates);
-  if (activeIPs.length) {
-    const renderIPs = activeIPs.slice(0, 100);
-    const countText = activeIPs.length > 100 ? ` (Showing 100 of ${activeIPs.length})` : '';
-    html += `<div class="ml-section"><div class="ml-section-title">Active States${countText}</div><div class="terminal-feed">`;
-    renderIPs.forEach(([ip, s]) => {
-      const now = new Date().toLocaleTimeString('en-US', { hour12: false });
-      const pri = s.priority || 'Low';
-      const priClass = pri === 'Critical' ? 't-crit' : pri === 'High' ? 't-alert' : pri === 'Medium' ? 't-stat' : '';
-      html += `
-        <div class="terminal-line">
-          <span class="t-time">[${now}]</span>
-          <span class="t-ip">${ip}</span>
-          ${priClass ? `<span class="${priClass}">${pri.toUpperCase()}</span>` : `<span class="t-stat">${pri.toUpperCase()}</span>`}
-          <span class="t-crit">PHASE_${s.phase}</span>
-          <span class="t-stat">IF=${s.if_score.toFixed(4)}</span>
-          <span class="t-stat">PPS=${(s.recent_pps || 0).toFixed(1)}</span>
-          <span class="t-alert">ACT=${s.action.toUpperCase()}</span>
-          ${s.ttl_sec != null ? `<span class="t-stat">TTL=${s.ttl_sec}s</span>` : ''}
-        </div>`;
-    });
-    html += '</div></div>';
+  if (!el.dataset.init) {
+    let html = `<div class="mitigation-phases ${hasActiveFlow ? 'active-flow' : ''}">`;
+    html += `
+      <div class="phase-box quarantine">
+        <div class="phase-label">Quarantine</div>
+        <div class="phase-count" data-phase="1">${phaseCounts[1]}</div>
+        <div class="phase-action">Rate Limited</div>
+      </div>
+      <div class="phase-box ban">
+        <div class="phase-label">Time Ban</div>
+        <div class="phase-count" data-phase="2">${phaseCounts[2]}</div>
+        <div class="phase-action">Blocked</div>
+      </div>
+      <div class="phase-box blackhole">
+        <div class="phase-label">Blackhole</div>
+        <div class="phase-count" data-phase="3">${phaseCounts[3]}</div>
+        <div class="phase-action">1h TTL</div>
+      </div>
+    </div>`;
+    html += `<div class="ml-section"><div class="ml-section-title">Active States</div><div class="terminal-feed" id="mitigation-ip-list"></div></div>`;
+    el.innerHTML = html;
+    el.dataset.init = '1';
   }
 
-  // Deception sinkholes section removed per B7 scope reduction — use ip-drawer for per-IP detail
+  const phasesEl = el.querySelector('.mitigation-phases');
+  if (phasesEl) {
+    if (hasActiveFlow && !phasesEl.classList.contains('active-flow')) phasesEl.classList.add('active-flow');
+    if (!hasActiveFlow && phasesEl.classList.contains('active-flow')) phasesEl.classList.remove('active-flow');
+  }
 
-  // Resource guard tier removed from expert panel per Item 1
-  // (node remains on canvas)
-  
-  el.innerHTML = html;
+  const phaseCountEls = el.querySelectorAll('.phase-count');
+  phaseCountEls.forEach(phaseEl => {
+    const phase = parseInt(phaseEl.dataset.phase);
+    phaseEl.textContent = phaseCounts[phase];
+  });
+
+  const ipListEl = document.getElementById('mitigation-ip-list');
+  if (ipListEl) {
+    const activeIPs = Object.entries(smStates);
+    const renderIPs = activeIPs.slice(0, 20);
+    const currentCount = ipListEl.children.length;
+    if (currentCount !== renderIPs.length || renderIPs.length === 0) {
+      let ipHtml = '';
+      renderIPs.forEach(([ip, s]) => {
+        const now = new Date().toLocaleTimeString('en-US', { hour12: false });
+        const pri = s.priority || 'Low';
+        const priClass = pri === 'Critical' ? 't-crit' : pri === 'High' ? 't-alert' : pri === 'Medium' ? 't-stat' : '';
+        ipHtml += `
+          <div class="terminal-line">
+            <span class="t-time">[${now}]</span>
+            <span class="t-ip">${ip}</span>
+            ${priClass ? `<span class="${priClass}">${pri.toUpperCase()}</span>` : `<span class="t-stat">${pri.toUpperCase()}</span>`}
+            <span class="t-crit">PHASE_${s.phase}</span>
+            <span class="t-stat">IF=${s.if_score.toFixed(4)}</span>
+            <span class="t-stat">PPS=${(s.recent_pps || 0).toFixed(1)}</span>
+            <span class="t-alert">ACT=${s.action.toUpperCase()}</span>
+            ${s.ttl_sec != null ? `<span class="t-stat">TTL=${s.ttl_sec}s</span>` : ''}
+          </div>`;
+      });
+      ipListEl.innerHTML = ipHtml;
+    }
+  }
 }
 
 function exportExpertSnapshot() {

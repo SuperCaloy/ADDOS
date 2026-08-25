@@ -54,6 +54,7 @@ status: verified
 - [[bugs/reputation-blackhole-bypass]] - P13: reputation >= 10 not triggering blackhole
 - [[bugs/attacker-count-dropoff]] - P14: only 15-18 attackers detected instead of 20
 - [[bugs/offence-counter-bug-fix]] - Offence counter incrementing on every scoring cycle instead of per re-offence
+- [[bugs/expert-mode-freeze-regression]] - Expert Mode freeze after TEA verdict fix
 
 ### Mitigation
 
@@ -76,3 +77,4 @@ status: verified
 - [[tasks/light-mode-accessibility]] - Light mode accessibility
 - [[tasks/professional-tone-rewrite]] - Professional tone rewrite
 - [[tasks/ui-ux-overhaul]] - UI/UX overhaul
+- [[tasks/expert-mode-freeze-fix-2026-08-24]] - Expert Mode freeze fix and TEA dynamic UI plan

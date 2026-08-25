@@ -442,7 +442,7 @@ body.light .cal-nav:hover { background: var(--border); color: var(--text); }
   position: absolute; left: 50%; top: -2px; bottom: -2px; width: 2px; background: var(--track-mid); border-radius: 1px;
 }
 .zscore-fill {
-  position: absolute; left: 50%; top: 0; bottom: 0; background: var(--blue); transition: width 0.3s ease; border-radius: 0 4px 4px 0;
+  position: absolute; left: 50%; top: 0; bottom: 0; background: var(--blue); transition: width 0.5s ease; border-radius: 0 4px 4px 0;
 }
 .zscore-fill.anomaly { background: var(--red); }
 .zscore-stats { display: flex; gap: 16px; font-size: 11px; color: var(--sub2); font-family: var(--mono); margin-top: 4px; }
