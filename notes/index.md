@@ -1,6 +1,6 @@
 ---
 created: 2026-08-23
-last-updated: 2026-08-24
+last-updated: 2026-08-25
 status: verified
 ---
 
@@ -17,6 +17,7 @@ status: verified
 - [[known-issues/]] - Known issues and anomaly detection research
 - [[mitigation/]] - Mitigation system fixes and behavioral scoring
 - [[overview/]] - Architecture and project overview
+- [[research/]] - Literature research and benchmark precedents
 - [[tasks/]] - Implementation plans and task tracking
 - [[topology/]] - Network topology and system mapping
 - [[ui-ux/]] - UI/UX design guidelines and patterns
@@ -26,6 +27,10 @@ status: verified
 ### Active Regression Plan
 
 - [[tasks/regression-fix-plan-2026-08-24]] - Priority-ordered fix plan for all known system regressions (P0 through P10)
+
+### Research
+
+- [[research/simulation-duration-and-metric-thresholds]] - Literature-grounded simulation duration and SOP 1 / SOP 2 metric targets with citations
 
 ### Backend
 

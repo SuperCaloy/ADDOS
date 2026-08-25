@@ -18,7 +18,7 @@
     "flow_src_intensity"
   ],
   "n_features": 16,
-  "threshold": 0.5992241858026261,
+  "threshold": 0.6092241858026261,
   "score_sign": "negated",
   "score_formula": "if_score = -model.score_samples(X)",
   "anomaly_rule": "is_anomaly = (if_score >= threshold)",

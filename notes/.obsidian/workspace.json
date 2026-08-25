@@ -27,12 +27,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "tasks/tea-verdict-fix-plan-2026-08-24.md",
+                "file": "research/simulation-duration-and-metric-thresholds.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "tea-verdict-fix-plan-2026-08-24"
+              "title": "simulation-duration-and-metric-thresholds"
             }
           }
         ],
@@ -202,9 +202,11 @@
   },
   "active": "4562981150c7325f",
   "lastOpenFiles": [
+    "tasks/tea-verdict-fix-plan-2026-08-24.md",
+    "research/simulation-duration-and-metric-thresholds.md",
+    "research",
     "bugs/expert-mode-freeze-regression.md",
     "tasks/expert-mode-freeze-fix-2026-08-24.md",
-    "tasks/tea-verdict-fix-plan-2026-08-24.md",
     "decisions/tea-state-persistence-session-only.md",
     "decisions/mitigation-event-logging-strategy.md",
     "tasks/regression-fix-plan-2026-08-24.md",
@@ -228,7 +230,6 @@
     "bugs/ip-details-zero-values.md",
     "tasks/implementation-plan-fix-batch.md",
     "tasks/professional-tone-rewrite.md",
-    "tasks/bug-fixes-batch-2026-08-24.md",
     "mitigation",
     "tasks/sed5m97Pp",
     "tasks",
