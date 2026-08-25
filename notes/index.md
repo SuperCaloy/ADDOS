@@ -67,6 +67,7 @@ status: verified
 
 ### Tasks
 
+- [[tasks/sixty-minute-benchmark-runner]] - Planned automated 60-minute benchmark runner (scripted waves, auto-stop, SOP 1/SOP 2 metrics)
 - [[tasks/bug-fixes-batch-2026-08-24]] - Current session bug fix batch
 - [[tasks/bug-fixes-batch-2026-08-23]] - Prior session bug fix batch
 - [[tasks/bug-fixes-batch-2026-08-21]] - TEA desensitization fix batch
@@ -83,3 +84,4 @@ status: verified
 - [[tasks/professional-tone-rewrite]] - Professional tone rewrite
 - [[tasks/ui-ux-overhaul]] - UI/UX overhaul
 - [[tasks/expert-mode-freeze-fix-2026-08-24]] - Expert Mode freeze fix and TEA dynamic UI plan
+- [[tasks/offline-assets-self-hosting]] - Offline audit: self-host Google Fonts, fix chart render blocking

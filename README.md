@@ -157,7 +157,7 @@ if_score = -model.score_samples(X)
 sklearn's `score_samples` returns values in roughly `[-1, 0]` (higher = more normal), so negating gives a score where higher means more anomalous, typically between 0 and 2 in practice. A flow is an anomaly when:
 
 ```
-if_score >= threshold        # threshold = 0.5992241858026262
+if_score >= threshold        # threshold = 0.609224185802626
 ```
 
 The threshold ships inside `feature_contract.json` and is read by the loader at startup (`backend/models/loader.py:42`), so retuning it means editing the contract, not code. In practice, scores just above the threshold are borderline cases, while scores near 1.0 and above indicate flows far outside anything seen in training.

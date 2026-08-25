@@ -22,7 +22,7 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
       legend: {
         labels: {
           color: '#5c6080',
-          font: { family: 'Space Mono', size: 10 },
+          font: { family: "'Fira Code', monospace", size: 10 },
           boxWidth: 12,
           usePointStyle: true,
           pointStyle: 'circle',
@@ -31,8 +31,8 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
       tooltip: {
         backgroundColor: '#111320', borderColor: '#1e2235', borderWidth: 1,
         titleColor: '#8890b0', bodyColor: '#e8eaf6',
-        titleFont: { family: 'Space Mono', size: 10 },
-        bodyFont:  { family: 'Space Mono', size: 11 },
+        titleFont: { family: "'Fira Code', monospace", size: 10 },
+        bodyFont:  { family: "'Fira Code', monospace", size: 11 },
         callbacks: {
           /* Fix: datasets use near-transparent backgroundColor for area fill,
              which renders as white in the tooltip swatch. Override with the
@@ -45,8 +45,8 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
       },
     },
     scales: {
-      x: { ticks: { color: '#5c6080', font: { family: 'Space Mono', size: 11 }, maxRotation: 0 }, grid: { color: '#1e2235' } },
-      y: { ticks: { color: '#5c6080', font: { family: 'Space Mono', size: 11 } }, grid: { color: '#1e2235' }, beginAtZero: true },
+      x: { ticks: { color: '#5c6080', font: { family: "'Fira Code', monospace", size: 11 }, maxRotation: 0 }, grid: { color: '#1e2235' } },
+      y: { ticks: { color: '#5c6080', font: { family: "'Fira Code', monospace", size: 11 } }, grid: { color: '#1e2235' }, beginAtZero: true },
     },
   },
 });
