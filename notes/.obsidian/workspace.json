@@ -202,6 +202,8 @@
   },
   "active": "4562981150c7325f",
   "lastOpenFiles": [
+    "tasks/sixty-minute-benchmark-runner.md",
+    "tasks/offline-assets-self-hosting.md",
     "tasks/tea-verdict-fix-plan-2026-08-24.md",
     "research/simulation-duration-and-metric-thresholds.md",
     "research",
@@ -228,8 +230,6 @@
     "bugs/ban-lifecycle-loop.md",
     "tasks/investigation-batch-2026-08-24.md",
     "bugs/ip-details-zero-values.md",
-    "tasks/implementation-plan-fix-batch.md",
-    "tasks/professional-tone-rewrite.md",
     "mitigation",
     "tasks/sed5m97Pp",
     "tasks",
