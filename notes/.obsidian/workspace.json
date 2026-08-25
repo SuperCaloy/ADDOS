@@ -25,10 +25,14 @@
             "id": "4562981150c7325f",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "tasks/tea-verdict-fix-plan-2026-08-24.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "tea-verdict-fix-plan-2026-08-24"
             }
           }
         ],
@@ -198,6 +202,8 @@
   },
   "active": "4562981150c7325f",
   "lastOpenFiles": [
+    "bugs/expert-mode-freeze-regression.md",
+    "tasks/expert-mode-freeze-fix-2026-08-24.md",
     "tasks/tea-verdict-fix-plan-2026-08-24.md",
     "decisions/tea-state-persistence-session-only.md",
     "decisions/mitigation-event-logging-strategy.md",
@@ -223,8 +229,6 @@
     "tasks/implementation-plan-fix-batch.md",
     "tasks/professional-tone-rewrite.md",
     "tasks/bug-fixes-batch-2026-08-24.md",
-    "tasks/bug-fixes-batch-2026-08-23.md",
-    "tasks/mitigation-event-logging.md",
     "mitigation",
     "tasks/sed5m97Pp",
     "tasks",
