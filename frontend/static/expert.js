@@ -170,7 +170,7 @@ var ExpertStages = {
       title: 'Mininet Network Topology',
       file: 'topology/topology.py',
       desc: 'Emulated network environment providing OpenFlow-capable virtual switches and hosts. Generates both legitimate IP/TCP/UDP traffic and high-volume SYN/UDP/ICMP flood patterns from designated attacker hosts, enabling safe pipeline testing without production network exposure.',
-      input: '1 core switch (s0) plus 8 edge switches\n27 hosts (h1 to h27) plus sinkhole h21\nh1 to h5: legit TCP/UDP/ICMP traffic\nh6 to h19 + h22 to h27: 20 attackers, SYN/ICMP/UDP/mixed\nh20: server (10.0.0.20), whitelisted, never scored',
+      input: '1 core switch (s0) plus 8 edge switches\n27 hosts (h1 to h27) plus sinkhole h21\nh1 to h5: legit TCP/UDP/ICMP traffic\nh6 to h18 + h22 to h23: 15 attackers, SYN/ICMP/UDP (h16 SYN/5432, h22 SYN/3389 repurposed; h19,h24-h27 retired silent)\nh20: server (10.0.0.20), whitelisted, never scored',
       output: 'Raw packets crossing\nOpenFlow switches toward h20'
     },
     ryu: {

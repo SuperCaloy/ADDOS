@@ -346,11 +346,11 @@ sudo python topology/topology.py
 The topology script builds the network, warms MAC tables, starts baseline traffic, and drops into a custom Mininet CLI exposing experiment helpers:
 
 ```python
-launch_attack()                 # all 20 attackers, sustained floods
-start_syn_flood_campaign()      # h10, h18, h19
+launch_attack()                 # all 15 attackers, sustained floods
+start_syn_flood_campaign()      # h10, h18, h22
 start_icmp_flood_campaign()     # h11, h12, h13
 start_udp_flood_campaign()      # h6, h7, h8
-start_mixed_campaign()          # all 20, staggered
+start_mixed_campaign()          # all 15, staggered
 start_stress_test()             # same floods with --rand-source spoofing
 flash_crowd(30)                 # legitimate burst; should not trigger mitigation
 check_traffic()                 # per-host status table from the backend
