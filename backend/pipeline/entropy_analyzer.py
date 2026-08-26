@@ -1,33 +1,36 @@
 import math
 import time
 import threading
+import numpy as np
 from collections import deque
 from backend.config import TEA_WINDOW_SIZE
 
 import logging
 log = logging.getLogger(__name__)
 
+# Lazy import to avoid circular dependency
+def _push_expert_event(payload: dict) -> None:
+    try:
+        from backend.api.events import push_expert_event as _push
+        _push(payload)
+    except Exception:
+        pass
+
 # === ADAPTIVE TEA CONSTANTS ===
-# Learning phase: maximum intervals — learning stops early if variance stabilizes
-TEA_LEARN_INTERVALS   = 30       # upper bound; may finish sooner if traffic is stable
-# How many std deviations from learned mean = anomaly
-# These are base values — actual sigma scales dynamically with baseline stability
-TEA_ATTACK_SIGMA      = 2.5      # base: diversity drop this far below mean → suspicious
-TEA_CROWD_SIGMA       = 1.5      # base: pkt rate this far above mean → surge
-# Minimum absolute diversity to consider flash crowd (not just noise)
-# Dynamic: set to fraction of learned baseline mean after learning phase
-TEA_MIN_CROWD_DIVERSITY = 1.0    # fallback before learning completes
-# EMA alpha bounds — actual alpha scales with baseline stability
-TEA_EMA_ALPHA_MIN     = 0.02     # slowest adaptation (noisy/unstable traffic)
-TEA_EMA_ALPHA_MAX     = 0.10     # fastest adaptation (very stable traffic)
-# Variance stability threshold — learning ends early when variance change < this
+TEA_LEARN_INTERVALS   = 15
+TEA_ATTACK_SIGMA      = 2.5
+TEA_CROWD_SIGMA       = 1.5
+TEA_MIN_CROWD_DIVERSITY = 1.0
+TEA_EMA_ALPHA_MIN     = 0.02
+TEA_EMA_ALPHA_MAX     = 0.10
 TEA_VARIANCE_STABLE_THRESHOLD = 0.01
-# Robust EMA: reject samples this many dynamic-sigma away from mean
 TEA_ROBUST_REJECT_SIGMA = 3.0
+TEA_FEEDBACK_UNLOCK_STREAK = 10
+TEA_BASELINE_HISTORY_MAX = 60
+TEA_UNIFORM_SHARE_SIGMA = TEA_CROWD_SIGMA
 
 
 def _shannon_entropy(values: list[float]) -> float:
-    # H = -sum(p * log2(p)) — returns 0 if empty or all zeros
     total = sum(values)
     if total == 0:
         return 0.0
@@ -41,48 +44,28 @@ def _shannon_entropy(values: list[float]) -> float:
 
 
 class _AdaptiveBaseline:
-    """
-    Online adaptive baseline for one entropy dimension.
-
-    Learning phase: collects up to TEA_LEARN_INTERVALS samples but stops early
-    if variance stabilizes — avoids a rigid 30s blind window on stable traffic.
-
-    Adaptive phase:
-    - Dynamic alpha: faster updates when traffic is stable (low variance),
-      slower when noisy (high variance) — self-tuning adaptation speed.
-    - Robust EMA: rejects samples beyond TEA_ROBUST_REJECT_SIGMA * dynamic_sigma
-      from the mean — attack spikes never drift the baseline.
-    - IF feedback lock: external confirm_attack() freezes updates entirely;
-      confirm_normal() re-enables them — only IF-confirmed normal traffic
-      touches the baseline.
-    """
-
     def __init__(self, learn_intervals: int):
         self._learn_n      = learn_intervals
         self._samples      = []
         self._mean         = None
         self._variance     = None
         self._learned      = False
-        self._alpha        = TEA_EMA_ALPHA_MIN   # starts slow, adjusts after learning
-        self._locked        = False              # True = IF confirmed attack, freeze updates
+        self._alpha        = TEA_EMA_ALPHA_MIN
+        self._locked        = False
+        self._baseline_history = []
 
     @property
     def is_learned(self) -> bool:
         return self._learned
 
     def _compute_alpha(self) -> float:
-        # Dynamic alpha: inversely proportional to relative variance
-        # Low variance (stable) → alpha closer to MAX (faster adaptation)
-        # High variance (noisy) → alpha closer to MIN (slower adaptation)
         if self._variance is None or self._mean is None or self._mean == 0:
             return TEA_EMA_ALPHA_MIN
         cv = math.sqrt(max(self._variance, 1e-9)) / (abs(self._mean) + 1e-9)
-        # cv near 0 = stable → alpha MAX; cv large = noisy → alpha MIN
         alpha = TEA_EMA_ALPHA_MAX - cv * (TEA_EMA_ALPHA_MAX - TEA_EMA_ALPHA_MIN)
         return max(TEA_EMA_ALPHA_MIN, min(TEA_EMA_ALPHA_MAX, alpha))
 
     def _variance_stable(self) -> bool:
-        # Check if last few samples have stabilized — early learning stop
         n = len(self._samples)
         if n < 10:
             return False
@@ -95,7 +78,6 @@ class _AdaptiveBaseline:
     def push(self, value: float) -> None:
         if not self._learned:
             self._samples.append(value)
-            # Early stop: variance stabilized OR hit max intervals
             ready = (
                 len(self._samples) >= self._learn_n or
                 self._variance_stable()
@@ -106,34 +88,33 @@ class _AdaptiveBaseline:
                 self._variance = sum(variance_vals) / len(variance_vals)
                 self._alpha    = self._compute_alpha()
                 self._learned  = True
+                self._baseline_history.append(self._mean)
                 log.info(
-                    "TEA baseline learned — mean=%.4f  std=%.4f  alpha=%.4f  (n=%d samples)",
+                    "TEA baseline learned - mean=%.4f  std=%.4f  alpha=%.4f  (n=%d samples)",
                     self._mean, self._std, self._alpha, len(self._samples)
                 )
             return
 
-        # IF feedback lock — IF confirmed attack, freeze baseline
         if self._locked:
             return
 
-        # Robust EMA — reject outliers beyond dynamic sigma threshold
         z = abs(value - self._mean) / self._std
         if z >= TEA_ROBUST_REJECT_SIGMA:
             log.debug("TEA robust reject: value=%.4f  z=%.2f >= %.1f", value, z, TEA_ROBUST_REJECT_SIGMA)
             return
 
-        # Dynamic alpha — recalculate each update based on current variance
         self._alpha    = self._compute_alpha()
         self._mean     = self._alpha * value + (1 - self._alpha) * self._mean
         err            = (value - self._mean) ** 2
         self._variance = self._alpha * err + (1 - self._alpha) * self._variance
+        self._baseline_history.append(self._mean)
+        if len(self._baseline_history) > TEA_BASELINE_HISTORY_MAX:
+            self._baseline_history.pop(0)
 
     def lock(self) -> None:
-        """IF confirmed attack — freeze baseline updates."""
         self._locked = True
 
     def unlock(self) -> None:
-        """IF confirmed normal — resume baseline updates."""
         self._locked = False
 
     @property
@@ -145,20 +126,18 @@ class _AdaptiveBaseline:
         return math.sqrt(max(self._variance, 1e-9)) if self._variance is not None else 1.0
 
     def dynamic_attack_sigma(self) -> float:
-        # Tighten sigma when baseline is stable (low cv), loosen when noisy
         if self._variance is None or self._mean is None or self._mean == 0:
             return TEA_ATTACK_SIGMA
         cv = self._std / (abs(self._mean) + 1e-9)
-        # stable (cv~0) → tighten to 2.0; noisy (cv large) → loosen to 3.5
         sigma = TEA_ATTACK_SIGMA + cv * 1.5
-        return max(2.0, min(3.5, sigma))
+        return max(2.0, min(2.8, sigma))
 
     def dynamic_crowd_sigma(self) -> float:
         if self._variance is None or self._mean is None or self._mean == 0:
             return TEA_CROWD_SIGMA
         cv = self._std / (abs(self._mean) + 1e-9)
         sigma = TEA_CROWD_SIGMA + cv * 1.0
-        return max(1.2, min(2.5, sigma))
+        return max(1.2, min(2.0, sigma))
 
     def z_score(self, value: float) -> float:
         if not self._learned:
@@ -171,20 +150,40 @@ class _AdaptiveBaseline:
     def is_high(self, value: float, sigma: float) -> bool:
         return self._learned and self.z_score(value) >= sigma
 
+    @property
+    def locked(self) -> bool:
+        return self._locked
 
-class _SwitchEntropyState:
-    # Rolling window + adaptive baselines for one switch
+    @property
+    def alpha(self) -> float:
+        return self._alpha
+
+    @property
+    def baseline_history(self) -> list[float]:
+        return list(self._baseline_history)
+
+
+class _GlobalEntropyState:
     def __init__(self, window_size: int):
         self.window    = deque(maxlen=window_size)
-        self.div_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
-        self.pkt_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
-        self.byt_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.size_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.proto_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.share_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.last_result = {}
+
+    def observe(self, snapshot: dict) -> None:
+        self.window.append(snapshot)
+
+    def learn(self, snapshot: dict) -> None:
+        self.size_base.push(snapshot["size_var"])
+        self.intensity_base.push(snapshot["intensity_var"])
+        self.proto_base.push(snapshot["proto_entropy"])
+        self.share_base.push(snapshot["uniform_share"])
 
     def push(self, snapshot: dict) -> None:
-        self.window.append(snapshot)
-        self.div_base.push(snapshot["diversity_entropy"])
-        self.pkt_base.push(snapshot["packetrate_entropy"])
-        self.byt_base.push(snapshot["byterate_entropy"])
+        self.observe(snapshot)
+        self.learn(snapshot)
 
     def is_ready(self) -> bool:
         return len(self.window) >= 2
@@ -197,31 +196,28 @@ class _SwitchEntropyState:
 
     @property
     def is_learned(self) -> bool:
-        return self.div_base.is_learned and self.pkt_base.is_learned
+        return (
+            self.size_base.is_learned
+            and self.intensity_base.is_learned
+            and self.proto_base.is_learned
+            and self.share_base.is_learned
+        )
 
 
-# Min samples before making a verdict
 IP_PROFILE_MIN_SAMPLES = 5
-# Rolling window size for per-IP observation
 IP_PROFILE_WINDOW      = 20
 
-
 class _IpEntropyProfile:
-    # Tracks one IP's pps trend + entropy during observation (Quarantine or Sinkhole)
-
     def __init__(self):
-        # Rolling pps and bps samples
         self._pps_samples = deque(maxlen=IP_PROFILE_WINDOW)
         self._bps_samples = deque(maxlen=IP_PROFILE_WINDOW)
+        self._last_verdict = "uncertain"
 
     def update(self, pps: float, bps: float) -> None:
-        # Add new sample
         self._pps_samples.append(pps)
         self._bps_samples.append(bps)
 
     def _trend(self, samples: deque) -> float:
-        # Positive = rising, negative = falling, 0 = flat
-        # Compare second half mean vs first half mean
         n = len(samples)
         if n < 4:
             return 0.0
@@ -231,16 +227,21 @@ class _IpEntropyProfile:
         return second - first
 
     def _entropy_of_samples(self, samples: deque) -> float:
-        # Entropy of the pps values over time
-        # Low entropy = repetitive/uniform pattern = attack-like
-        # High entropy = varied pattern = more normal
         vals = list(samples)
         if not vals:
             return 0.0
         return _shannon_entropy(vals)
 
     def verdict(self) -> str:
-        # Not enough data yet
+        """
+        Evaluate traffic profile for a specific IP.
+        
+        Note: The per-IP verdict relies on fine-grained trend/entropy analysis
+        over a short sliding window, whereas the global gate (is_attack_pattern) 
+        relies on aggregate variance collapse across all traffic. They are kept
+        separate because the global gate detects the onset of a large attack, 
+        while this method tracks individual IP behavior.
+        """
         if len(self._pps_samples) < IP_PROFILE_MIN_SAMPLES:
             return "uncertain"
 
@@ -249,152 +250,242 @@ class _IpEntropyProfile:
         pps_trend   = self._trend(self._pps_samples)
         pps_entropy = self._entropy_of_samples(self._pps_samples)
 
-        # Dynamic min samples: extend observation if still uncertain after window
         effective_min = max(IP_PROFILE_MIN_SAMPLES, min(len(pps_list) // 2, 10))
         if len(pps_list) < effective_min:
             return "uncertain"
 
-        # Normalize entropy relative to max possible (log2 of window size)
         max_entropy  = math.log2(len(pps_list)) if len(pps_list) > 1 else 1.0
         norm_entropy = pps_entropy / max_entropy if max_entropy > 0 else 0.0
 
-        # Dynamic std of observed pps — used to scale thresholds
         pps_var = sum((x - pps_mean) ** 2 for x in pps_list) / len(pps_list)
         pps_std = math.sqrt(max(pps_var, 1e-9))
-        cv      = pps_std / (abs(pps_mean) + 1e-9)   # coefficient of variation
+        cv      = pps_std / (abs(pps_mean) + 1e-9)
 
-        # Dynamic repetitive threshold: stable traffic (low cv) → tighten;
-        # variable traffic (high cv) → loosen to avoid false attack labels
         repetitive_threshold = max(0.25, min(0.55, 0.4 - cv * 0.15))
-
-        # Dynamic trend threshold: scale with mean pps — large mean needs bigger
-        # absolute trend to be significant; small mean is more sensitive
         trend_threshold = max(0.05, min(0.2, 0.1 * (1 + cv)))
 
-        # Rising trend = pps going up over observation window
         rising = pps_trend > (pps_mean * trend_threshold)
-
-        # Uniform/repetitive traffic = low normalized entropy
         repetitive = norm_entropy < repetitive_threshold
-
-        # Declining or stable-low = traffic is slowing down
         declining = pps_trend < -(pps_mean * trend_threshold)
         low_mean  = pps_mean < (sum(list(self._pps_samples)[:3]) / 3 + 1e-9) * 0.5
 
-        # Attack: rising trend AND repetitive pattern
         if rising and repetitive:
+            self._last_verdict = "attack"
             return "attack"
 
-        # Normal: declining or mean is dropping over time
+        if rising or repetitive:
+            self._last_verdict = "attack"
+            return "attack"
+
         if declining or low_mean:
+            self._last_verdict = "normal"
             return "normal"
 
-        # Mixed signals
+        if self._last_verdict == "attack" and repetitive:
+            return "attack"
+
+        self._last_verdict = "uncertain"
         return "uncertain"
 
 
 class EntropyAnalyzer:
 
     def __init__(self):
-        self._lock   = threading.Lock()
-        self._states: dict[int, _SwitchEntropyState] = {}
-
-        # Per-IP profiles — used during Quarantine + Sinkhole observation
+        self._lock   = threading.RLock()
+        self._global_state = _GlobalEntropyState(TEA_WINDOW_SIZE)
         self._ip_profiles: dict[str, _IpEntropyProfile] = {}
+        self._fb_normal_streak = 0
+        self._would_block_count = 0
+        
+        self._flow_buffer = deque(maxlen=2000)
+        self._last_eval_time = 0.0
+        self._eval_interval = 0.5
+
+    @property
+    def fb_normal_streak(self) -> int:
+        with self._lock:
+            return self._fb_normal_streak
+
+    @property
+    def would_block_count(self) -> int:
+        with self._lock:
+            return self._would_block_count
+
+    @property
+    def is_locked(self) -> bool:
+        with self._lock:
+            return (
+                self._global_state.size_base.locked
+                and self._global_state.intensity_base.locked
+                and self._global_state.proto_base.locked
+                and self._global_state.share_base.locked
+            )
 
     def update(self, dpid: int, flows: list[dict]) -> dict:
         with self._lock:
-            if dpid not in self._states:
-                self._states[dpid] = _SwitchEntropyState(TEA_WINDOW_SIZE)
-            state = self._states[dpid]
+            now = time.time()
+            self._flow_buffer.extend(flows)
+            
+            if now - self._last_eval_time < self._eval_interval and self._global_state.last_result:
+                return self._global_state.last_result
+            
+            self._last_eval_time = now
+            current_flows = list(self._flow_buffer)
+            self._flow_buffer.clear()
 
-        # Aggregate per-IP pps and bps
-        ip_pps: dict[str, float] = {}
-        ip_bps: dict[str, float] = {}
-        for f in flows:
+        if not current_flows:
+            res = self._neutral(0.0, 0.0, learned=False)
+            with self._lock:
+                self._global_state.last_result = res
+            return res
+
+        eps = 1e-9
+        sizes = []
+        intensities = []
+        protos = {}
+        unique_ips = set()
+        
+        for f in current_flows:
             src = f.get("src_ip", "")
-            if not src or src == "0.0.0.0":
-                continue
-            ip_pps[src] = ip_pps.get(src, 0.0) + float(f.get("packet_count_per_second", 0))
-            ip_bps[src] = ip_bps.get(src, 0.0) + float(f.get("byte_count_per_second",  0))
+            if src and src != "0.0.0.0":
+                unique_ips.add(src)
+            
+            pkt = float(f.get("packet_count", 0))
+            byt = float(f.get("byte_count", 0))
+            pps = float(f.get("packet_count_per_second", 0))
+            bps = float(f.get("byte_count_per_second", 0))
+            
+            avg_bytes_per_pkt = byt / (pkt + eps)
+            pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt, 0))
+            flow_intensity = math.log1p(max(pps * bps, 0))
+            
+            sizes.append(pkt_size_uniformity)
+            intensities.append(flow_intensity)
+            
+            proto = f.get("ip_proto", 0)
+            protos[proto] = protos.get(proto, 0) + 1
 
-        diversity_entropy  = _shannon_entropy([1.0] * len(ip_pps))
-        packetrate_entropy = _shannon_entropy(list(ip_pps.values()))
-        byterate_entropy   = _shannon_entropy(list(ip_bps.values()))
+        size_var = float(np.var(sizes)) if sizes else 0.0
+        intensity_var = float(np.var(intensities)) if intensities else 0.0
+        proto_entropy = _shannon_entropy(list(protos.values()))
+
+        if sizes:
+            med_size  = float(np.median(sizes))
+            med_int   = float(np.median(intensities))
+            mad_size  = float(np.median(np.abs(np.array(sizes) - med_size)))
+            mad_int   = float(np.median(np.abs(np.array(intensities) - med_int)))
+            tol_size  = max(0.02, 3.0 * mad_size)
+            tol_int   = max(0.10, 3.0 * mad_int)
+            uniform_n = sum(
+                1 for s, i in zip(sizes, intensities)
+                if abs(s - med_size) <= tol_size and abs(i - med_int) <= tol_int
+            )
+            uniform_share = uniform_n / len(sizes)
+        else:
+            uniform_share = 0.0
 
         snapshot = {
-            "diversity_entropy":  diversity_entropy,
-            "packetrate_entropy": packetrate_entropy,
-            "byterate_entropy":   byterate_entropy,
-            "unique_ips":         len(ip_pps),
+            "size_var":  size_var,
+            "intensity_var": intensity_var,
+            "proto_entropy": proto_entropy,
+            "uniform_share": uniform_share,
+            "unique_ips": len(unique_ips),
         }
 
         with self._lock:
-            state.push(snapshot)
+            state = self._global_state
+            state.observe(snapshot)
+
             is_learned = state.is_learned
-            div_base   = state.div_base
-            pkt_base   = state.pkt_base
+            size_base   = state.size_base
+            intensity_base   = state.intensity_base
+            proto_base   = state.proto_base
+            share_base   = state.share_base
 
             if not state.is_ready():
-                return self._neutral(diversity_entropy, packetrate_entropy, learned=False)
+                state.learn(snapshot)
+                res = self._neutral(size_var, intensity_var, learned=False)
+                state.last_result = res
+                return res
 
             curr = state.latest()
             prev = state.previous()
 
-        diversity_delta  = curr["diversity_entropy"]  - prev["diversity_entropy"]
-        packetrate_delta = curr["packetrate_entropy"] - prev["packetrate_entropy"]
+            if not is_learned:
+                size_z  = 0.0
+                intensity_z  = 0.0
+                attack_sigma = TEA_ATTACK_SIGMA
+                size_collapsed  = False
+                intensity_collapsed = False
+                size_surge = False
+                intensity_surge = False
+                mechanized_cluster = False
+            else:
+                size_z  = size_base.z_score(curr["size_var"])
+                intensity_z  = intensity_base.z_score(curr["intensity_var"])
+                proto_z = proto_base.z_score(curr["proto_entropy"])
+                attack_sigma = size_base.dynamic_attack_sigma()
+                size_collapsed  = size_base.is_low(curr["size_var"], attack_sigma)
+                intensity_collapsed = intensity_base.is_low(curr["intensity_var"], attack_sigma)
+                proto_collapsed = proto_base.is_low(curr["proto_entropy"], attack_sigma)  # protocol concentration lowers entropy
+                size_surge = size_base.is_high(curr["size_var"], attack_sigma)
+                intensity_surge = intensity_base.is_high(curr["intensity_var"], attack_sigma)
+                share_z = share_base.z_score(curr["uniform_share"])
+                mechanized_cluster = share_base.is_high(curr["uniform_share"], TEA_UNIFORM_SHARE_SIGMA)
+                proto_surge = proto_base.is_high(curr["proto_entropy"], TEA_UNIFORM_SHARE_SIGMA)
 
-        # Still in learning phase — return neutral, no decisions
+        size_delta  = curr["size_var"]  - prev["size_var"]
+        intensity_delta = curr["intensity_var"] - prev["intensity_var"]
+
         if not is_learned:
-            log.debug(
-                "TEA [dpid=%d] learning phase — interval %d/%d",
-                dpid, len(state.window), TEA_LEARN_INTERVALS
-            )
-            return self._neutral(diversity_entropy, packetrate_entropy, learned=False)
+            log.debug("TEA global learning phase")
+            with self._lock:
+                state.learn(snapshot)
+            res = self._neutral(size_var, intensity_var, learned=False)
+            with self._lock:
+                state.last_result = res
+            return res
 
-        # === Adaptive thresholds via z-score ===
-        div_z  = div_base.z_score(curr["diversity_entropy"])
-        pkt_z  = pkt_base.z_score(curr["packetrate_entropy"])
-
-        # Dynamic sigma — scales with baseline stability
-        attack_sigma = div_base.dynamic_attack_sigma()
-        crowd_sigma  = pkt_base.dynamic_crowd_sigma()
-
-        # Dynamic crowd diversity floor — fraction of learned baseline mean
-        # Falls back to TEA_MIN_CROWD_DIVERSITY before learning completes
-        min_crowd_div = (
-            max(TEA_MIN_CROWD_DIVERSITY, div_base.mean * 0.5)
-            if div_base.is_learned else TEA_MIN_CROWD_DIVERSITY
+        is_attack_pattern = (
+            mechanized_cluster or proto_surge or proto_collapsed
+            or size_collapsed or intensity_collapsed
+            or size_surge or intensity_surge
         )
+        is_flash_crowd    = False
 
-        # Attack: diversity collapses AND packet rate collapses (few IPs dominating)
-        diversity_collapsed  = div_base.is_low(curr["diversity_entropy"], attack_sigma)
-        packetrate_collapsed = pkt_base.is_low(curr["packetrate_entropy"], attack_sigma)
-        is_attack_pattern    = diversity_collapsed and packetrate_collapsed
-
-        # Flash crowd: diversity is normal/high + pkt rate is high + diversity not collapsed
-        diversity_normal  = not diversity_collapsed
-        packetrate_surge  = pkt_base.is_high(curr["packetrate_entropy"], crowd_sigma)
-        high_diversity    = curr["diversity_entropy"] >= min_crowd_div
-        is_flash_crowd    = diversity_normal and packetrate_surge and high_diversity
-
-        # Confidence
         if is_attack_pattern:
-            confidence = "high"
-        elif diversity_collapsed or packetrate_collapsed:
-            confidence = "moderate"
+            if ((size_collapsed or size_surge) and (intensity_collapsed or intensity_surge)) or (
+                mechanized_cluster and (
+                    size_collapsed or size_surge or intensity_collapsed
+                    or intensity_surge or proto_collapsed or proto_surge
+                )
+            ):
+                confidence = "high"  # Multi-dimension confirmation
+            else:
+                confidence = "moderate"  # Single dimension fired
         else:
             confidence = "low"
 
+        if not is_attack_pattern:
+            with self._lock:
+                state.learn(snapshot)
+
         result = {
-            "diversity_entropy":  round(curr["diversity_entropy"],  4),
-            "packetrate_entropy": round(curr["packetrate_entropy"], 4),
-            "diversity_delta":    round(diversity_delta,  4),
-            "packetrate_delta":   round(packetrate_delta, 4),
-            "diversity_zscore":   round(div_z,  4),
-            "packetrate_zscore":  round(pkt_z,  4),
-            "baseline_mean_div":  round(div_base.mean, 4),
-            "baseline_mean_pkt":  round(pkt_base.mean, 4),
+            "size_var":  round(curr["size_var"],  4),
+            "intensity_var": round(curr["intensity_var"], 4),
+            "proto_entropy": round(curr["proto_entropy"], 4),
+            "size_delta":    round(size_delta,  4),
+            "intensity_delta":   round(intensity_delta, 4),
+            "size_zscore":   round(size_z,  4),
+            "intensity_zscore":  round(intensity_z,  4),
+            "proto_zscore":  round(proto_z, 4),
+            "uniform_share": round(curr["uniform_share"], 4),
+            "uniform_share_zscore":  round(share_z, 4),
+            "mechanized_cluster":    mechanized_cluster,
+            "size_surge":    size_surge,
+            "intensity_surge":   intensity_surge,
+            "baseline_mean_size":  round(size_base.mean, 4),
+            "baseline_mean_intensity":  round(intensity_base.mean, 4),
             "unique_ips":         curr["unique_ips"],
             "is_attack_pattern":  is_attack_pattern,
             "is_flash_crowd":     is_flash_crowd,
@@ -403,115 +494,122 @@ class EntropyAnalyzer:
         }
 
         if is_attack_pattern:
-            log.info(
-                "TEA [dpid=%d] attack pattern — div_z=%.2f  pkt_z=%.2f  conf=%s",
-                dpid, div_z, pkt_z, confidence
-            )
-        elif is_flash_crowd:
-            log.info(
-                "TEA [dpid=%d] flash crowd — div=%.3f (normal)  pkt_z=+%.2f (surge)",
-                dpid, curr["diversity_entropy"], pkt_z
-            )
+            log.info("TEA global attack pattern - size_z=%.2f  int_z=%.2f  conf=%s", size_z, intensity_z, confidence)
 
+        _push_expert_event({
+            "tea_update": {
+                "dpid": 0,
+                "size_var": result["size_var"],
+                "intensity_var": result["intensity_var"],
+                "proto_entropy": result["proto_entropy"],
+                "size_z": result["size_zscore"],
+                "intensity_z": result["intensity_zscore"],
+                "proto_z": result["proto_zscore"],
+                "uniform_share": result["uniform_share"],
+                "mechanized_cluster": mechanized_cluster,
+                "unique_ips": result["unique_ips"],
+                "is_attack": is_attack_pattern,
+                "is_flash_crowd": is_flash_crowd,
+                "is_learned": True,
+                "confidence": confidence,
+                "_locked": self.is_locked,
+                "_fb_normal_streak": self.fb_normal_streak,
+            }
+        })
+
+        with self._lock:
+            state.last_result = result
         return result
 
     def should_submit(self, tea_result: dict, is_flood_prefilter_flagged: bool) -> bool:
-        # Always submit flood-prefiltered IPs
-        if is_flood_prefilter_flagged:
-            return True
-
-        # Still learning — submit everything so IF can warm up too
-        if not tea_result.get("is_learned", False):
-            return True
-
-        conf = tea_result.get("confidence", "low")
-
-        # Flash crowd with no prefilter → legit surge, skip ML
-        if tea_result.get("is_flash_crowd") and conf != "high":
-            log.debug("TEA gate: flash crowd — skipping ML")
-            return False
-
-        # Attack pattern → always submit
-        if tea_result.get("is_attack_pattern"):
-            return True
-
-        # Moderate → submit, let IF decide
-        if conf == "moderate":
-            return True
-
-        # Low confidence = TEA unsure → let IF decide + feed result back to TEA
+        would_block = (
+            not is_flood_prefilter_flagged
+            and tea_result.get("is_learned", False)
+            and not tea_result.get("is_attack_pattern", False)
+            and tea_result.get("confidence", "low") == "low"
+        )
+        if would_block:
+            with self._lock:
+                self._would_block_count += 1
+            log.info("TEA gate advisory: would have blocked (total=%d)", self._would_block_count)
         return True
 
-    def confirm_normal(self, dpid: int) -> None:
-        """IF confirmed this interval is normal — unlock baseline updates."""
+    def confirm_normal(self, dpid: int = 0) -> None:
         with self._lock:
-            state = self._states.get(dpid)
-        if state is None:
-            return
-        state.div_base.unlock()
-        state.pkt_base.unlock()
-        state.byt_base.unlock()
-        log.debug("TEA [dpid=%d] IF feedback: normal — baseline unlocked", dpid)
+            self._global_state.size_base.unlock()
+            self._global_state.intensity_base.unlock()
+            self._global_state.proto_base.unlock()
+            self._global_state.share_base.unlock()
 
-    def confirm_attack(self, dpid: int) -> None:
-        """IF confirmed this interval is attack — freeze baseline updates."""
+    def confirm_attack(self, dpid: int = 0) -> None:
         with self._lock:
-            state = self._states.get(dpid)
-        if state is None:
-            return
-        state.div_base.lock()
-        state.pkt_base.lock()
-        state.byt_base.lock()
-        log.debug("TEA [dpid=%d] IF feedback: attack — baseline locked", dpid)
+            self._global_state.size_base.lock()
+            self._global_state.intensity_base.lock()
+            self._global_state.proto_base.lock()
+            self._global_state.share_base.lock()
+
+    def feedback(self, is_anomaly: bool) -> None:
+        with self._lock:
+            if is_anomaly:
+                self._fb_normal_streak = 0
+                self._global_state.size_base.lock()
+                self._global_state.intensity_base.lock()
+                self._global_state.proto_base.lock()
+                self._global_state.share_base.lock()
+                return
+            self._fb_normal_streak += 1
+            if self._fb_normal_streak >= TEA_FEEDBACK_UNLOCK_STREAK:
+                self._fb_normal_streak = 0
+                self._global_state.size_base.unlock()
+                self._global_state.intensity_base.unlock()
+                self._global_state.proto_base.unlock()
+                self._global_state.share_base.unlock()
 
     def update_ip(self, src_ip: str, pps: float, bps: float) -> None:
-        # Feed one observation interval for this IP
-        # Called each tick during Quarantine or Sinkhole observation
         with self._lock:
             if src_ip not in self._ip_profiles:
                 self._ip_profiles[src_ip] = _IpEntropyProfile()
             self._ip_profiles[src_ip].update(pps, bps)
 
     def get_ip_verdict(self, src_ip: str) -> str:
-        # Returns "attack", "normal", or "uncertain"
-        # Based on pps trend + entropy of that IP's own traffic over time
         with self._lock:
             profile = self._ip_profiles.get(src_ip)
         if profile is None:
             return "uncertain"
-        verdict = profile.verdict()
-        log.debug("TEA per-IP verdict [%s] → %s", src_ip, verdict)
-        return verdict
+        return profile.verdict()
 
     def clear_ip(self, src_ip: str) -> None:
-        # Remove IP profile on release — frees memory
         with self._lock:
             self._ip_profiles.pop(src_ip, None)
-        log.debug("TEA per-IP profile cleared [%s]", src_ip)
 
     def reset_switch(self, dpid: int) -> None:
-        # Clear state on reconnect — forces re-learning
+        # Compatibility, reset global instead
         with self._lock:
-            self._states.pop(dpid, None)
-        log.info("TEA [dpid=%d] state reset — re-learning baseline", dpid)
+            self._global_state = _GlobalEntropyState(TEA_WINDOW_SIZE)
 
-    def _neutral(self, div: float, pkt: float, learned: bool = False) -> dict:
+    def _neutral(self, size: float, intensity: float, learned: bool = False) -> dict:
         return {
-            "diversity_entropy":  round(div, 4),
-            "packetrate_entropy": round(pkt, 4),
-            "diversity_delta":    0.0,
-            "packetrate_delta":   0.0,
-            "diversity_zscore":   0.0,
-            "packetrate_zscore":  0.0,
-            "baseline_mean_div":  0.0,
-            "baseline_mean_pkt":  0.0,
+            "size_var":  round(size, 4),
+            "intensity_var": round(intensity, 4),
+            "proto_entropy": 0.0,
+            "size_delta":    0.0,
+            "intensity_delta":   0.0,
+            "size_zscore":   0.0,
+            "intensity_zscore":  0.0,
+            "proto_zscore":  0.0,
+            "uniform_share": 0.0,
+            "uniform_share_zscore":  0.0,
+            "mechanized_cluster":    False,
+            "size_surge":    False,
+            "intensity_surge":   False,
+            "baseline_mean_size":  0.0,
+            "baseline_mean_intensity":  0.0,
             "unique_ips":         0,
             "is_attack_pattern":  False,
             "is_flash_crowd":     False,
             "is_learned":         learned,
             "confidence":         "low",
         }
-
 
 # Module-level singleton
 entropy_analyzer = EntropyAnalyzer()

@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from backend.database import writer
+from backend.mitigation.traffic_filter import (
+    SINKHOLE_ESCALATE_CONFIDENCE, SINKHOLE_MAX_TOTAL_SECONDS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +47,10 @@ class DeceptionModule:
     def __init__(self):
         self._lock              = threading.Lock()
         self._entries: dict[str, SinkholeEntry] = {}
+        # Cumulative seconds spent in sinkhole across cycles, per IP.
+        # Survives release/retrip so a repeat offender can't loop forever
+        # on unresolved confidence. Reset once it actually escalates.
+        self._cumulative_time: dict[str, float] = {}
         self._commander         = None
         self._escalate_callback = None
         self._release_callback  = None
@@ -92,6 +99,7 @@ class DeceptionModule:
             "if_score":        if_score,
             "phase":           "Sinkhole",
             "is_manual":       False,
+            "event_type":      "transition",
         })
 
         return True
@@ -102,6 +110,17 @@ class DeceptionModule:
         with self._lock:
             if src_ip in self._entries:
                 self._entries[src_ip].recent_pps = pps
+
+    def update_score(self, src_ip: str, if_score: float, confidence: float) -> None:
+        # Update live IF score and confidence for a sinkholed IP.
+        # Called by decision_engine on each flow result, same as update_pps.
+        # Without this, if_score/confidence stay frozen at entry-time values
+        # and escalation can never react to RF resolving the vector.
+        with self._lock:
+            if src_ip in self._entries:
+                if if_score > self._entries[src_ip].if_score:
+                    self._entries[src_ip].if_score = if_score
+                self._entries[src_ip].confidence = confidence
 
     def is_sinkholes(self, src_ip: str) -> bool:
         with self._lock:
@@ -114,11 +133,12 @@ class DeceptionModule:
                     "src_ip":        e.src_ip,
                     "attack_vector": e.attack_vector,
                     "if_score":      round(e.if_score, 4),
-                    "confidence":    f"{e.confidence * 100:.1f}%",
+                    "confidence":    round(e.confidence * 100, 4),
                     "elapsed_sec":   int(e.elapsed()),
                     "remaining_sec": max(0, int(SINKHOLE_OBSERVE_SECONDS - e.elapsed())),
                     "recent_pps":    round(e.recent_pps, 2),
-                    "phase":         "Sinkhole",
+                    "phase":         0,
+                    "phase_label":   "Sinkhole",
                 }
                 for e in self._entries.values()
             ]
@@ -128,8 +148,23 @@ class DeceptionModule:
         # Used by manual release from the UI.
         with self._lock:
             entry = self._entries.pop(src_ip, None)
+            self._cumulative_time.pop(src_ip, None)
         if entry:
             self._push_clear(src_ip)
+            writer.log_mitigation_event({
+                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "src_ip":          src_ip,
+                "predicted_class": "DDoS",
+                "attack_vector":   entry.attack_vector,
+                "confidence":      entry.confidence,
+                "priority":        "Low",
+                "action_taken":    "Released",
+                "if_score":        entry.if_score,
+                "phase":           "Sinkhole",
+                "is_manual":       True,
+                "event_type":      "released",
+                "reason":          "manual release",
+            })
             log.info("Deception: manually released %s from sinkhole", src_ip)
             return True
         return False
@@ -140,9 +175,26 @@ class DeceptionModule:
         # resource_guard must never access private _lock/_entries directly.
         with self._lock:
             sinkhole_ips = list(self._entries.keys())
+            entries = dict(self._entries)
             self._entries.clear()
+            self._cumulative_time.clear()
         for ip in sinkhole_ips:
             self._push_clear(ip)
+            e = entries[ip]
+            writer.log_mitigation_event({
+                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "src_ip":          ip,
+                "predicted_class": "DDoS",
+                "attack_vector":   e.attack_vector,
+                "confidence":      e.confidence,
+                "priority":        "Low",
+                "action_taken":    "Released",
+                "if_score":        e.if_score,
+                "phase":           "Sinkhole",
+                "is_manual":       False,
+                "event_type":      "released",
+                "reason":          "resource guard CRIT",
+            })
         if sinkhole_ips:
             log.info("Deception: emergency cleared %d sinkhole entries", len(sinkhole_ips))
         return len(sinkhole_ips)
@@ -160,15 +212,28 @@ class DeceptionModule:
 
     def _evaluate(self, entry: SinkholeEntry) -> None:
         # After observation window: escalate to Phase 1 or release.
-        # pps > threshold → escalate
-        # pps <= threshold → release
+        # Escalates if pps AND confidence are both resolved, OR if pps is
+        # still elevated and cumulative time across cycles hits the ceiling,
+        # sustained-but-unclassifiable traffic still needs to be contained.
         src_ip = entry.src_ip
+        elapsed_this_cycle = entry.elapsed()
 
         with self._lock:
             self._entries.pop(src_ip, None)
+            total_time = self._cumulative_time.get(src_ip, 0.0) + elapsed_this_cycle
+            self._cumulative_time[src_ip] = total_time
 
-        if entry.recent_pps > SINKHOLE_PPS_ESCALATE_THRESHOLD:
-            log.info("Deception: %s → Phase 1  pps=%.1f", src_ip, entry.recent_pps)
+        still_active        = entry.recent_pps > SINKHOLE_PPS_ESCALATE_THRESHOLD
+        confidence_resolved = entry.confidence >= SINKHOLE_ESCALATE_CONFIDENCE
+        time_exceeded        = total_time >= SINKHOLE_MAX_TOTAL_SECONDS
+
+        if still_active and (confidence_resolved or time_exceeded):
+            reason = ("confidence resolved" if confidence_resolved
+                      else f"time ceiling reached ({total_time:.0f}s)")
+            log.info("Deception: %s → Phase 1  pps=%.1f  conf=%.1f%%  %s",
+                     src_ip, entry.recent_pps, entry.confidence * 100, reason)
+            with self._lock:
+                self._cumulative_time.pop(src_ip, None)
             if self._escalate_callback:
                 self._escalate_callback(
                     src_ip        = src_ip,
@@ -179,8 +244,24 @@ class DeceptionModule:
             else:
                 self._push_clear(src_ip)
         else:
-            log.info("Deception: %s → released (traffic stopped)  pps=%.1f",
-                     src_ip, entry.recent_pps)
+            reason = ("traffic stopped" if not still_active
+                      else "confidence unresolved")
+            log.info("Deception: %s → released (%s)  pps=%.1f  conf=%.1f%%  total=%.0fs",
+                     src_ip, reason, entry.recent_pps, entry.confidence * 100, total_time)
+            writer.log_mitigation_event({
+                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "src_ip":          src_ip,
+                "predicted_class": "DDoS",
+                "attack_vector":   entry.attack_vector,
+                "confidence":      entry.confidence,
+                "priority":        "Low",
+                "action_taken":    "Released",
+                "if_score":        entry.if_score,
+                "phase":           "Sinkhole",
+                "is_manual":       False,
+                "event_type":      "released",
+                "reason":          reason,
+            })
             self._push_clear(src_ip)
             if self._release_callback:
                 self._release_callback(src_ip)

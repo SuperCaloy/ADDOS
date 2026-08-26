@@ -1,6 +1,38 @@
-/**/*.db
-/**/*.db-shm
-/**/*.db-wal
-/**/*.pyc
+# Database files
+**/*.db
+**/*.db-shm
+**/*.db-wal
+
+# Python
+**/*.pyc
 **/__pycache__/
-logs/
+
+# Logs (thesis database - kept local)
+logs/*
+!logs/.gitkeep
+
+# Project notes & config (device-specific)
+notes/
+.agents/
+AGENTS.md
+Agents.md
+visualization.html
+opencode.json
+skills-lock.json
+.opencode/
+
+# Build & test artifacts
+test/
+test-results/
+docs/
+design-system/
+scratch/
+.superpowers/
+
+# Node
+node_modules/
+package-lock.json
+package.json
+
+# Analysis reports
+RF_ACCURACY_BUG_ANALYSIS.md

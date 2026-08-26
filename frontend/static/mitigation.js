@@ -28,7 +28,7 @@ async function fetchQuarantine() {
     data.forEach(e => {
       const sc   = e.if_score || 0;
       const ts   = e.time_in_phase_sec || 0;
-      const conf = e.confidence || '—';
+      const conf = e.confidence != null ? Number(e.confidence).toFixed(4) : '—';
       const time = ts < 60 ? `${ts}s` : `${Math.floor(ts / 60)}m ${ts % 60}s`;
 
       /* IF score color class based on threshold */
@@ -42,14 +42,22 @@ async function fetchQuarantine() {
         ? ` <span style="color:var(--amber,#ffb300);font-size:11px;font-family:var(--mono)">[${Math.floor(e.ttl_remaining_sec/60)}m ${e.ttl_remaining_sec%60}s]</span>`
         : '';
 
-      /* High priority badge */
-      const priBadge = e.priority === 'High'
-        ? `<span class="p-high">HIGH </span>`
-        : '';
+      /* Priority badge */
+      const _priMap = {
+        'Critical': '<span class="p-crit">CRITICAL</span>',
+        'High':     '<span class="p-high">HIGH</span>',
+        'Medium':   '<span class="p-med">MEDIUM</span>',
+        'Low':      '<span class="p-low">LOW</span>',
+      };
+      const priBadge = _priMap[e.priority] || '<span class="p-low">LOW</span>';
+
+      /* Use phase_label if available, otherwise fall back to phase */
+      const phaseDisplay = e.phase_label || e.phase || '—';
 
       const inner = `
         <td class="ip">${e.src_ip || '—'}</td>
-        <td style="color:var(--sub2);font-size:13px">${priBadge}${e.phase || '—'}${ttlRemaining}</td>
+        <td>${priBadge}</td>
+        <td style="color:var(--sub2);font-size:13px">${phaseDisplay}${ttlRemaining}</td>
         <td>${renderVector(e.attack_vector || '—')}</td>
         <td class="${scCls}">${sc.toFixed(4)}</td>
         <td class="mono">${conf}</td>

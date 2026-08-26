@@ -1,51 +1,51 @@
 const _FEAT_TOOLTIPS = {
-  "Flow Rate (pps)": "Packets transmitted per second for this flow. Flood attacks are characterized by abnormally high packet rates compared to legitimate traffic baselines.",
-  "Byte Rate":       "Volume of data transmitted per second. A sharp increase indicates potential bandwidth exhaustion, a primary goal of volumetric DDoS attacks.",
-  "Bytes / Packet":  "Average packet size (byte count ÷ packet count). Each attack type tends to produce a consistent packet size signature, useful for classification.",
-  "Port Entropy":    "Ratio of source port activity to destination port activity. UDP floods often spray traffic across many ports, producing a distinct ratio compared to normal traffic.",
-  "Pkt Size Uniformity": "A model-derived measure of how consistent packet sizes are within this flow. SYN packets carry no payload, so a SYN flood produces near-identical packet sizes, a low, tightly clustered value here.",
-  "Packet Count":    "Cumulative packets observed in this flow. Rapid accumulation within a short window is a strong indicator of flooding behavior.",
-  "Byte Count":      "Cumulative data volume observed in this flow, in bytes.",
+  "Flow Rate (pps)": "Packet rate for this flow, measured in packets per second (pps). Significantly elevated rates relative to normal baselines are indicative of flood-based attacks.",
+  "Byte Rate":       "Data throughput for this flow, measured in bytes per second. Sharp increases may indicate volumetric attacks targeting bandwidth exhaustion.",
+  "Bytes / Packet":  "Average packet size (byte count divided by packet count). Different attack types produce characteristic packet size signatures, aiding classification.",
+  "Port Entropy":    "Quantifies the distribution of traffic across source and destination ports. UDP flood attacks typically spray packets across many destination ports, producing a markedly higher entropy value than legitimate single-session traffic.",
+  "Pkt Size Uniformity": "Measures the consistency of packet sizes within this flow. Lower values indicate highly uniform packets, as expected from SYN flood traffic where packets carry no payload and are constructed with near-identical sizes.",
+  "Packet Count":    "Total number of packets observed in this flow. Rapid accumulation within a short observation window is a strong indicator of flooding behavior.",
+  "Byte Count":      "Total data volume observed in this flow, measured in bytes.",
 };
 
 const _ATTACK_CONTEXT = {
   "ICMP Flood": {
     color: 'var(--red,#ff3d5a)',
-    desc: 'An ICMP Flood overwhelms the target with a high volume of ping (echo request) packets, consuming bandwidth and processing resources until legitimate traffic can no longer be served.',
+    desc: 'An ICMP Flood saturates the target with a high volume of ICMP Echo Request packets, consuming bandwidth and host processing resources to the point that legitimate traffic is denied service.',
     rows: [
-      ['Flow Rate (pps)', 'Very high', 'Sending way more pings than normal'],
-      ['Byte Rate',       'Moderate',  'Small messages, but a lot of them'],
-      ['Bytes / Packet',  'Fixed size','Matches a typical ping packet'],
+      ['Flow Rate (pps)', 'Very high', 'Packet rate significantly exceeds normal baseline'],
+      ['Byte Rate',       'Moderate',  'Low per-packet volume, high aggregate count'],
+      ['Bytes / Packet',  'Fixed size','Consistent with standard ICMP Echo Request size'],
     ],
   },
   "SYN Flood": {
     color: 'var(--red,#ff3d5a)',
-    desc: 'A SYN Flood exploits the TCP three-way handshake by initiating many connections without completing them, exhausting the server\'s connection table and denying service to legitimate users.',
+    desc: 'A SYN Flood exploits the TCP three-way handshake by initiating a high volume of connection requests without completing them, exhausting the server connection table and denying service to legitimate clients.',
     rows: [
-      ['Flow Rate (pps)', 'Very high', 'Opening connections rapidly'],
-      ['Bytes / Packet',  'Small',     'Just a connection request, no data'],
-      ['Byte Rate',       'Low',       'Small packets despite the high rate'],
+      ['Flow Rate (pps)', 'Very high', 'Connection initiation rate far above normal'],
+      ['Bytes / Packet',  'Small',     'TCP SYN only, no payload data'],
+      ['Byte Rate',       'Low',       'Minimal byte volume despite elevated packet rate'],
     ],
   },
   "UDP Flood": {
     color: 'var(--amber,#ffb02e)',
-    desc: 'A UDP Flood sends a high volume of connectionless packets to random or targeted ports, forcing the target to process and respond to traffic that consumes bandwidth with no legitimate purpose.',
+    desc: 'A UDP Flood transmits a high volume of connectionless packets to random or targeted ports, forcing the target to process and respond to traffic that consumes bandwidth without legitimate purpose.',
     rows: [
-      ['Byte Rate',       'Very high', 'Sending a lot of data quickly'],
-      ['Bytes / Packet',  'Large',     'Each message carries more data'],
-      ['Flow Rate (pps)', 'High',      'Frequent messages'],
+      ['Byte Rate',       'Very high', 'High data throughput in short duration'],
+      ['Bytes / Packet',  'Large',     'Substantial payload per packet'],
+      ['Flow Rate (pps)', 'High',      'Elevated packet transmission rate'],
     ],
   },
   "Anomalous": {
     color: 'var(--sub2,#8890b0)',
-    desc: 'Traffic deviates from the established normal baseline but does not match a known attack signature with sufficient confidence for classification.',
+    desc: 'Traffic deviates significantly from the established normal baseline but does not match a known attack signature with sufficient confidence for definitive classification.',
     rows: [
-      ['Flow Rate (pps)', 'Elevated',  'Higher than typical traffic'],
+      ['Flow Rate (pps)', 'Elevated',  'Exceeds typical traffic volume for this source'],
     ],
   },
   "Uncertain": {
     color: 'var(--sub,#5c6080)',
-    desc: 'The anomaly detector flagged this traffic, but classifier confidence fell below the threshold required to assign a specific attack label.',
+    desc: 'The anomaly detector flagged this traffic as suspicious, but classifier confidence fell below the threshold required to assign a specific attack type.',
     rows: [],
   },
 };
@@ -64,6 +64,9 @@ const _ATTACK_CONTEXT = {
 
   const drawer = document.createElement('div');
   drawer.id = 'ip-drawer';
+  drawer.setAttribute('role', 'dialog');
+  drawer.setAttribute('aria-modal', 'true');
+  drawer.setAttribute('aria-label', 'IP Threat Analysis');
   drawer.setAttribute('aria-hidden', 'true');
   drawer.style.cssText = [
     'position:fixed','top:50%','left:50%',
@@ -78,6 +81,22 @@ const _ATTACK_CONTEXT = {
     'border-radius:16px',
     'box-shadow:0 24px 80px rgba(0,0,0,0.18)',
   ].join(';');
+
+  /* ── Focus trap ───────────────────────────────────────────────────────── */
+  drawer.addEventListener('keydown', function _trapFocus(e) {
+    if (e.key !== 'Tab') return;
+    const focusable = [...drawer.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )].filter(el => !el.closest('[aria-hidden="true"]'));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last  = focusable[focusable.length - 1];
+    if (e.shiftKey) {
+      if (document.activeElement === first) { e.preventDefault(); last.focus(); }
+    } else {
+      if (document.activeElement === last)  { e.preventDefault(); first.focus(); }
+    }
+  });
 
   drawer.innerHTML = `
     <!-- Header -->
@@ -183,6 +202,14 @@ const _ATTACK_CONTEXT = {
            margin-bottom:10px;margin-top:4px">Mitigation Pipeline</div>
       <div id="idd-pipeline" style="margin-bottom:14px"></div>
 
+      <!-- Algorithm Trace (Expert Mode only) -->
+      <div id="idd-expert-section" style="display:none;margin-top:20px;padding-top:20px;border-top:1px solid var(--border,#eef0f6)">
+        <div style="font-size:12px;font-weight:700;letter-spacing:.14em;color:var(--sub,#9499b7);
+             font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;
+             margin-bottom:12px">Algorithm Trace</div>
+        <div id="idd-expert-content"></div>
+      </div>
+
     </div>`;
 
   document.body.appendChild(drawer);
@@ -218,13 +245,15 @@ const _ATTACK_CONTEXT = {
 })();
 
 // ── State ─────────────────────────────────────────────────────────────────────
-let _drawerCurrentIp = null;
-let _drawerLiveTimer = null;
-let _drawerIsLive    = false;
+let _drawerCurrentIp  = null;
+let _drawerLiveTimer  = null;
+let _drawerIsLive     = false;
+let _drawerReturnFocus = null; /* element to restore focus to on close */
 
 // ── Public API ────────────────────────────────────────────────────────────────
 function openIpDrawer(ip) {
   if (!ip || ip === '--') return;
+  _drawerReturnFocus = document.activeElement; /* remember for restore on close */
   _drawerCurrentIp = ip;
   document.getElementById('idd-ip').textContent = ip;
   document.getElementById('idd-status-badge').innerHTML = '';
@@ -238,12 +267,20 @@ function openIpDrawer(ip) {
   drawer.style.transform     = 'translate(-50%,-50%) scale(1)';
   drawer.setAttribute('aria-hidden', 'false');
 
+  /* Move keyboard focus into the drawer */
+  requestAnimationFrame(() => {
+    const closeBtn = document.getElementById('idd-close-btn');
+    if (closeBtn) closeBtn.focus();
+  });
+
   _fetchIpDetail(ip);
 }
 
 function closeIpDrawer() {
   _stopLivePolling();
-  _drawerCurrentIp = null;
+  const returnTo = _drawerReturnFocus;
+  _drawerCurrentIp    = null;
+  _drawerReturnFocus  = null;
   const overlay = document.getElementById('ip-drawer-overlay');
   const drawer  = document.getElementById('ip-drawer');
   if (overlay) overlay.style.display = 'none';
@@ -255,6 +292,8 @@ function closeIpDrawer() {
   }
   const tip = document.getElementById('idd-tooltip');
   if (tip) tip.style.display = 'none';
+  /* Restore focus to the element that triggered the drawer */
+  if (returnTo && typeof returnTo.focus === 'function') returnTo.focus();
 }
 
 document.addEventListener('keydown', e => {
@@ -287,7 +326,7 @@ function _startLivePolling(ip) {
       if (_drawerCurrentIp !== ip) return;
       _updateLiveSection(data);
     } catch (_) {}
-  }, 2000);
+  }, 5000);
 }
 
 function _stopLivePolling() {
@@ -371,13 +410,13 @@ function _setBadge(isLive) {
 // ── Live section partial update ───────────────────────────────────────────────
 
 function _updateLiveSection(data) {
-  /* Only refresh parts that change — pipeline/history are static per session */
   const f  = data.features || {};
   const ml = data.ml       || {};
   const st = data.state    || {};
   _renderFeatureSignals(f, ml.attack_class);
   _renderMlBars(ml, data.thresholds || {});
   _renderHistoryPills(st);
+  _renderPipeline(data, ml, st, ml.is_anomaly);
 }
 
 // ── Full render ───────────────────────────────────────────────────────────────
@@ -418,6 +457,7 @@ function _renderIpDetail(d) {
   _renderMlBars(ml, th);
   _renderPipeline(d, ml, st, isAnomaly);
   _renderHistoryPills(st);
+  _renderExpertTrace(d, ml, st, f, th);
 
   _iddShow('content');
 }
@@ -500,14 +540,20 @@ function _mkSignalCard(feat, val, isIF) {
   const valCol    = isAlert ? 'var(--red,#ff3d5a)' : 'var(--text,#e8eaf6)';
   /* No triangle — red card is sufficient warning */
   const icon = '';
-  const tip = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
+  const tipText = (_FEAT_TOOLTIPS[feat.label] || '').replace(/'/g,"&#39;");
+  const tip     = tipText.replace(/"/g, '&quot;');
   return `
     <div class="idd-fc"
          style="background:var(--surface,#f7f8fc);border-radius:12px;padding:18px 20px;
                 border:1px solid ${borderCol}"
          data-tip="${tip}"
+         tabindex="0"
+         role="button"
+         aria-label="${feat.label} — press for details"
          onmouseenter="_iddShowTip(event,this.dataset.tip)"
-         onmouseleave="_iddHideTip()">
+         onmouseleave="_iddHideTip()"
+         onfocus="_iddShowTipEl(this)"
+         onblur="_iddHideTip()">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:9px">
         <div style="font-size:13px;color:var(--sub,#9499b7);
              font-family:var(--mono,'Space Mono',monospace);
@@ -573,11 +619,11 @@ function _renderMlBars(ml, th) {
   const rfOver = rfGate   != null ? rfConf  >= rfGate * 100 : false;
 
   const ifThrLabel = ifThrVal != null
-    ? `Threshold ${ifThrVal.toFixed(4)} ${ifOver ? '— score exceeds threshold' : '— score below threshold'}`
-    : 'Threshold: not available';
+    ? `Detection threshold: ${ifThrVal.toFixed(4)} ${ifOver ? '(score exceeds threshold, flow flagged as anomalous)' : '(score below threshold, flow classified as normal)'}`
+    : 'Detection threshold: unavailable';
   const rfThrLabel = rfGate != null
-    ? `Threshold ${(rfGate * 100).toFixed(0)}% ${rfOver ? '— confirms attack class' : '— below confirmation threshold'}`
-    : 'Threshold: not available';
+    ? `Classification gate: ${(rfGate * 100).toFixed(0)}% ${rfOver ? '(confidence meets gate, attack class assigned)' : '(confidence below gate, classification uncertain)'}`
+    : 'Classification gate: unavailable';
 
   /* IF bar: scale so threshold sits at 50% visual position */
   const ifScale  = ifThrVal ? ifThrVal * 2 : 1;
@@ -766,6 +812,21 @@ function _iddShowTip(e, text) {
   _iddMoveTip(e);
 }
 
+/* Show tooltip anchored to an element — used for keyboard focus (no mouseevent) */
+function _iddShowTipEl(el) {
+  const text = el.dataset.tip;
+  if (!text) return;
+  const tip = document.getElementById('idd-tooltip');
+  if (!tip) return;
+  tip.textContent = text;
+  tip.style.display = 'block';
+  const rect = el.getBoundingClientRect();
+  const tw   = tip.offsetWidth || 240;
+  const x    = rect.left + rect.width / 2 - tw / 2;
+  tip.style.left = Math.max(4, Math.min(x, window.innerWidth - tw - 8)) + 'px';
+  tip.style.top  = Math.max(4, rect.bottom + 6) + 'px';
+}
+
 function _iddMoveTip(e) {
   const tip = document.getElementById('idd-tooltip');
   if (!tip || tip.style.display === 'none') return;
@@ -812,4 +873,180 @@ function _fmtTs(ts) {
     const timePart = d.toLocaleTimeString(undefined, { hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false });
     return `${datePart}, ${timePart}`;
   } catch { return '--'; }
+}
+
+// ── Expert Mode: Algorithm Trace ──────────────────────────────────────────────
+function _renderExpertTrace(d, ml, st, f, th) {
+  const expertSection = document.getElementById('idd-expert-section');
+  const expertContent = document.getElementById('idd-expert-content');
+  if (!expertSection || !expertContent) return;
+
+  if (!window.EXPERT_MODE) {
+    expertSection.style.display = 'none';
+    return;
+  }
+  expertSection.style.display = 'block';
+
+  const ifScore = ml.if_score || 0;
+  const isAnomaly = ml.is_anomaly;
+  const attackClass = ml.attack_class || 'Uncertain';
+  const rfConf = ml.confidence || 0;
+  const ifThr = th.if_threshold || 0.6092;
+  const rfGate = th.rf_conf_gate || 0.7;
+
+  // IF feature vector (all 16)
+  const ifFeatures = [
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Elapsed time since the first packet of this flow was observed.' },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed in this flow.' },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume transmitted in this flow, measured in bytes.' },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Current packet rate for this flow. Sustained high values are characteristic of flood-based attacks.' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Current data throughput for this flow. Elevated values indicate high bandwidth consumption.' },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows originating from this source IP.' },
+    { key: 'tp_src', label: 'Src Port', fmt: v => v.toLocaleString(), desc: 'Source port number used by the traffic source.' },
+    { key: 'tp_dst', label: 'Dst Port', fmt: v => v.toLocaleString(), desc: 'Destination port number targeted by the traffic.' },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport layer protocol (TCP, UDP, or ICMP).' },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate. Deviations from normal indicate unusual traffic composition.' },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size. Different attack types produce characteristic packet size signatures.' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Composite metric combining packet count and byte rate on a logarithmic scale. High values indicate flows that are both voluminous and fast, a strong attack indicator.' },
+    { key: 'port_entropy', label: 'Port Entropy', fmt: v => v.toFixed(3), desc: 'Distribution of traffic across source and destination ports. Higher entropy indicates port scanning or flood behavior.' },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration. Indicates sustained throughput over the flow lifetime.' },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Measures consistency of packet sizes within the flow. Attack-generated traffic typically exhibits very low variance, as packets are constructed programmatically with uniform payloads.' },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Composite metric combining packet count and packet rate on a logarithmic scale. High values indicate aggressive, high-rate sources.' },
+  ];
+
+  // RF feature vector (all 15)
+  const rfFeatures = [
+    { key: 'flow_duration_sec', label: 'Flow Duration (s)', fmt: v => v.toFixed(4), desc: 'Elapsed time since the first packet of this flow was observed.' },
+    { key: 'packet_count', label: 'Packet Count', fmt: v => v.toLocaleString(), desc: 'Total number of packets observed in this flow.' },
+    { key: 'byte_count', label: 'Byte Count', fmt: v => _fmtBytes(v).replace('/s',''), desc: 'Total data volume transmitted in this flow, measured in bytes.' },
+    { key: 'packet_count_per_second', label: 'Packet Rate (pps)', fmt: v => v.toLocaleString(undefined, {maximumFractionDigits:1}) + ' pkt/s', desc: 'Current packet rate for this flow. Sustained high values are characteristic of flood-based attacks.' },
+    { key: 'byte_count_per_second', label: 'Byte Rate', fmt: v => _fmtBytes(v), desc: 'Current data throughput for this flow. Elevated values indicate high bandwidth consumption.' },
+    { key: 'flow_count_per_src', label: 'Flows / Source', fmt: v => v.toLocaleString(), desc: 'Number of concurrent flows originating from this source IP.' },
+    { key: 'ip_proto', label: 'IP Protocol', fmt: v => v === 6 ? 'TCP (6)' : v === 17 ? 'UDP (17)' : v === 1 ? 'ICMP (1)' : String(v), desc: 'Transport layer protocol (TCP, UDP, or ICMP).' },
+    { key: 'pkt_byte_rate_ratio', label: 'Pkt/Byte Rate Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of packet rate to byte rate. Deviations from normal indicate unusual traffic composition.' },
+    { key: 'duration_pkt_ratio', label: 'Duration/Pkt Ratio', fmt: v => v.toFixed(4), desc: 'Ratio of flow duration to packet count. Low values indicate high packet density over short durations.' },
+    { key: 'pkt_rate_per_duration', label: 'Pkt Rate/Duration', fmt: v => v.toFixed(4), desc: 'Packet rate scaled by flow duration. Indicates acceleration or deceleration of packet transmission.' },
+    { key: 'avg_bytes_per_pkt', label: 'Avg Bytes/Pkt', fmt: v => v.toFixed(1) + ' B', desc: 'Average packet size. Different attack types produce characteristic packet size signatures.' },
+    { key: 'flow_intensity', label: 'Flow Intensity', fmt: v => v.toFixed(4), desc: 'Composite metric combining packet count and byte rate on a logarithmic scale. High values indicate flows that are both voluminous and fast, a strong attack indicator.' },
+    { key: 'bytes_per_duration', label: 'Bytes/Duration', fmt: v => v.toFixed(2), desc: 'Data volume divided by flow duration. Indicates sustained throughput over the flow lifetime.' },
+    { key: 'pkt_size_uniformity', label: 'Pkt Size Uniformity', fmt: v => v.toFixed(4), desc: 'Measures consistency of packet sizes within the flow. Attack-generated traffic typically exhibits very low variance, as packets are constructed programmatically with uniform payloads.' },
+    { key: 'flow_src_intensity', label: 'Source Intensity', fmt: v => v.toFixed(4), desc: 'Composite metric combining packet count and packet rate on a logarithmic scale. High values indicate aggressive, high-rate sources.' },
+  ];
+
+  // Flat feature lookup
+  const vals = {
+    flow_duration_sec: f.duration_sec || 0,
+    packet_count: f.pkt_count || 0,
+    byte_count: f.byte_count || 0,
+    packet_count_per_second: f.pps || 0,
+    byte_count_per_second: f.byte_rate || 0,
+    flow_count_per_src: f.flow_count_per_src || 1,
+    tp_src: f.tp_src || 0,
+    tp_dst: f.tp_dst || 0,
+    ip_proto: f.ip_proto || 0,
+    pkt_byte_rate_ratio: f.pkt_byte_rate_ratio || 0,
+    avg_bytes_per_pkt: f.pkt_count > 0 ? (f.byte_count || 0) / (f.pkt_count || 1) : 0,
+    flow_intensity: f.flow_intensity || 0,
+    port_entropy: f.port_entropy || 0,
+    bytes_per_duration: f.bytes_per_duration || 0,
+    pkt_size_uniformity: f.pkt_size_uniformity || 0,
+    flow_src_intensity: f.flow_src_intensity || 0,
+    duration_pkt_ratio: (f.duration_sec || 0) > 0 ? (f.duration_sec || 0) / Math.max(f.pkt_count || 1, 1) : 0,
+    pkt_rate_per_duration: (f.pps || 0) / Math.max(f.duration_sec || 1, 1),
+  };
+
+  // IF feature cards
+  let ifHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Isolation Forest (IF) model evaluated 16 flow features. IF is an unsupervised anomaly detector that scores each flow by how distinctly it separates from normal traffic patterns; higher scores indicate greater deviation.</div>';
+  ifHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
+  ifFeatures.forEach(feat => {
+    const val = vals[feat.key];
+    const fmtVal = feat.fmt(val);
+    ifHtml += `
+      <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);border-radius:8px;padding:12px 14px;">
+        <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${feat.label}</div>
+        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e);margin-bottom:4px">${fmtVal}</div>
+        <div style="font-size:10px;color:var(--sub2);font-family:var(--mono);line-height:1.4">${feat.desc}</div>
+      </div>`;
+  });
+  ifHtml += '</div>';
+
+  // RF feature cards
+  let rfHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Random Forest (RF) model classified the flagged anomaly using 15 flow features. RF is a supervised classifier that matches traffic patterns against known attack profiles, producing an attack type and confidence score.</div>';
+  rfHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
+  rfFeatures.forEach(feat => {
+    const val = vals[feat.key];
+    const fmtVal = feat.fmt(val);
+    rfHtml += `
+      <div style="background:var(--surface,#f7f8fc);border:1px solid var(--border,#eef0f6);border-radius:8px;padding:12px 14px;">
+        <div style="font-size:10px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.08em;margin-bottom:4px">${feat.label}</div>
+        <div style="font-family:var(--mono,'Space Mono',monospace);font-size:15px;font-weight:700;color:var(--text,#1a1d2e);margin-bottom:4px">${fmtVal}</div>
+        <div style="font-size:10px;color:var(--sub2);font-family:var(--mono);line-height:1.4">${feat.desc}</div>
+      </div>`;
+  });
+  rfHtml += '</div>';
+
+  // TEA per-IP profile
+  let teaHtml = '';
+  if (d.tea_ip_profile) {
+    const tip = d.tea_ip_profile;
+    teaHtml = `
+      <div style="margin-bottom:16px;">
+        <div style="font-size:11px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">TEA Per-IP Profile</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px;">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Verdict</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:${tip.verdict === 'attack' ? 'var(--red)' : tip.verdict === 'normal' ? 'var(--green)' : 'var(--amber)'}">${tip.verdict.toUpperCase()}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Samples</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${tip.samples || 0}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">PPS Trend</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${(tip.pps_trend || 0).toFixed(2)}</div>
+          </div>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:12px;">
+            <div style="font-size:10px;color:var(--sub);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px">Entropy</div>
+            <div style="font-family:var(--mono);font-size:16px;font-weight:700">${(tip.entropy || 0).toFixed(3)}</div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  // Decision trace
+  let decisionHtml = '';
+  const reasons = [];
+  if (isAnomaly) reasons.push(`IF anomaly score (${ifScore.toFixed(4)}) meets or exceeds detection threshold (${ifThr.toFixed(4)}), flagging this flow as anomalous`);
+  else reasons.push(`IF score (${ifScore.toFixed(4)}) below detection threshold (${ifThr.toFixed(4)}), flow classified as normal`);
+  if (isAnomaly) {
+    if (rfConf >= rfGate * 100) reasons.push(`RF confidence (${rfConf.toFixed(1)}%) meets or exceeds classification gate (${(rfGate*100).toFixed(0)}%), assigning attack class: ${attackClass}`);
+    else reasons.push(`RF confidence (${rfConf.toFixed(1)}%) below classification gate (${(rfGate*100).toFixed(0)}%), classification remains uncertain`);
+  }
+  if (st.phase >= 2) reasons.push(`State machine is in Phase ${st.phase} (${st.action_taken}), enforcement active`);
+  if (f.is_flood_prefilter_flagged) reasons.push(`Flood prefilter flagged this source (overrode IF assessment)`);
+
+  decisionHtml = `
+    <div style="margin-top:16px;">
+      <div style="font-size:11px;color:var(--sub,#9499b7);font-family:var(--mono,'Space Mono',monospace);text-transform:uppercase;letter-spacing:.1em;margin-bottom:8px">Decision Trace</div>
+      <div style="display:flex;flex-direction:column;gap:6px;">
+        ${reasons.map(r => `<div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:12px;font-family:var(--mono);color:var(--text)">${r}</div>`).join('')}
+      </div>
+    </div>`;
+
+  expertContent.innerHTML = `
+    <div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(61,108,255,.1);color:var(--blue);border:1px solid rgba(61,108,255,.25);font-family:var(--mono)">IF Features (16)</span>
+      </div>
+      ${ifHtml}
+    </div>
+    <div style="margin-bottom:20px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(255,176,46,.1);color:var(--amber);border:1px solid rgba(255,176,46,.25);font-family:var(--mono)">RF Features (15)</span>
+      </div>
+      ${rfHtml}
+    </div>
+    ${teaHtml}
+    ${decisionHtml}
+  `;
 }

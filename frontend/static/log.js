@@ -1,7 +1,7 @@
-/* log.js — SSE live events, audit log table DOM updates, recent events replay
+/* log.js - SSE live events, audit log table DOM updates, recent events replay
  * Tracks rows by src_ip to detect phase escalations and update in-place. */
 
-/* Row map — src_ip → { tr, action } — detects escalation for insert-vs-update */
+/* Row map -- `${ip}|${event_type}` -> { tr, action } -- composite key so re-attacks create new rows */
 const _logRows = new Map();
 let logCt = 0;
 
@@ -11,8 +11,8 @@ function addLogRow(ev) {
   const placeholder = tb.querySelector('[colspan]');
   if (placeholder) placeholder.parentElement.remove();
 
-  const ip        = ev.src_ip     || '—';
-  const newAction = ev.action_taken || '—';
+  const ip        = ev.src_ip     || '-';
+  const newAction = ev.action_taken || '-';
 
   /* Append ban duration to Time Ban label if available */
   let actionLabel = newAction;
@@ -21,26 +21,33 @@ function addLogRow(ev) {
   }
 
   const html = `
-    <td class="mono">${ev.timestamp      || '—'}</td>
+    <td class="mono">${ev.timestamp      || '-'}</td>
     <td class="ip">${ip}</td>
-    <td>${renderClass(ev.predicted_class  || '—')}</td>
-    <td>${renderVector(ev.attack_vector   || '—')}</td>
-    <td class="mono">${ev.confidence      || '—'}</td>
+    <td>${renderClass(ev.predicted_class  || '-')}</td>
+    <td>${renderVector(ev.attack_vector   || '-')}</td>
+    <td class="mono">${ev.confidence      || '-'}</td>
     <td>${renderPriority(ev.priority      || 'Low')}</td>
     <td>${renderAction(actionLabel)}</td>`;
 
-  /* Same IP, same action — update in-place with flash */
-  if (_logRows.has(ip)) {
-    const existing = _logRows.get(ip);
-    if (existing.action === newAction) {
-      existing.tr.dataset.ip         = ip;
-      existing.tr.innerHTML          = html;
-      existing.tr.style.transition   = 'background 0.3s';
-      existing.tr.style.background   = 'rgba(61,108,255,0.15)';
-      setTimeout(() => { existing.tr.style.background = ''; }, 600);
-      return;
+  /* Same incident -- update in-place with flash */
+  const key = ip + '|' + (ev.event_type || 'transition');
+  const isRelease = ev.event_type === 'released' || (ev.event_type === 'manual' && /release/i.test(newAction));
+
+  if (_logRows.has(key)) {
+    const existing = _logRows.get(key);
+    // Overwrite the existing row for the session, even if action escalates
+    existing.tr.dataset.ip         = ip;
+    existing.tr.innerHTML          = html;
+    existing.tr.style.transition   = 'background 0.3s';
+    existing.tr.style.background   = 'rgba(61,108,255,0.15)';
+    setTimeout(() => { existing.tr.style.background = ''; }, 600);
+    existing.action = newAction;
+    
+    /* Released events end an incident; clear key so next attack creates a fresh row */
+    if (isRelease) {
+      _logRows.delete(key);
     }
-    /* Action escalated — fall through to insert new row at top */
+    return;
   }
 
   /* Evict oldest row if log is full */
@@ -48,7 +55,7 @@ function addLogRow(ev) {
     const oldest = tb.querySelector('tr:last-child');
     if (oldest) {
       const oldIp = oldest.querySelector('.ip');
-      if (oldIp) _logRows.delete(oldIp.textContent.trim());
+      if (oldIp) _logRows.delete(oldIp.textContent.trim() + '|' + (oldest.dataset.eventType || 'transition'));
       oldest.remove();
     }
   } else {
@@ -60,15 +67,28 @@ function addLogRow(ev) {
   const tr      = document.createElement('tr');
   tr.className  = 'row-in tr-clickable';
   tr.dataset.ip = ip;
+  tr.dataset.eventType = ev.event_type || 'transition';
   tr.innerHTML  = html;
-  _logRows.set(ip, { tr, action: newAction });
+  
+  if (!isRelease) {
+    _logRows.set(key, { tr, action: newAction });
+  }
+  
   tb.insertBefore(tr, tb.firstChild);
 }
 
-/* Connect SSE stream — auto-reconnects on error after 3s */
+/* Connect SSE stream - auto-reconnects on error after 3s */
 function connectSSE() {
   const es     = new EventSource(`${API}/api/events`);
-  es.onmessage = e => { try { addLogRow(JSON.parse(e.data)); } catch (_) {} };
+  es.onmessage = e => { 
+    try { 
+      const parsed = JSON.parse(e.data);
+      if (parsed.type === 'expert') return; // Handled by expert.js
+      
+      const ev = parsed.payload || parsed;
+      if (ev.src_ip) addLogRow(ev); 
+    } catch (_) {} 
+  };
   es.onerror   = ()  => { es.close(); setTimeout(connectSSE, 3000); };
 }
 

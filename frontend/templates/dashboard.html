@@ -4,18 +4,17 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>A-DDoS</title>
-<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;600&family=Source+Sans+Pro:wght@400;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/style.css"/>
+<link rel="stylesheet" href="/static/style.css?v=11"/>
 <script src="/static/chart.umd.min.js"></script>
 <style>
 /* ── Modal sizing ── */
-.modal{min-width:620px;max-width:720px}
+.modal{max-width:720px}
 
 /* ── Date input row ── */
 .date-field{display:flex;flex-direction:column;gap:6px;flex:1}
 .date-field label{font-size:11px;color:var(--sub,#5c6080);letter-spacing:.05em;font-family:var(--mono,'Space Mono',monospace)}
 .date-input-row{display:flex;gap:6px;align-items:center}
-.date-text-input{flex:1;background:var(--card,#13162a);border:1px solid var(--border,#1e2235);border-radius:8px;padding:8px 12px;color:var(--fg,#e8eaf6);font-family:var(--mono,'Space Mono',monospace);font-size:13px;outline:none}
+.date-text-input{flex:1;background:var(--card,#13162a);border:1px solid var(--border,#1e2235);border-radius:8px;padding:8px 12px;color:var(--fg,#e8eaf6);font-family:var(--mono,'Space Mono',monospace);font-size:13px}
 .date-text-input:focus{border-color:var(--blue,#3d6cff)}
 .cal-toggle-btn{background:var(--card,#13162a);border:1px solid var(--border,#1e2235);border-radius:8px;padding:8px 10px;cursor:pointer;color:var(--sub,#5c6080);font-size:16px;transition:color .15s,border-color .15s}
 .cal-toggle-btn:hover{color:var(--blue,#3d6cff);border-color:var(--blue,#3d6cff)}
@@ -31,7 +30,7 @@
 .cal-nav{background:none;border:none;color:var(--sub,#5c6080);font-size:22px;cursor:pointer;padding:0 6px;line-height:1;border-radius:6px}
 .cal-nav:hover{color:var(--fg,#e8eaf6);background:var(--border,#1e2235)}
 .cal-weekdays{display:grid;grid-template-columns:repeat(7,1fr);margin-bottom:4px}
-.cal-weekdays span{text-align:center;font-size:10px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace);padding:3px 0}
+.cal-weekdays span{text-align:center;font-size:11px;color:var(--sub,#5c6080);font-family:var(--mono,'Space Mono',monospace);padding:3px 0}
 .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
 .cal-day{text-align:center;font-size:12px;font-family:var(--mono,'Space Mono',monospace);
   padding:7px 2px;border-radius:7px;cursor:pointer;color:var(--fg,#e8eaf6);position:relative;transition:background .1s}
@@ -48,19 +47,26 @@
 .cal-legend-dot{width:6px;height:6px;border-radius:50%;background:var(--green,#00d68f);flex-shrink:0}
 .t-ban{background:rgba(255,140,0,.15);color:#ffb300;border:1px solid rgba(255,140,0,.3)}
 .t-blackhole{background:rgba(180,0,0,.2);color:#ff4444;border:1px solid rgba(180,0,0,.4)}
+/* reset <button> used for cal-day so it inherits the cal-day style */
+button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono,'Space Mono',monospace);padding:7px 2px;border-radius:7px;cursor:pointer;color:var(--fg,#e8eaf6);position:relative;transition:background .1s;display:block;width:100%;box-sizing:border-box}
 </style>
 </head>
 <body>
 <div id="app">
 
   <!-- Header -->
-  <header>
+<header>
     <div>
       <div class="logo-name"><span>A-</span>DDoS</div>
-      <div class="logo-sub">Threat Detection &amp; Mitigation System</div>
+      <div class="logo-sub">Threat Detection & Mitigation System</div>
     </div>
     <div class="header-right">
-      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()">☀ Light Mode</button>
+      <div class="status-pill" id="status-pill" style="display:none" aria-live="polite" aria-label="System status">
+        <div class="dot" id="status-dot"></div>
+        <span id="status-text">System Online</span>
+      </div>
+      <button class="expert-btn" id="expert-btn" onclick="toggleExpertMode()" aria-pressed="false" title="Expert Mode: live algorithmic internals">Expert Mode</button>
+      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()">Light Mode</button>
       <button class="btn" onclick="openModal()">Generate Report</button>
     </div>
   </header>
@@ -183,8 +189,9 @@
         </thead>
         <tbody id="log-body">
           <tr>
-            <td colspan="7" style="padding:36px;text-align:center;color:var(--sub);font-family:var(--mono);font-size:11px">
-              Waiting for events…
+            <td colspan="7" style="padding:48px;text-align:center;color:var(--sub);font-family:var(--sans);font-size:13px">
+              <div style="font-size:16px;margin-bottom:8px;font-weight:500;">Monitoring traffic flow</div>
+              <div style="font-size:11px;color:var(--sub2)">Detected threats will appear here.</div>
             </td>
           </tr>
         </tbody>
@@ -205,6 +212,7 @@
         <thead>
           <tr>
             <th>IP Address</th>
+            <th>Priority</th>
             <th>Phase</th>
             <th>Attack Vector</th>
             <th>IF Score</th>
@@ -215,10 +223,44 @@
         </thead>
         <tbody id="q-body">
           <tr>
-            <td colspan="7" class="q-empty">No IPs currently under active mitigation.</td>
+            <td colspan="8" class="q-empty">
+              <div style="font-size:16px;margin-bottom:8px;font-weight:500;">No active mitigations</div>
+              <div style="font-size:11px;color:var(--sub2)">System is operating normally.</div>
+            </td>
           </tr>
         </tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Expert Mode: Pipeline Visualization (hidden by default) -->
+  <div id="expert-pipeline-panel" class="expert-hidden">
+    <div class="expert-pipeline-canvas-wrap">
+      <div class="expert-pipeline-header">
+        <span class="expert-pipeline-eyebrow">Detection and Mitigation Pipeline &middot; click a stage to inspect</span>
+        <span class="expert-pipeline-live"><span class="expert-pipeline-live-dot"></span>streaming</span>
+      </div>
+      <canvas id="expert-pipeline-canvas"></canvas>
+    </div>
+    <div class="expert-inspector-row">
+      <div id="expert-stage-inspector" class="expert-inspector"></div>
+      <div id="expert-live-metrics" class="expert-metrics-panel"></div>
+    </div>
+  </div>
+
+  <!-- Expert Mode Panels (hidden by default) -->
+  <div id="expert-panels" class="expert-hidden">
+    <div class="panel" id="expert-ml">
+      <div class="panel-header">
+        <div class="panel-title">ML Internals</div>
+      </div>
+      <div id="expert-ml-content"></div>
+    </div>
+    <div class="panel" id="expert-mitigation">
+      <div class="panel-header">
+        <div class="panel-title">Mitigation State Machine</div>
+      </div>
+      <div id="expert-mitigation-content"></div>
     </div>
   </div>
 
@@ -291,26 +333,28 @@
 
 <!-- Inject backend URL and config from Python -->
 <script>
-  window.API_URL  = "{{ api_url }}";
-  window.POLL_MS  = {{ poll_ms }};
-  window.MAX_PTS  = {{ max_pts }};
-  window.MAX_LOG  = {{ max_log }};
+  window.API_URL      = "{{ api_url }}";
+  window.POLL_MS      = {{ poll_ms }};
+  window.MAX_PTS      = {{ max_pts }};
+  window.MAX_LOG      = {{ max_log }};
+  window.EXPERT_MODE  = localStorage.getItem('addos-expert') === '1';
 </script>
 <!-- Load order matters: api → ui → chart → stats → quarantine → log → main -->
-<script src="/static/api.js"></script>
-<script src="/static/ui.js"></script>
-<script src="/static/chart.js"></script>
-<script src="/static/stats.js"></script>
-<script src="/static/mitigation.js"></script>
-<script src="/static/log.js"></script>
-<script src="/static/main.js"></script>
+<script src="/static/api.js?v=8"></script>
+<script src="/static/ui.js?v=9"></script>
+<script src="/static/chart.js?v=8"></script>
+<script src="/static/stats.js?v=7"></script>
+<script src="/static/mitigation.js?v=7"></script>
+<script src="/static/log.js?v=7"></script>
+<script src="/static/main.js?v=8"></script>
 <script>
-  /* Poll system metrics every 5s, model accuracy every 30s */
+  /* Poll system metrics every 1s, model accuracy every 1s */
   fetchSystemMetrics();
   pollModelInfo();
   setInterval(fetchSystemMetrics, 1000);
   setInterval(pollModelInfo, 1000);
 </script>
-<script src="/static/ip-drawer.js"></script>
+<script src="/static/ip-drawer.js?v=8"></script>
+<script src="/static/expert.js?v=13"></script>
 </body>
 </html>

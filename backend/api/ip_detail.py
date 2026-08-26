@@ -2,6 +2,7 @@ import math
 from flask import Blueprint, jsonify
 from backend.pipeline.flow_tracker import tracker
 from backend.mitigation.state_machine import state_machine
+from backend.pipeline.entropy_analyzer import entropy_analyzer
 from backend.database.db import query
 from backend.models import loader
 from backend.mitigation import behavioral
@@ -12,7 +13,7 @@ bp = Blueprint("ip_detail", __name__)
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _is_active(src_ip: str) -> bool:
-    # Check if IP is currently in state machine (phase 1-4 = active mitigation)
+    # Check if IP is currently in state machine (phase 1-3 = active mitigation)
     try:
         state = state_machine._states.get(src_ip)
         return state is not None
@@ -47,9 +48,39 @@ def _build_live_features(src_ip: str) -> dict | None:
 
     # Pull live phase/priority from state machine
     state    = state_machine._states.get(src_ip)
-    phase    = state.phase        if state else "—"
+    phase    = state.phase        if state else 0
     priority = state.priority     if state else "—"
     action   = state.action_taken if state else "—"
+
+    # TEA per-IP profile
+    tea_verdict = "uncertain"
+    tea_samples = 0
+    tea_pps_trend = 0.0
+    tea_entropy = 0.0
+    try:
+        tea_verdict = entropy_analyzer.get_ip_verdict(src_ip)
+        with entropy_analyzer._lock:
+            profile = entropy_analyzer._ip_profiles.get(src_ip)
+            if profile:
+                tea_samples = len(profile._pps_samples)
+                if len(profile._pps_samples) >= 2:
+                    tea_pps_trend = profile._pps_samples[-1] - profile._pps_samples[0]
+                pps_list = list(profile._pps_samples)
+                pps_mean = sum(pps_list) / len(pps_list) if pps_list else 0.0
+                pps_var = sum((x - pps_mean) ** 2 for x in pps_list) / len(pps_list) if pps_list else 0.0
+                tea_entropy = math.sqrt(max(pps_var, 1e-9))
+    except Exception:
+        pass
+
+    # Expert trace feature fields (from IF/RF feature contracts)
+    flow_count_per_src = fs.get("flow_count_per_src", 0)
+    tp_src        = float(fs.get("tp_src", 0))
+    tp_dst        = float(fs.get("tp_dst", 0))
+    ip_proto      = float(fs.get("ip_proto", 0))
+    pkt_byte_rate_ratio = round((fs.get("packet_count_per_second", 0) or 0) / (fs.get("byte_count_per_second", 1) or 1), 4)
+    flow_intensity = round(math.log1p(max((fs.get("packet_count", 0) or 0) * (fs.get("byte_count_per_second", 0) or 0), 0)), 4)
+    bytes_per_duration = round((fs.get("byte_count", 0) or 0) / max(fs.get("flow_duration_sec", 1) or 1, 1), 4)
+    flow_src_intensity = round(math.log1p(max((fs.get("packet_count", 0) or 0) * (fs.get("packet_count_per_second", 0) or 0), 0)), 4)
 
     return {
         "src_ip":   src_ip,
@@ -64,27 +95,45 @@ def _build_live_features(src_ip: str) -> dict | None:
             "bytes_per_packet":    bytes_per_packet,
             "port_entropy":        port_entropy,
             "pkt_size_uniformity": pkt_size_uniformity,
+            # Expert trace fields
+            "flow_count_per_src": flow_count_per_src,
+            "tp_src":        tp_src,
+            "tp_dst":        tp_dst,
+            "ip_proto":      ip_proto,
+            "pkt_byte_rate_ratio": pkt_byte_rate_ratio,
+            "flow_intensity": flow_intensity,
+            "bytes_per_duration": bytes_per_duration,
+            "flow_src_intensity": flow_src_intensity,
         },
         "ml": {
             "if_score":     cached.if_score,
             "is_anomaly":   cached.is_anomaly,
             "attack_class": cached.attack_class,
-            "confidence":   round(cached.confidence * 100, 1),
+            "confidence":   round(cached.confidence * 100, 4),
         },
         "state": {
             "phase":            phase,
+            "phase_label":      state.phase_label() if state else "—",
             "priority":         priority,
             "action_taken":     action,
-            "offence_count":    getattr(state, "offence_count", 0) if state else 0,
+
             "ban_level":        getattr(state, "ban_level", 0)     if state else 0,
             "reputation_score": behavioral.get_decay_score(src_ip),
-            "first_seen":       None,
+            "offence_count":    behavioral.get_offence_count(src_ip),
+            "first_seen":       state.first_seen if state else None,
+            "last_seen":        None,
         },
         "thresholds": {
             "if_threshold": loader.if_threshold,
             "rf_conf_gate": loader.rf_conf_gate,
         },
         "phase_history": [],
+        "tea_ip_profile": {
+            "verdict": tea_verdict,
+            "samples": tea_samples,
+            "pps_trend": tea_pps_trend,
+            "entropy": tea_entropy,
+        },
     }
 
 
@@ -146,7 +195,7 @@ def _build_db_features(src_ip: str) -> dict | None:
 
     # ip_attack_history — offence/ban/phase metadata
     hist = query("""
-        SELECT offence_count, ban_level, phase_reached, first_seen, priority
+        SELECT ban_level, phase_reached, first_seen, priority
         FROM ip_attack_history
         WHERE src_ip = ?
         ORDER BY unblocked_at DESC LIMIT 1
@@ -155,13 +204,13 @@ def _build_db_features(src_ip: str) -> dict | None:
 
     # Phase history — all distinct phase transitions
     phase_rows = query("""
-        SELECT timestamp, phase, action_taken, attack_vector
+        SELECT timestamp, phase, action_taken, attack_vector, event_type, reason
         FROM mitigation_events WHERE src_ip = ?
         ORDER BY timestamp ASC
     """, (src_ip,))
     if not phase_rows:
         phase_rows = query("""
-            SELECT timestamp, phase, action_taken, attack_vector
+            SELECT timestamp, phase, action_taken, attack_vector, event_type, reason
             FROM mitigation_events_archive WHERE src_ip = ?
             ORDER BY timestamp ASC
         """, (src_ip,))
@@ -175,14 +224,45 @@ def _build_db_features(src_ip: str) -> dict | None:
             seen.add(key)
             phases.append({
                 "timestamp":     pr.get("timestamp"),
-                "phase":         pr.get("phase") or "—",
+                "phase":         pr.get("phase") or 0,
                 "action_taken":  pr.get("action_taken") or "—",
                 "attack_vector": pr.get("attack_vector") or "—",
+                "event_type":    pr.get("event_type"),
+                "reason":        pr.get("reason"),
             })
+
+    # TEA per-IP profile for historical IPs (from DB if available, else verdict)
+    tea_verdict = "uncertain"
+    tea_samples = 0
+    tea_pps_trend = 0.0
+    tea_entropy = 0.0
+    try:
+        tea_verdict = entropy_analyzer.get_ip_verdict(src_ip)
+        with entropy_analyzer._lock:
+            profile = entropy_analyzer._ip_profiles.get(src_ip)
+            if profile:
+                tea_samples = len(profile._pps_samples)
+                if len(profile._pps_samples) >= 2:
+                    tea_pps_trend = profile._pps_samples[-1] - profile._pps_samples[0]
+                pps_list = list(profile._pps_samples)
+                pps_mean = sum(pps_list) / len(pps_list) if pps_list else 0.0
+                pps_var = sum((x - pps_mean) ** 2 for x in pps_list) / len(pps_list) if pps_list else 0.0
+                tea_entropy = math.sqrt(max(pps_var, 1e-9))
+    except Exception:
+        pass
+
+    # DB phase is string label, convert to numeric
+    db_phase = 0
+    if ev.get("phase"):
+        phase_map = {"Quarantined": 1, "Time Ban": 2, "Blackhole": 3}
+        db_phase = phase_map.get(ev.get("phase"), 0)
+    if not db_phase and h.get("phase_reached"):
+        phase_map = {"Quarantined": 1, "Time Ban": 2, "Blackhole": 3}
+        db_phase = phase_map.get(h.get("phase_reached"), 0)
 
     return {
         "src_ip":   src_ip,
-        "is_live":  False,
+        "is_live":  _is_active(src_ip),
         "features": {
             "pkt_count":     feat.get("packet_count", 0) or 0,
             "byte_count":    feat.get("byte_count", 0) or 0,
@@ -192,6 +272,15 @@ def _build_db_features(src_ip: str) -> dict | None:
             "port_entropy":        port_entropy,
             "pkt_size_uniformity": pkt_size_uniformity,
             "duration_sec":  feat.get("flow_duration_sec", 0) or 0,
+            # Expert trace fields
+            "flow_count_per_src": feat.get("flow_count_per_src", 0) or 0,
+            "tp_src":        tp_src,
+            "tp_dst":        tp_dst,
+            "ip_proto":      feat.get("ip_proto", 0) or 0,
+            "pkt_byte_rate_ratio": round(feat.get("packet_count_per_second", 0) / (feat.get("byte_count_per_second", 1) or 1), 4) if feat.get("packet_count_per_second") is not None else 0.0,
+            "flow_intensity": round(math.log1p(max((feat.get("packet_count", 0) or 0) * (feat.get("byte_count_per_second", 0) or 0), 0)), 4),
+            "bytes_per_duration": round((feat.get("byte_count", 0) or 0) / max(feat.get("flow_duration_sec", 1) or 1, 1), 4),
+            "flow_src_intensity": round(math.log1p(max((feat.get("packet_count", 0) or 0) * (feat.get("packet_count_per_second", 0) or 0), 0)), 4),
         },
         "ml": {
             "if_score":     if_score,
@@ -200,18 +289,26 @@ def _build_db_features(src_ip: str) -> dict | None:
             "confidence":   conf_pct,
         },
         "state": {
-            "phase":            ev.get("phase") or h.get("phase_reached") or "—",
+            "phase":            db_phase,
             "priority":         ev.get("priority") or h.get("priority") or "—",
             "action_taken":     ev.get("action_taken") or "—",
-            "offence_count":    h.get("offence_count", 0),
+
             "ban_level":        h.get("ban_level", 0),
             "reputation_score": behavioral.get_decay_score(src_ip),
+            "offence_count":    behavioral.get_offence_count(src_ip),
             "first_seen":       h.get("first_seen"),
+            "last_seen":        h.get("last_seen"),
         },
         "phase_history":  phases,
         "thresholds": {
             "if_threshold": loader.if_threshold,
             "rf_conf_gate": loader.rf_conf_gate,
+        },
+        "tea_ip_profile": {
+            "verdict": tea_verdict,
+            "samples": tea_samples,
+            "pps_trend": tea_pps_trend,
+            "entropy": tea_entropy,
         },
     }
 

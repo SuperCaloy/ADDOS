@@ -1,4 +1,5 @@
 import logging
+import math
 from backend.database import writer
 
 log = logging.getLogger(__name__)
@@ -6,14 +7,21 @@ log = logging.getLogger(__name__)
 # ── Thresholds ─────────────────────────────────────────────────────────────
 # Weighted offense score that triggers direct blackhole (half-life decay, 24h)
 # Score = sum of (2.0 * 0.5^(hours_elapsed/24)) per offense
-# Needs burst/repeat attacks to reach 5.0 — casual probing decays below threshold
-BLACKHOLE_OFFENSE_THRESHOLD = 5.0
+# 5 rapid attacks = 10.0 = blackhole (max persistence)
+BLACKHOLE_OFFENSE_THRESHOLD = 10.0
 
-# IF score that always forces High priority
-HIGH_PRIORITY_IF_THRESHOLD  = 0.75
+# Attack vector severity weights (higher = more severe)
+VECTOR_SEVERITY = {
+    "SYN Flood":  1.0,
+    "ICMP Flood": 0.8,
+    "UDP Flood":  0.9,
+    "Uncertain":  0.5,
+}
 
-# IF score that forces High priority only for repeat offenders (2+ offenses)
-REPEAT_HIGH_PRIORITY_IF     = 0.65
+# Priority tier thresholds (composite severity score)
+PRIORITY_CRITICAL_THRESHOLD = 0.85
+PRIORITY_HIGH_THRESHOLD     = 0.65
+PRIORITY_MEDIUM_THRESHOLD   = 0.45
 
 
 def record_offense(src_ip: str, attack_vector: str, if_score: float,
@@ -36,30 +44,30 @@ def record_offense(src_ip: str, attack_vector: str, if_score: float,
             ban_level      = ban_level,
             offence_count  = offence_count,
         )
-        log.debug("Behavioral: offense recorded — %s  vector=%s  phase=%d",
+        log.debug("Behavioral: offense recorded - %s  vector=%s  phase=%d",
                   src_ip, attack_vector, phase_reached)
     except Exception as exc:
-        log.warning("Behavioral: failed to record offense for %s — %s", src_ip, exc)
+        log.warning("Behavioral: failed to record offense for %s - %s", src_ip, exc)
 
 
 def get_decay_score(src_ip: str) -> float:
-    # Reuses writer.get_offense_count — already implements half-life decay.
+    # Reuses writer.get_offense_count - already implements half-life decay.
     # Score = sum of (2.0 * 0.5^(hours_elapsed/24)) per offence.
     # Fresh offence ~2.0, 24h ago ~1.0, 48h ago ~0.5
     try:
         return writer.get_offense_count(src_ip)
     except Exception as exc:
-        log.warning("Behavioral: decay score failed for %s — %s", src_ip, exc)
+        log.warning("Behavioral: decay score failed for %s - %s", src_ip, exc)
         return 0.0
 
 
 def get_offence_count(src_ip: str) -> int:
-    # Raw count — literal number of times this IP has offended.
+    # Raw count - literal number of times this IP has offended.
     try:
         count = writer.get_offense_total_count(src_ip)
         return count if count is not None else 0
     except Exception as exc:
-        log.warning("Behavioral: failed to get offence count for %s — %s", src_ip, exc)
+        log.warning("Behavioral: failed to get offence count for %s - %s", src_ip, exc)
         return 0
 
 
@@ -70,7 +78,7 @@ def get_offences(src_ip: str) -> int:
         count = writer.get_offense_total_count(src_ip)
         return count if count is not None else 0
     except Exception as exc:
-        log.warning("Behavioral: failed to get offenses for %s — %s", src_ip, exc)
+        log.warning("Behavioral: failed to get offenses for %s - %s", src_ip, exc)
         return 0
 
 
@@ -81,7 +89,7 @@ def get_ban_level(src_ip: str) -> int:
         level = writer.get_ban_level(src_ip)
         return level if level is not None else 0
     except Exception as exc:
-        log.warning("Behavioral: failed to get ban level for %s — %s", src_ip, exc)
+        log.warning("Behavioral: failed to get ban level for %s - %s", src_ip, exc)
         return 0
 
 
@@ -95,28 +103,38 @@ def should_blackhole(src_ip: str, current_ban_level: int) -> bool:
     # Returns True if IP should skip ban escalation and go straight to blackhole.
     # Triggers when:
     #   - weighted offense score >= BLACKHOLE_OFFENSE_THRESHOLD (persistent offender)
-    #   - score uses half-life decay — needs burst/recent attacks to trigger
-    offense_score = get_offences(src_ip)
+    #   - score uses half-life decay - needs burst/recent attacks to trigger
+    offense_score = get_decay_score(src_ip)
     if offense_score >= BLACKHOLE_OFFENSE_THRESHOLD:
-        log.info("Behavioral: %s score=%.2f >= %.1f → blackhole",
+        log.info("Behavioral: %s decay_score=%.2f >= %.1f -> blackhole",
                  src_ip, offense_score, BLACKHOLE_OFFENSE_THRESHOLD)
         return True
     return False
 
 
-def assign_priority(if_score: float, confidence: float, src_ip: str = "") -> str:
-    # High if: confirmed attack (IF>=0.75 AND conf>=0.80)
-    #          repeat offender (2+ offences)
-    #          persistent attacker (decay score >= 3.0)
-    if if_score >= HIGH_PRIORITY_IF_THRESHOLD and confidence >= 0.80:
-        return "High"
+def assign_priority(if_score: float, confidence: float, src_ip: str = "",
+                    attack_class: str = "Uncertain",
+                    recent_pps: float = 0.0) -> str:
+    base = if_score * confidence
 
+    severity = VECTOR_SEVERITY.get(attack_class, 0.5)
+    vector_bonus = (severity - 0.5) * 0.5
+
+    volume_factor = 0.0
+    if recent_pps > 10:
+        volume_factor = min(0.15, math.log10(recent_pps / 10) * 0.05)
+
+    reputation_factor = 0.0
     if src_ip:
-        if get_offences(src_ip) >= 2:
-            log.debug("Behavioral: %s → High (repeat offender)", src_ip)
-            return "High"
-        if get_decay_score(src_ip) >= 3.0:
-            log.debug("Behavioral: %s → High (persistent, decay=%.2f)", src_ip, get_decay_score(src_ip))
-            return "High"
+        decay = get_decay_score(src_ip)
+        reputation_factor = min(0.2, decay * 0.02)
 
+    composite = min(1.0, base + vector_bonus + volume_factor + reputation_factor)
+
+    if composite >= PRIORITY_CRITICAL_THRESHOLD:
+        return "Critical"
+    if composite >= PRIORITY_HIGH_THRESHOLD:
+        return "High"
+    if composite >= PRIORITY_MEDIUM_THRESHOLD:
+        return "Medium"
     return "Low"
