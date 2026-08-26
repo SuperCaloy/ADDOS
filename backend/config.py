@@ -32,9 +32,7 @@ EXTRACTION_TRIGGER_PKTS = 1
 EXTRACTION_TRIGGER_S    = 0.05
 
 # --- RF micro-batching (B1) ---
-# Amortizes GIL-held tree dispatch by predicting a small tray of anomalous
-# rows in one predict_proba call. Off by default until benchmark-gated.
-RF_BATCH_ENABLED  = False
+RF_BATCH_ENABLED  = True
 RF_BATCH_MAX      = 16
 RF_BATCH_WINDOW_MS = 50
 

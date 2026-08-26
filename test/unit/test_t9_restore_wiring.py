@@ -50,6 +50,34 @@ def test_restore_phase2_pushes_block_with_remaining_ttl(temp_db, monkeypatch):
     assert 60 <= cmd["ttl"] <= 120
 
 
+def test_restore_hold_pushes_rate_limit(temp_db, monkeypatch):
+    """Unscored hold rows persist as phase 2 permanent, but live as
+    throttles; restoring them as block would hard-drop a host that was only
+    being held (BFA-P2, F5)."""
+    machine = StateMachine()
+    sent = []
+
+    class FakeCommander:
+        def send(self, cmd):
+            sent.append(cmd)
+
+    machine._commander = FakeCommander()
+    row = _row(120)
+    row["action_taken"] = "Holding (unscored, queue overload)"
+    monkeypatch.setattr(writer, "load_quarantine_states", lambda: [row])
+
+    machine.restore_from_db()
+
+    assert len(sent) == 1
+    assert sent[0]["action"] == "rate_limit"
+    assert sent[0]["src_ip"] == "10.0.0.66"
+
+
 def test_main_wires_restore_from_db():
+    """restore_from_db must be called inside create_app, after the DB is
+    initialized and before the tick thread starts."""
     src = (REPO_ROOT / "backend" / "main.py").read_text(encoding="utf-8")
-    assert "restore_from_db" in src
+    create_app = src.split("def create_app()", 1)[1]
+    assert create_app.index("get_connection()") < \
+        create_app.index("restore_from_db") < \
+        create_app.index("start_tick_thread()")

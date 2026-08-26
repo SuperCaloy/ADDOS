@@ -129,57 +129,68 @@ class StateMachine:
 
         with self._lock:
             for r in rows:
-                src_ip       = r["src_ip"]
-                permanent    = bool(r.get("permanent", False))
-                expires_at   = r.get("block_expires_at")
+                try:
+                    src_ip       = r["src_ip"]
+                    permanent    = bool(r.get("permanent", False))
+                    expires_at   = r.get("block_expires_at")
 
-                if not permanent:
-                    # Non-permanent entries are stale after restart - purge
-                    self._push_command(src_ip, "clear")
-                    writer.delete_quarantine_state(src_ip)
-                    log.info("Purged stale entry: %s", src_ip)
-                    purged += 1
-                    continue
-
-                if expires_at is not None:
-                    try:
-                        exp_dt      = datetime.datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
-                        remaining_s = (exp_dt - now_wall).total_seconds()
-                    except ValueError:
-                        remaining_s = 0
-
-                    if remaining_s <= 0:
-                        # TTL expired while backend was down - release
+                    if not permanent:
+                        # Non-permanent entries are stale after restart - purge
                         self._push_command(src_ip, "clear")
                         writer.delete_quarantine_state(src_ip)
-                        log.info("TTL expired during downtime, released: %s", src_ip)
-                        expired += 1
+                        log.info("Purged stale entry: %s", src_ip)
+                        purged += 1
                         continue
 
-                    ttl_expires_at = time.monotonic() + remaining_s
-                    ttl_for_cmd    = int(remaining_s)
-                else:
-                    ttl_expires_at = None
-                    ttl_for_cmd    = None
+                    if expires_at is not None:
+                        try:
+                            exp_dt      = datetime.datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
+                            remaining_s = (exp_dt - now_wall).total_seconds()
+                        except ValueError:
+                            remaining_s = 0
 
-                state = IpState(
-                    src_ip         = src_ip,
-                    phase          = r["phase"],
-                    attack_vector  = r.get("attack_vector", "Uncertain"),
-                    if_score       = float(r.get("if_score", 0) or 0),
-                    confidence     = float(r.get("confidence", 0) or 0),
-                    action_taken   = r.get("action_taken", "Quarantined"),
-                    permanent      = permanent,
-                    ttl_expires_at = ttl_expires_at,
-                )
-                self._states[src_ip] = state
-                # Phase 2 is a full block (live escalation sends block with
-                # ttl); restoring it as rate_limit silently downgraded
-                # surviving Time Bans to meter throttles (BFA-P2).
-                _action_map = {1: "rate_limit", 2: "block", 3: "block"}
-                self._push_command(src_ip, _action_map.get(r["phase"], "rate_limit"),
-                                   ttl=ttl_for_cmd)
-                restored += 1
+                        if remaining_s <= 0:
+                            # TTL expired while backend was down - release
+                            self._push_command(src_ip, "clear")
+                            writer.delete_quarantine_state(src_ip)
+                            log.info("TTL expired during downtime, released: %s", src_ip)
+                            expired += 1
+                            continue
+
+                        ttl_expires_at = time.monotonic() + remaining_s
+                        ttl_for_cmd    = int(remaining_s)
+                    else:
+                        ttl_expires_at = None
+                        ttl_for_cmd    = None
+
+                    action_taken = r.get("action_taken", "Quarantined")
+                    state = IpState(
+                        src_ip         = src_ip,
+                        phase          = r["phase"],
+                        attack_vector  = r.get("attack_vector", "Uncertain"),
+                        if_score       = float(r.get("if_score", 0) or 0),
+                        confidence     = float(r.get("confidence", 0) or 0),
+                        action_taken   = action_taken,
+                        permanent      = permanent,
+                        ttl_expires_at = ttl_expires_at,
+                    )
+                    self._states[src_ip] = state
+                    # Phase 2 is a full block (live escalation sends block
+                    # with ttl); restoring it as rate_limit silently
+                    # downgraded surviving Time Bans to meter throttles
+                    # (BFA-P2). Exception: unscored HOLD rows are throttle
+                    # by design, even though they persist as phase 2; do
+                    # not hard-drop a host that was only being held.
+                    _action_map = {1: "rate_limit", 2: "block", 3: "block"}
+                    if action_taken.startswith(self._UNSCORED_TAG):
+                        _restore_action = "rate_limit"
+                    else:
+                        _restore_action = _action_map.get(r["phase"], "rate_limit")
+                    self._push_command(src_ip, _restore_action, ttl=ttl_for_cmd)
+                    restored += 1
+                except Exception as e:
+                    log.warning("Restore skipped malformed row for %s: %s",
+                                r.get("src_ip"), e)
 
         log.info("Restore complete - %d restored  %d purged  %d TTL-expired",
                  restored, purged, expired)
