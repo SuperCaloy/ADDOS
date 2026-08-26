@@ -72,3 +72,26 @@ def run_rf_inference(vec_scaled: np.ndarray) -> tuple[str, float]:
         attack_class = "Uncertain"
 
     return attack_class, conf
+
+
+def run_rf_inference_batch(vecs_scaled) -> list[tuple[str, float]]:
+    """Decode a stacked batch of already-scaled rows.
+
+    Per-row semantics identical to run_rf_inference; only the tree dispatch
+    is amortized across rows.
+    """
+    loader.require_loaded()
+
+    mat = np.vstack([np.asarray(v) for v in vecs_scaled])
+    probas = loader.rf_model.predict_proba(mat)
+
+    out = []
+    for row in probas:
+        idx  = int(np.argmax(row))
+        conf = float(row[idx])
+        if conf >= loader.rf_conf_gate:
+            attack_class = loader.rf_encoder.inverse_transform([idx])[0]
+        else:
+            attack_class = "Uncertain"
+        out.append((attack_class, conf))
+    return out

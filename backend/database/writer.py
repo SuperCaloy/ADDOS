@@ -172,33 +172,7 @@ def log_detection_features(src_ip: str, if_score: float,
         flag_udp_flood  = 1 if attack_class == "UDP Flood"  else 0
         flag_normal     = 1 if not is_anomaly               else 0
 
-        execute("""
-            INSERT INTO detection_features (
-                timestamp, src_ip, if_score, is_anomaly, attack_class, confidence,
-                flow_duration_sec, flow_duration_nsec, idle_timeout, hard_timeout,
-                flags, packet_count, byte_count,
-                packet_count_per_second, packet_count_per_nsecond,
-                byte_count_per_second,  byte_count_per_nsecond,
-                flow_duration_total_ns, bytes_per_packet, pkt_byte_rate_ratio,
-                flow_count_per_src, tp_src, tp_dst, ip_proto,
-                flow_intensity, port_entropy, bytes_per_duration,
-                pkt_size_uniformity, flow_src_intensity,
-                duration_pkt_ratio, pkt_rate_per_duration,
-                flag_syn_flood, flag_icmp_flood, flag_udp_flood, flag_normal
-            ) VALUES (
-                ?,?,?,?,?,?,
-                ?,?,?,?,
-                ?,?,?,
-                ?,?,
-                ?,?,
-                ?,?,?,
-                ?,?,?,?,
-                ?,?,?,
-                ?,?,
-                ?,?,
-                ?,?,?,?
-            )
-        """, (
+        _buffer_feature_row((
             ts, src_ip, round(if_score, 6), int(is_anomaly),
             attack_class, round(confidence, 6),
             flow_duration_sec, flow_duration_nsec, idle_timeout, hard_timeout,
@@ -214,6 +188,91 @@ def log_detection_features(src_ip: str, if_score: float,
         ))
     except Exception:
         log.exception("Failed to write detection_features for %s", src_ip)
+
+
+# ---------------------------------------------------------------------------
+# detection_features batcher
+# Rows buffer in arrival order and flush every cycle. Timestamps are taken at
+# enqueue time (above) so stored order matches completion order.
+# ---------------------------------------------------------------------------
+
+_FEATURES_INSERT_SQL = """
+    INSERT INTO detection_features (
+        timestamp, src_ip, if_score, is_anomaly, attack_class, confidence,
+        flow_duration_sec, flow_duration_nsec, idle_timeout, hard_timeout,
+        flags, packet_count, byte_count,
+        packet_count_per_second, packet_count_per_nsecond,
+        byte_count_per_second,  byte_count_per_nsecond,
+        flow_duration_total_ns, bytes_per_packet, pkt_byte_rate_ratio,
+        flow_count_per_src, tp_src, tp_dst, ip_proto,
+        flow_intensity, port_entropy, bytes_per_duration,
+        pkt_size_uniformity, flow_src_intensity,
+        duration_pkt_ratio, pkt_rate_per_duration,
+        flag_syn_flood, flag_icmp_flood, flag_udp_flood, flag_normal
+    ) VALUES (
+        ?,?,?,?,?,?,
+        ?,?,?,?,
+        ?,?,?,
+        ?,?,
+        ?,?,
+        ?,?,?,
+        ?,?,?,?,
+        ?,?,?,
+        ?,?,
+        ?,?,
+        ?,?,?,?
+    )
+"""
+_FEATURES_FLUSH_INTERVAL_S = 5.0
+_FEATURES_BUF_CAP_DEFAULT = 2000
+_FEATURES_BATCH_CHUNK = 200
+
+_features_lock = threading.Lock()
+_features_buf: list[tuple] = []
+_FEATURES_BUF_CAP = _FEATURES_BUF_CAP_DEFAULT
+_features_overflow_count = 0
+
+
+def _buffer_feature_row(row: tuple) -> None:
+    global _features_overflow_count
+    with _features_lock:
+        if len(_features_buf) >= _FEATURES_BUF_CAP:
+            _features_buf.pop(0)
+            _features_overflow_count += 1
+        _features_buf.append(row)
+
+
+def features_overflow_count() -> int:
+    with _features_lock:
+        return _features_overflow_count
+
+
+def flush_detection_features() -> int:
+    """Drain the feature buffer into the DB in FIFO chunks.
+
+    A chunk-level failure falls back to per-row inserts so one bad row
+    cannot lose its siblings (mirrors the old per-row swallow semantics).
+    """
+    flushed = 0
+    while True:
+        with _features_lock:
+            chunk = _features_buf[:_FEATURES_BATCH_CHUNK]
+            del _features_buf[:len(chunk)]
+        if not chunk:
+            break
+        try:
+            executemany(_FEATURES_INSERT_SQL, chunk)
+            flushed += len(chunk)
+        except Exception:
+            log.exception("Feature batch insert failed; falling back to per-row")
+            for row in chunk:
+                try:
+                    execute(_FEATURES_INSERT_SQL, row)
+                    flushed += 1
+                except Exception:
+                    log.exception("Failed to write detection_features row for %s",
+                                  row[1] if len(row) > 1 else "?")
+    return flushed
 
 
 # ---------------------------------------------------------------------------
@@ -379,11 +438,40 @@ def start_flush_thread() -> None:
 
     def _loop():
         while True:
-            time.sleep(5.0)
-            flush_summary()
+            time.sleep(_FEATURES_FLUSH_INTERVAL_S)
+            try:
+                flush_summary()
+            except Exception:
+                log.exception("traffic_summary flush failed")
+            try:
+                flush_detection_features()
+            except Exception:
+                log.exception("detection_features flush failed")
 
     t = threading.Thread(target=_loop, name="summary-flush", daemon=True)
     t.start()
+
+
+def register_exit_flush() -> None:
+    """Flush both buffered tables on interpreter exit.
+
+    Neither buffer had an exit hook before; without this every shutdown
+    loses up to one flush interval of traffic_summary and detection_features
+    rows (the latter being the ML training collector and TEA replay input).
+    """
+    import atexit
+
+    def _final_flush():
+        try:
+            flush_summary()
+        except Exception:
+            log.exception("exit flush failed for traffic_summary")
+        try:
+            flush_detection_features()
+        except Exception:
+            log.exception("exit flush failed for detection_features")
+
+    atexit.register(_final_flush)
 
 # ---------------------------------------------------------------------------
 # ip_attack_history — one record per IP per attack session
@@ -400,6 +488,7 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
     first_seen: ISO timestamp when IP entered phase 1.
     unblock_reason: 'TTL Expired' | 'Manual Release' | 'Manual Block Escalation'
     """
+    global _reputation_seq
     unblocked_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         first_dt   = datetime.datetime.strptime(first_seen, "%Y-%m-%d %H:%M:%S")
@@ -409,28 +498,57 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
         duration_s = 0
 
     try:
-        execute("""
-            INSERT INTO ip_attack_history
-                (src_ip, attack_vector, if_score, confidence, priority,
-                 phase_reached, first_seen, unblocked_at, duration_sec, unblock_reason,
-                 ban_level, offence_count)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            src_ip,
-            attack_vector,
-            round(if_score, 6),
-            round(confidence, 6),
-            priority,
-            phase_reached,
-            first_seen,
-            unblocked_at,
-            duration_s,
-            unblock_reason,
-            ban_level,
-            offence_count,
-        ))
+        # The INSERT, its seq bump, and the cache append form ONE atomic
+        # section under _reputation_lock: a concurrent first-load either
+        # SELECTed before the commit (and then reloads via the seq check or
+        # receives the append) or entirely after it (and loads the row), so
+        # an offense can be neither omitted nor double-counted. Nesting
+        # direction is always reputation-lock then db-lock, never reversed,
+        # so this cannot deadlock against unlocked-reader loads.
+        with _reputation_lock:
+            execute("""
+                INSERT INTO ip_attack_history
+                    (src_ip, attack_vector, if_score, confidence, priority,
+                     phase_reached, first_seen, unblocked_at, duration_sec, unblock_reason,
+                     ban_level, offence_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                src_ip,
+                attack_vector,
+                round(if_score, 6),
+                round(confidence, 6),
+                priority,
+                phase_reached,
+                first_seen,
+                unblocked_at,
+                duration_s,
+                unblock_reason,
+                ban_level,
+                offence_count,
+            ))
+            _reputation_seq += 1
+            stamps = _reputation_cache.get(src_ip)
+            if stamps is not None:
+                stamps.append(unblocked_at)
     except Exception:
         log.exception("Failed to write attack history for %s", src_ip)
+
+
+# ---------------------------------------------------------------------------
+# Reputation timestamp-list cache (detection-time optimization, A1)
+# get_offense_count ran a SELECT per call from the detection hot path. The
+# cache stores the RAW unblocked_at strings per src_ip; log_attack_history
+# atomically appends its just-committed row and bumps a sequence counter.
+# A miss-path load reads the counter around its (unlocked) SELECT and retries
+# if an offense landed mid-query, so a served value can never omit a
+# committed offense. No lock is ever held across database I/O, and appends
+# never block behind loads. Counts stay byte-identical: same strings,
+# insertion order, formula, and round-before-clamp order as a direct SQL read.
+# ---------------------------------------------------------------------------
+
+_reputation_lock = threading.Lock()
+_reputation_cache: dict[str, list[str]] = {}
+_reputation_seq = 0
 
 
 def get_offense_count(src_ip: str) -> float:
@@ -439,21 +557,37 @@ def get_offense_count(src_ip: str) -> float:
     # All offenses for this IP are summed — recent ones weigh more than old ones.
     try:
         from backend.database.db import query
-        rows = query(
-            "SELECT unblocked_at FROM ip_attack_history WHERE src_ip = ?",
-            (src_ip,)
-        )
-        if not rows:
-            return 0.0
 
-        import time as _t
+        while True:
+            with _reputation_lock:
+                seq0 = _reputation_seq
+                cached = _reputation_cache.get(src_ip)
+
+            if cached is not None:
+                with _reputation_lock:
+                    snapshot = list(cached)
+                break
+
+            rows = query(
+                "SELECT unblocked_at FROM ip_attack_history "
+                "WHERE src_ip = ? ORDER BY rowid",
+                (src_ip,)
+            )
+            loaded = [r["unblocked_at"] for r in rows] if rows else []
+
+            with _reputation_lock:
+                if _reputation_seq != seq0:
+                    continue  # an offense committed mid-query; reload to include it
+                snapshot = list(_reputation_cache.setdefault(src_ip, loaded))
+            break
+
         now = datetime.datetime.now()
         score = 0.0
 
-        for row in rows:
+        for ts in snapshot:
             try:
                 # Parse the timestamp of each offense
-                offense_dt   = datetime.datetime.strptime(row["unblocked_at"], "%Y-%m-%d %H:%M:%S")
+                offense_dt   = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
                 hours_elapsed = (now - offense_dt).total_seconds() / 3600.0
                 # Half-life decay: +2.0 per offense, halves every 24h
                 score += 2.0 * (0.5 ** (hours_elapsed / 24.0))

@@ -22,7 +22,8 @@ skills-lock.json
 .opencode/
 
 # Build & test artifacts
-test/
+test/*
+!test/unit/
 test-results/
 docs/
 design-system/
@@ -36,3 +37,6 @@ package.json
 
 # Analysis reports
 RF_ACCURACY_BUG_ANALYSIS.md
+
+
+CSB5_Thesis 1 Manuscript.docx
