@@ -40,11 +40,13 @@ _LEGIT_HOST_IPS: frozenset = frozenset([
     "10.0.0.5", # h5
 ])
 
-# Ground truth - attacker hosts h6-h19 + h22-h27 (20 total), per topology.py.
+# Ground truth - attacker hosts (15 total, 2026-08-26 reduction):
+# h6-h18 + h22,h23 (h16 repurposed SYN/5432, h22 repurposed SYN/3389;
+# h19,h24-h27 retired and silent), per topology.py.
 # h20 (server) and h21 (sinkhole) are excluded on purpose, not attackers.
 _ATTACKER_IPS: frozenset = frozenset(
-    [f"10.0.0.{i}" for i in range(6, 20)] +
-    [f"10.0.0.{i}" for i in range(22, 28)]
+    [f"10.0.0.{i}" for i in range(6, 19)] +
+    ["10.0.0.22", "10.0.0.23"]
 )
 
 _stats = {
@@ -494,7 +496,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
     from backend.api.stats import get_active_attacks as _get_gt
     _gt = _get_gt()
     _expected_class = _gt.get(src_ip)  # "SYN", "ICMP", "UDP" or None
-    # MIXED is a topology-only label (h19), RF's 3-class model was never
+    # MIXED is a legacy topology-only label (no variant emits it anymore),
+    # RF's 3-class model was never
     # trained to predict it. Scoring it as FN/FP either way corrupts the
     # confusion matrix, so it's excluded from RF ground truth entirely,
     # same as if the IP had never been registered.
