@@ -49,7 +49,7 @@ YOUNG_MIN_PKTS = 200
 # forward rule we believe is still live is cheap-dropped instead of paying
 # parse + FlowMod serialization again; new unique-src installs are capped
 # per switch per second during storms.
-INSTALL_DEDUP_TTL_S = 65   # > 60s idle_timeout; stats replies refresh live entries
+INSTALL_DEDUP_TTL_S = 60   # aligned to the 60s idle_timeout so an entry dies with its rule
 INSTALL_MAP_CAP = 20000    # per-switch entries before eviction
 INSTALL_CAP_PER_SEC = 200  # unique-src installs per switch per second
 
@@ -154,12 +154,12 @@ class FatTreeController(app_manager.RyuApp):
 
         # Recently-installed forward rules per switch: dpid -> {src_ip: ts}.
         # Backs the over-limit dedup (P5a): a packet-in proving the rule is
-        # gone must reinstall, never be swallowed by a stale entry. Entries
-        # are refreshed whenever the p10 rule shows up in flow stats (proof
-        # of liveness) and invalidated at every delete site.
+        # gone must reinstall, never be swallowed by a stale entry. The TTL
+        # is aligned to the 60s idle_timeout so entries expire the moment
+        # their rule would, and every delete site invalidates explicitly.
         self._recent_installs: dict = {}
 
-        # Per-second install budget per switch — caps unique-src FlowMod
+        # Per-second install budget per switch, caps unique-src FlowMod
         # serialization during packet-in storms (P5a). Instance attribute so
         # tests can tighten it.
         self._install_budget: dict = {}
@@ -266,7 +266,7 @@ class FatTreeController(app_manager.RyuApp):
         self._handle_ipv4(dp, ofp, parser, dpid, in_port, msg, eth, ip4, pkt)
 
     def _note_install(self, dpid, src_ip) -> None:
-        """Record/refresh a forward-rule install (P5a dedup)."""
+        """Record a forward-rule install (P5a dedup)."""
         per_dp = self._recent_installs.setdefault(dpid, {})
         per_dp[src_ip] = time.monotonic()
         if len(per_dp) > INSTALL_MAP_CAP:
@@ -280,7 +280,7 @@ class FatTreeController(app_manager.RyuApp):
                     del per_dp[k]
 
     def _forget_install(self, dpid, src_ip) -> None:
-        """Invalidate a dedup entry — call at every rule delete site."""
+        """Invalidate a dedup entry. Call at every rule delete site."""
         per_dp = self._recent_installs.get(dpid)
         if per_dp is not None:
             per_dp.pop(src_ip, None)
@@ -535,10 +535,6 @@ class FatTreeController(app_manager.RyuApp):
             # skip: their counters must keep flowing to the ML pipeline or
             # release evaluation runs on stale data during long bans; only
             # the forward rule's lifetime is being bounded here.
-            # A p10 entry present in stats proves its rule is live: refresh
-            # the install-dedup liveness (P5a) before the epoch branch.
-            if stat.priority == 10:
-                self._note_install(dpid, src_ip)
             if stat.duration_sec >= FLOW_EPOCH_S:
                 if stat.priority == 10:
                     parser = dp.ofproto_parser
@@ -734,9 +730,10 @@ class FatTreeController(app_manager.RyuApp):
 
         # Any action that deletes or supersedes the p10 forward rule must
         # invalidate the install-dedup for this src across all switches
-        # (P5a lifecycle invariant) — including when no switch is currently
+        # (P5a lifecycle invariant), including when no switch is currently
         # connected, so the entry cannot outlive the rule.
-        if action in ("block", "quarantine", "redirect", "clear"):
+        if action in ("block", "quarantine", "redirect", "clear",
+                      "rate_limit"):
             self._forget_install_all(src_ip)
 
         # Resolve target switches — ALL switches for every action,
@@ -867,7 +864,7 @@ class FatTreeController(app_manager.RyuApp):
             ))
         # The p10 forward rule is gone: a stale dedup entry must not swallow
         # this src's next packet (P5a lifecycle invariant).
-        _src = match.get("ipv4_src") if isinstance(match, dict) else None
+        _src = match.get("ipv4_src")
         if _src:
             self._forget_install(dp.id, _src)
 
@@ -938,7 +935,7 @@ class FatTreeController(app_manager.RyuApp):
             ))
         # p10 forward rule deleted: invalidate dedup so the released IP's
         # next packet reinstalls instead of being swallowed (P5a).
-        _src = match.get("ipv4_src") if isinstance(match, dict) else None
+        _src = match.get("ipv4_src")
         if _src:
             self._forget_install(dp.id, _src)
 
