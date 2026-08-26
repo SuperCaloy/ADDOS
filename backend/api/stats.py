@@ -5,17 +5,31 @@ from backend.transport.zmq_receiver import get_raw_counts
 from backend.models import loader
 from backend.database.db import query
 import threading
+import time
 
 bp = Blueprint("stats", __name__)
 
 # Ground truth store — populated by topology when attacks start/stop
 _gt_lock:  threading.Lock = threading.Lock()
-_active_attacks: dict[str, str] = {}  # ip -> attack_type ("SYN"/"ICMP"/"UDP")
+# ip -> (attack_type, started_wall_clock). S6/Round 5: entries carry their
+# start time so a TTL can expire them if the stop notification is lost
+# (backend crash-recovery, saturated stop path) and a cutoff can make the
+# batched stop_all race-safe against a campaign started moments later.
+_active_attacks: dict[str, tuple[str, float]] = {}
+
+GT_TTL_S = 3600  # stale-after-crash backstop; must exceed the LONGEST
+# legitimate continuous session (mixed campaigns run 30-45+ min), so a
+# mid-demo purge can never crater accuracy accounting while traffic flows
 
 
 def get_active_attacks() -> dict[str, str]:
+    now = time.time()
     with _gt_lock:
-        return dict(_active_attacks)
+        expired = [ip for ip, (_, started) in _active_attacks.items()
+                   if now - started > GT_TTL_S]
+        for ip in expired:
+            del _active_attacks[ip]
+        return {ip: atype for ip, (atype, _) in _active_attacks.items()}
 
 
 @bp.get("/api/stats")
@@ -127,19 +141,45 @@ def gt_start():
     if not ip or not atype:
         return jsonify({"error": "ip and attack_type required"}), 400
     with _gt_lock:
-        _active_attacks[ip] = atype
+        _active_attacks[ip] = (atype, time.time())
     return jsonify({"ok": True})
 
 
 @bp.post("/api/attack_ground_truth/stop")
 def gt_stop():
-    body = request.get_json(silent=True) or {}
-    ip   = body.get("ip")
+    body   = request.get_json(silent=True) or {}
+    ip     = body.get("ip")
+    cutoff = body.get("cutoff")
     if not ip:
         return jsonify({"error": "ip required"}), 400
     with _gt_lock:
-        _active_attacks.pop(ip, None)
+        entry = _active_attacks.get(ip)
+        if entry is None:
+            return jsonify({"ok": True})
+        # Race guard (Round 5 S8): a stranded stop from an OLD campaign
+        # must never delete a NEWER campaign's entry for the same IP.
+        if isinstance(cutoff, (int, float)) and entry[1] > cutoff:
+            return jsonify({"ok": True, "ignored": "newer campaign"})
+        del _active_attacks[ip]
     return jsonify({"ok": True})
+
+
+@bp.post("/api/attack_ground_truth/stop_all")
+def gt_stop_all():
+    # S6/Round 5: one batched stop for the whole attack family. The cutoff
+    # makes it race-safe: entries started AFTER the caller captured its
+    # cutoff belong to a NEWER campaign and must survive this stop.
+    body   = request.get_json(silent=True) or {}
+    cutoff = body.get("cutoff")
+    with _gt_lock:
+        if isinstance(cutoff, (int, float)) and cutoff > 0:
+            victims = [ip for ip, (_, started) in _active_attacks.items()
+                       if started <= cutoff]
+        else:
+            victims = list(_active_attacks.keys())
+        for ip in victims:
+            del _active_attacks[ip]
+    return jsonify({"ok": True, "cleared": len(victims)})
 
 
 @bp.get("/api/attack_ground_truth")

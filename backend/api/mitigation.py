@@ -60,6 +60,10 @@ def block():
 @bp.post("/api/quarantine/clear_all")
 def clear_all():
     cleared = state_machine.clear_all_non_permanent()
+    # S5/Round 5: the sinkhole registry lives OUTSIDE the state machine;
+    # skipping it left ghost watchlist rows and active redirect rules after
+    # every stop_all_attacks().
+    cleared += deception.emergency_clear()
     return jsonify({"status": "ok", "cleared": cleared})
 
 

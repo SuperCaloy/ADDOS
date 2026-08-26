@@ -6,7 +6,7 @@ import os
 from backend.config import (
     WORKER_QUEUE_MAXSIZE, WORKER_ITEM_TIMEOUT_S,
     EXTRACTION_TRIGGER_PKTS, EXTRACTION_TRIGGER_S,
-    ML_ENABLED,
+    ML_ENABLED, RF_BATCH_ENABLED, RF_BATCH_WINDOW_MS,
 )
 from backend.models import if_pipeline, rf_pipeline, loader
 from backend.pipeline.flow_tracker import tracker
@@ -36,6 +36,28 @@ _MAX_PRIORITY_RETRIES = 1
 _seq_lock = threading.Lock()
 _seq_counter = 0
 
+_drop_lock = threading.Lock()
+_drop_counters = {
+    "queue_full": 0,
+    "requeue_full": 0,
+    "retries_exhausted": 0,
+    "stale_dropped": 0,
+}
+
+
+def _inc_drop(key: str) -> None:
+    with _drop_lock:
+        _drop_counters[key] += 1
+
+
+def get_drop_counters() -> dict:
+    with _drop_lock:
+        return dict(_drop_counters)
+
+
+def get_queue_depth() -> int:
+    return _queue.qsize()
+
 
 def set_result_callback(fn) -> None:
     global _result_callback
@@ -58,6 +80,7 @@ def submit(src_ip: str, flow_stats: dict, switch_stats: dict) -> None:
     try:
         _queue.put_nowait((_priority, _next_seq(), src_ip, flow_stats, switch_stats, time.monotonic(), 0))
     except queue.Full:
+        _inc_drop("queue_full")
         log.warning("Worker queue full, dropped submission for %s", src_ip)
 
 
@@ -65,7 +88,25 @@ def _requeue_priority(src_ip: str, flow_stats: dict, switch_stats: dict, retry_c
     try:
         _queue.put_nowait((0, _next_seq(), src_ip, flow_stats, switch_stats, time.monotonic(), retry_count))
     except queue.Full:
+        _inc_drop("requeue_full")
         log.warning("Worker queue full, priority requeue dropped for %s", src_ip)
+
+
+def _infer_rf(rf_vec):
+    """RF decode via the micro-batch tray when enabled; solo otherwise.
+
+    Any batch-path failure (future exception or wait timeout) degrades to a
+    solo predict so worst-case behavior equals the non-batched pipeline.
+    """
+    if not RF_BATCH_ENABLED:
+        return rf_pipeline.run_rf_inference(rf_vec)
+    from backend.pipeline import rf_batcher
+    rf_batcher.ensure_started()
+    fut = rf_batcher.infer(rf_vec)
+    try:
+        return fut.result(timeout=(RF_BATCH_WINDOW_MS / 1000.0) * 2 + 0.05)
+    except Exception:
+        return rf_pipeline.run_rf_inference(rf_vec)
 
 
 def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
@@ -134,6 +175,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                 log.warning("Worker timeout for %s (flagged) — priority retry %d", src_ip, retry_count + 1)
                 _requeue_priority(src_ip, flow_stats, switch_stats, retry_count + 1)
             else:
+                _inc_drop("retries_exhausted")
                 log.warning("Worker timeout for %s (flagged) — retries exhausted, fallback block", src_ip)
                 if _result_callback:
                     try:
@@ -141,6 +183,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                     except Exception:
                         log.exception("Worker error in timeout-fallback callback for %s", src_ip)
         else:
+            _inc_drop("stale_dropped")
             log.debug("Worker timeout for %s (not flagged) — dropped silently", src_ip)
         return
 
@@ -235,7 +278,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                 rf_switch["ip_proto"] = _flow_proto
 
             rf_vec = rf_pipeline.extract_rf_features(rf_switch)
-            attack_class, confidence = rf_pipeline.run_rf_inference(rf_vec)
+            attack_class, confidence = _infer_rf(rf_vec)
 
             # Restore prior confident class if RF returns Uncertain
             if attack_class == "Uncertain" and _prior_class not in (None, "Uncertain") and _prior_conf >= 0.70:

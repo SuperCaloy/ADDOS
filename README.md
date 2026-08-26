@@ -1,6 +1,6 @@
 # ADDOS: Anomaly-Based DDoS Detection and Mitigation in Software Defined Networks
 
-**ADDOS** (**A**nomaly-based **D**DoS **D**etection and mitigation in **O**penFlow/**S**oftware-defined networks) is an end-to-end research testbed that detects and mitigates Layer 3/4 DDoS attacks entirely inside a software-defined network. It combines a packet-level flood prefilter, a temporal entropy analyzer (TEA), and two machine learning models (Isolation Forest for anomaly detection, Random Forest for attack-vector classification) into a single detection pipeline, then feeds every confirmed attacker through a per-IP mitigation state machine with persistent behavioral reputation scoring.
+**ADDOS** is an end-to-end research testbed that detects and mitigates Layer 3/4 DDoS attacks entirely inside a software-defined network. It combines a packet-level flood prefilter, a temporal entropy analyzer (TEA), and two machine learning models (Isolation Forest for anomaly detection, Random Forest for attack-vector classification) into a single detection pipeline, then feeds every confirmed attacker through a per-IP mitigation state machine with persistent behavioral reputation scoring.
 
 The whole system runs as a simulation on one Linux machine: Mininet emulates the network, hping3 generates baseline and attack traffic, a Ryu controller bridges the data plane to the detection backend over ZeroMQ, and mitigation decisions are pushed back down as OpenFlow rules. A web dashboard provides live monitoring, an Expert Mode view of pipeline internals, and PDF report generation.
 
@@ -157,7 +157,7 @@ if_score = -model.score_samples(X)
 sklearn's `score_samples` returns values in roughly `[-1, 0]` (higher = more normal), so negating gives a score where higher means more anomalous, typically between 0 and 2 in practice. A flow is an anomaly when:
 
 ```
-if_score >= threshold        # threshold = 0.609224185802626
+if_score >= threshold        # threshold = 0.5992241858026262
 ```
 
 The threshold ships inside `feature_contract.json` and is read by the loader at startup (`backend/models/loader.py:42`), so retuning it means editing the contract, not code. In practice, scores just above the threshold are borderline cases, while scores near 1.0 and above indicate flows far outside anything seen in training.

@@ -173,7 +173,10 @@ class StateMachine:
                     ttl_expires_at = ttl_expires_at,
                 )
                 self._states[src_ip] = state
-                _action_map = {1: "rate_limit", 2: "rate_limit", 3: "block"}
+                # Phase 2 is a full block (live escalation sends block with
+                # ttl); restoring it as rate_limit silently downgraded
+                # surviving Time Bans to meter throttles (BFA-P2).
+                _action_map = {1: "rate_limit", 2: "block", 3: "block"}
                 self._push_command(src_ip, _action_map.get(r["phase"], "rate_limit"),
                                    ttl=ttl_for_cmd)
                 restored += 1
@@ -259,7 +262,6 @@ class StateMachine:
                 if confidence > state.confidence:
                     state.attack_vector = attack_class
                     state.confidence    = confidence
-                self._persist(state)
             state.priority = behavioral.assign_priority(
                 state.if_score, state.confidence, src_ip,
                 attack_class=state.attack_vector,
@@ -387,7 +389,6 @@ class StateMachine:
                     state.confidence     = confidence
                 else:
                     state.confidence = confidence
-                self._persist(state)
 
                 if behavioral.should_blackhole(src_ip, state.ban_level):
                     self._advance_to_blackhole(state)
