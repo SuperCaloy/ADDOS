@@ -1,7 +1,7 @@
 import math
+import warnings
 import numpy as np
 import threading
-import pandas as pd
 from backend.models import loader
 
 _median_lock       = threading.Lock()
@@ -113,10 +113,30 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     if nans.any():
         vec[nans] = _get_medians()[nans]
 
-    # Two-stage scaling: RobustScaler → QuantileTransformer (matches training)
-    df      = pd.DataFrame(vec.reshape(1, -1), columns=loader.if_features)
-    X_rob   = loader.if_scaler.transform(df)
-    return loader.if_quantiler.transform(X_rob)   # shape (1, 16)
+    # Replace lines 116-119 wholesale: numpy-direct two-stage scaling, no
+    # per-item DataFrame (it was the dominant GIL-held hot-path cost). The
+    # scalers were fitted on float64 DataFrames; numpy input of the same
+    # dtype is byte-identical (verified against the pandas reference in T13).
+    global _last_raw_vec
+    _last_raw_vec = vec
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="X does not have valid feature names",
+            category=UserWarning)
+        X_rob = loader.if_scaler.transform(vec.reshape(1, -1))
+        return loader.if_quantiler.transform(X_rob)   # shape (1, 16)
+
+
+def run_if_inference_batch(vecs_scaled: list) -> list[tuple[float, bool]]:
+    """Batch (-score_samples) over stacked rows; preserves input order."""
+    loader.require_loaded()
+    if not vecs_scaled:
+        return []
+    stacked = np.vstack([np.asarray(v, dtype=np.float64).reshape(1, -1)
+                         for v in vecs_scaled])
+    scores = -loader.if_model.score_samples(stacked)
+    return [(float(s), bool(s >= loader.if_threshold)) for s in scores]
 
 
 def run_if_inference(vec_scaled: np.ndarray) -> tuple[float, bool]:

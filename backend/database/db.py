@@ -229,7 +229,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             is_attack       INTEGER NOT NULL DEFAULT 0,
             ctrl_cpu_percent REAL   NOT NULL DEFAULT 0,
             ctrl_mem_mb     REAL    NOT NULL DEFAULT 0,
-            is_mitigating   INTEGER NOT NULL DEFAULT 0
+            is_mitigating   INTEGER NOT NULL DEFAULT 0,
+            proc_cpu_percent REAL   NOT NULL DEFAULT 0
         );
 
         CREATE INDEX IF NOT EXISTS idx_sysmetrics_ts
@@ -246,6 +247,15 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         INSERT OR IGNORE INTO global_counters
             (id, total_packets, malicious_dropped, normal_packets, false_positives)
         VALUES (1, 0, 0, 0, 0);
+
+        CREATE TABLE IF NOT EXISTS obs_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            p50 REAL, p95 REAL, p99 REAL, n INTEGER,
+            queue_depth INTEGER,
+            drops TEXT, submit_counters TEXT, admission_counters TEXT,
+            service TEXT, batch_fallback TEXT
+        );
     """)
 
 
@@ -274,12 +284,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # controller metrics columns
     for col, typ in [("ctrl_cpu_percent", "REAL NOT NULL DEFAULT 0"),
                      ("ctrl_mem_mb",      "REAL NOT NULL DEFAULT 0"),
-                     ("is_mitigating",    "INTEGER NOT NULL DEFAULT 0")]:
+                      ("is_mitigating",    "INTEGER NOT NULL DEFAULT 0")]:
         try:
             conn.execute(f"ALTER TABLE system_metrics ADD COLUMN {col} {typ}")
             conn.commit()
         except sqlite3.OperationalError:
             pass
+
+    # V4a: backend-process CPU in system_metrics.
+    try:
+        conn.execute("ALTER TABLE system_metrics "
+                     "ADD COLUMN proc_cpu_percent REAL NOT NULL DEFAULT 0")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
 
     # IF/RF split columns
     new_cols = [        "if_tp", "if_fp", "if_tn", "if_fn",

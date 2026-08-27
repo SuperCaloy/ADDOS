@@ -80,6 +80,7 @@ def start() -> None:
 
         # --- Prime cpu_percent — first call always returns 0.0 ---
         psutil.cpu_percent(interval=None)
+        proc.cpu_percent(interval=None)
         _get_ctrl_metrics()
 
         while True:
@@ -104,6 +105,7 @@ def start() -> None:
 
             try:
                 cpu = psutil.cpu_percent(interval=None)
+                proc_cpu = proc.cpu_percent(interval=None)
                 mem = proc.memory_info().rss / (1024 * 1024)
                 ctrl_cpu, ctrl_mem = _get_ctrl_metrics()
                 with _pps_lock:
@@ -143,7 +145,8 @@ def start() -> None:
 
                 writer.log_system_metrics(cpu, mem, pps, is_attack=is_attack,
                                           ctrl_cpu=ctrl_cpu, ctrl_mem=ctrl_mem,
-                                          is_mitigating=is_mitigating)
+                                          is_mitigating=is_mitigating,
+                                          proc_cpu_percent=proc_cpu)
             except Exception:
                 log.exception("monitor: failed to log metrics")
 

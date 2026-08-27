@@ -13,6 +13,10 @@ def build_snapshot() -> dict:
         "detection_ms": decision_engine.latency_percentiles(),
         "queue_depth": worker.get_queue_depth(),
         "drops": worker.get_drop_counters(),
+        "submits": worker.get_submit_counters(),
+        "admission": worker.get_admission_counters(),
+        "service": worker.get_stage_timers(),
+        "batch_fallback": worker.get_batch_fallback_counters(),
     }
 
 
@@ -28,6 +32,8 @@ def _loop(interval_s: float) -> None:
                 dms["p50"], dms["p95"], dms["p99"], dms["n"],
                 snap["queue_depth"], snap["drops"],
             )
+            from backend.database import writer
+            writer.log_obs_snapshot(snap)
         except Exception:
             log.exception("Observability snapshot failed")
 

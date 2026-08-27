@@ -15,8 +15,7 @@ bp = Blueprint("ip_detail", __name__)
 def _is_active(src_ip: str) -> bool:
     # Check if IP is currently in state machine (phase 1-3 = active mitigation)
     try:
-        state = state_machine._states.get(src_ip)
-        return state is not None
+        return state_machine.is_active(src_ip)
     except Exception:
         return False
 
@@ -46,8 +45,8 @@ def _build_live_features(src_ip: str) -> dict | None:
     tp_dst        = float(fs.get("tp_dst", 0))
     port_entropy  = round(tp_src / (tp_dst + 1), 4)
 
-    # Pull live phase/priority from state machine
-    state    = state_machine._states.get(src_ip)
+    # Pull live phase/priority from state machine (locked accessor, copy)
+    state    = state_machine.get_state(src_ip)
     phase    = state.phase        if state else 0
     priority = state.priority     if state else "—"
     action   = state.action_taken if state else "—"

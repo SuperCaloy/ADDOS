@@ -208,7 +208,7 @@ def _parse_and_route(raw: bytes) -> None:
         _skip_tea = False
         try:
             from backend.mitigation.state_machine import state_machine as _sm
-            _ip_state = _sm._states.get(src_ip)
+            _ip_state = _sm.get_state(src_ip)
             if _ip_state is not None and _ip_state.phase in (2, 3):
                 _skip_tea = True
         except Exception:
@@ -244,6 +244,9 @@ def _parse_and_route(raw: bytes) -> None:
         flow_stats["tea_is_learned"]     = tea_result["is_learned"]
         flow_stats["tea_size_var"]       = tea_result["size_var"]
         flow_stats["tea_intensity_var"]  = tea_result["intensity_var"]
+        # Interval sequence number: lets worker-side feedback_tea dedup the
+        # cached verdict shared by every flow inside one eval window.
+        flow_stats["tea_eval_seq"]       = tea_result.get("eval_seq")
 
         # Check per-IP verdict for small attackers
         ip_verdict = entropy_analyzer.get_ip_verdict(src_ip)
@@ -279,6 +282,7 @@ def _receiver_loop() -> None:
     # Timer to clear switch flow buffers once per second
     # Aligns with the Ryu stats poll interval
     _last_buffer_clear = time.monotonic()
+    _last_profile_cleanup = time.monotonic()
 
     while True:
         sock = ctx.socket(zmq.PULL)
@@ -303,6 +307,12 @@ def _receiver_loop() -> None:
                     if now - _last_buffer_clear >= 1.0:
                         _clear_switch_flow_buffers()
                         flood_filter.purge_stale()
+                        # Zero-traffic latch recovery + IP profile TTL,
+                        # piggybacked on the receiver's 1s cadence.
+                        entropy_analyzer.idle_tick()
+                        if now - _last_profile_cleanup >= 60.0:
+                            entropy_analyzer.cleanup_stale_profiles()
+                            _last_profile_cleanup = now
                         _last_buffer_clear = now
 
                 except zmq.Again:

@@ -76,9 +76,46 @@ def test_balanced_mix():
 
 
 def test_campaign_rosters_are_active():
-    assert {10, 18, 22} <= set(topo._ATTACKER_NUMS)
-    assert {11, 12, 13} <= set(topo._ATTACKER_NUMS)
-    assert {6, 7, 8} <= set(topo._ATTACKER_NUMS)
+    # Full-roster guardrail (2026-08-27): single-vector campaigns must launch
+    # EVERY attacker assigned to that type, not a hardcoded subset.
+    full = {
+        "SYN": {10, 16, 18, 22, 23},
+        "ICMP": {11, 12, 13, 14, 15},
+        "UDP": {6, 7, 8, 9, 17},
+    }
+    for t, hosts in full.items():
+        assert set(topo._attackers_of_type(t)) == hosts
+
+
+def test_no_hardcoded_campaign_rosters_in_source():
+    # The old literal rosters must never reappear; the campaigns derive their
+    # host lists from _ATTACKER_VARIANTS via _attackers_of_type() now.
+    src = open("topology/topology.py").read()
+    for lit in ("[10, 18, 22]", "[11, 12, 13]", "[6, 7, 8]"):
+        assert lit not in src
+
+
+def test_mixed_campaign_launches_type_waves():
+    # Staged-wave realism (2026-08-27): the mixed campaign must launch vector
+    # WAVES derived from _attackers_of_type (one per attack type, staggered
+    # start times) instead of spawning all 15 hosts simultaneously.
+    import re
+    src = open("topology/topology.py").read()
+    i = src.find("def start_mixed_campaign")
+    body = src[i:src.find("\ndef ", i)]
+    # all three vectors enumerated as waves, rosters via the helper
+    assert '("SYN", "UDP", "ICMP")' in body
+    assert re.search(r"\w+\s*=\s*_attackers_of_type\(", body)
+    assert "_ATTACKER_START_DELAYS" in body
+
+
+def test_attacker_worker_accepts_delay_override():
+    # Wave scheduling needs an explicit per-host delay; the worker's default
+    # behavior (own jitter from _ATTACKER_START_DELAYS) must stay intact.
+    import re
+    src = open("topology/topology.py").read()
+    sig = re.search(r"def _attacker_cycle_worker\([^)]*\)", src, re.DOTALL)
+    assert sig and "delay" in sig.group(0)
 
 
 def test_launcher_defaults_are_active_and_typed():

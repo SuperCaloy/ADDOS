@@ -117,9 +117,10 @@ async function submitReport() {
   const ed  = document.getElementById('r-end').value;
   const err = document.getElementById('m-err');
 
+  const today = _isoDate(new Date());
   if (!sd || !ed)                                        { err.textContent = 'Select both dates.'; return; }
   if (ed < sd)                                           { err.textContent = 'End must be after start.'; return; }
-  if (ed > new Date().toISOString().split('T')[0])       { err.textContent = 'End date cannot be in the future.'; return; }
+  if (ed > today)                                        { err.textContent = 'End date cannot be in the future.'; return; }
 
   err.textContent = '';
   closeModal();
@@ -128,7 +129,7 @@ async function submitReport() {
     const r = await fetch(`${API}/api/report`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ start_date: sd, end_date: ed }),
+      body:    JSON.stringify({ start_date: sd, end_date: ed, client_today: today }),
     });
     if (r.status === 404) { const j = await r.json(); showToast(j.error || 'No data.', true); return; }
     if (!r.ok)            { showToast(`Error: ${r.status}`, true); return; }

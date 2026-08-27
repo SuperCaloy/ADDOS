@@ -193,6 +193,12 @@ class FatTreeController(app_manager.RyuApp):
                 out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
                 priority=pri, match=parser.OFPMatch(),
             ))
+        # The flush above is a non-strict wildcard DELETE, so it also wipes
+        # p10 forward rules. Their dedup entries must die with them, or
+        # presumed-live swallows packet-ins for up to INSTALL_DEDUP_TTL_S
+        # against an empty table.
+        self._recent_installs.pop(dp.id, None)
+        self._install_budget.pop(dp.id, None)
 
         # Install table-miss rule at priority=1 — sends unknown flows to controller
         actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER)]
