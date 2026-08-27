@@ -27,67 +27,69 @@ SINKHOLE_IP      = "10.0.0.21"   # h21, dummy sinkhole host
 ATTACK_PKT_COUNT = 5000
 WHITELIST_IPS    = {SERVER_IP, SINKHOLE_IP}
 
-# h1 to h5 legit, h6 to h19 + h22 to h27 attacker (20 total), h20 server, h21 sinkhole
-_ATTACKER_NUMS = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
-                  22, 23, 24, 25, 26, 27}
-_LEGIT_NUMS    = {1, 2, 3, 4, 5}
+# h1 to h5 legit; 15 attackers (h6-h18 + h22,h23; h16/h22 repurposed SYN,
+# 2026-08-26); h20 server; h21 sinkhole; retired silent hosts h19,h24-h27
+# (built but never launch, never baseline). Rollback to 20 attackers =
+# set _RETIRED_NUMS to empty.
+_LEGIT_NUMS    = frozenset({1, 2, 3, 4, 5})
+_RETIRED_NUMS  = frozenset({19, 24, 25, 26, 27})
+_ATTACKER_NUMS = frozenset(
+    n for n in (*range(6, 20), *range(22, 28)) if n not in _RETIRED_NUMS)
+# pool = attackers + retired: CLEANUP sweeps cover both so a hand-launched
+# retired host can still be fully stopped; launch paths stay active-only
+_ATTACKER_POOL = _ATTACKER_NUMS | _RETIRED_NUMS
 
-# 7 SYN, 7 ICMP, 6 UDP (h6-h19, h22-h27)
-_ATTACKER_VARIANTS = {
-    #        type     flags                              burst   sleep
-    # burst/sleep unused — all attackers run pure continuous --flood (no -c, no sleep)
-    6:  ("UDP",  "--udp -p 53    --flood --data 64",    0, 0),
-    7:  ("UDP",  "--udp -p 123   --flood --data 128",   0, 0),
-    8:  ("UDP",  "--udp -p 1900  --flood --data 256",   0, 0),
-    9:  ("UDP",  "--udp -p 11211 --flood --data 800",   0, 0),
-    10: ("SYN",  "-S -p 8080 --flood",                  0, 0),
-    11: ("ICMP", "--icmp --flood --data 1480",           0, 0),
-    12: ("ICMP", "--icmp --flood --data 800",            0, 0),
-    13: ("ICMP", "--icmp --flood --data 1024",           0, 0),
-    14: ("ICMP", "--icmp --flood --data 1200",           0, 0),
-    15: ("ICMP", "--icmp --flood --data 128",            0, 0),
-    16: ("UDP",  "--udp -p 53    --flood --data 1024",  0, 0),
-    17: ("UDP",  "--udp -p 123   --flood --data 1400",  0, 0),
+# 5 SYN, 5 ICMP, 5 UDP (balanced; h16 repurposed to SYN/5432, h22 to
+# SYN/3389). Attack variants: --flood keeps the send dynamics the operator
+# wants; payload sizes are capped at 512-800 data bytes so flood bandwidth
+# stays at or below the original smooth baseline while every attack row
+# still sits outside the normal 70-300B size band (wire >= 540B).
+_ALL_VARIANTS = {
+    6:  ("UDP",  "--udp -p 53    --flood --data 512",  0, 0),
+    7:  ("UDP",  "--udp -p 123   --flood --data 512",  0, 0),
+    8:  ("UDP",  "--udp -p 1900  --flood --data 512",  0, 0),
+    9:  ("UDP",  "--udp -p 11211 --flood --data 800",  0, 0),
+    10: ("SYN",  "-S -p 8080 --flood",                 0, 0),
+    11: ("ICMP", "--icmp --flood --data 800",          0, 0),
+    12: ("ICMP", "--icmp --flood --data 800",          0, 0),
+    13: ("ICMP", "--icmp --flood --data 800",          0, 0),
+    14: ("ICMP", "--icmp --flood --data 800",          0, 0),
+    15: ("ICMP", "--icmp --flood --data 512",          0, 0),
+    16: ("SYN",  "-S -p 5432 --flood",                 0, 0),
+    17: ("UDP",  "--udp -p 123   --flood --data 800",  0, 0),
     18: ("SYN",  "-S -p 1900   --flood",               0, 0),
-    19: ("SYN",  "-S -p 1900   --flood",               0, 0),
-    22: ("SYN",  "-S -p 21   --flood",                  0, 0),
-    23: ("SYN",  "-S -p 25   --flood",                  0, 0),
-    24: ("SYN",  "-S -p 3389 --flood",                  0, 0),
-    25: ("SYN",  "-S -p 5432 --flood",                  0, 0),
-    26: ("ICMP", "--icmp --flood --data 64",             0, 0),
-    27: ("ICMP", "--icmp --flood --data 512",            0, 0),
+    19: ("SYN",  "-S -p 1900   --flood",               0, 0),  # retired
+    22: ("SYN",  "-S -p 3389 --flood",                 0, 0),
+    23: ("SYN",  "-S -p 25   --flood",                 0, 0),
+    24: ("SYN",  "-S -p 3389 --flood",                 0, 0),  # retired
+    25: ("SYN",  "-S -p 5432 --flood",                 0, 0),  # retired
+    26: ("ICMP", "--icmp --flood --data 512",          0, 0),  # retired
+    27: ("ICMP", "--icmp --flood --data 800",          0, 0),  # retired
 }
+_ATTACKER_VARIANTS = {n: v for n, v in _ALL_VARIANTS.items()
+                      if n in _ATTACKER_NUMS}
+assert set(_ATTACKER_VARIANTS) == set(_ATTACKER_NUMS)
+
+# rand-source stress commands are GENERATED from _ATTACKER_VARIANTS so sizes
+# and flags can never drift between the two families; spoofing is a separate
+# memory-stress metric and stays expressed here as the extra flag.
+_STRESS_CMDS = {}
+for _n, (_t, _fl, _, _) in _ATTACKER_VARIANTS.items():
+    if _t == "SYN":
+        _core = f"{_fl} --rand-source"
+    else:
+        _core = _fl.replace("--data ", "--rand-source --data ", 1)
+    _STRESS_CMDS[_n] = f"hping3 {_core} {SERVER_IP} > /dev/null 2>&1"
+del _n, _t, _fl
 
 # Stagger delays: 0.5-2.0s random
 _ATTACKER_START_DELAYS = {
-    num: round(random.uniform(0.5, 2.0), 2) for num in _ATTACKER_NUMS
+    num: round(random.uniform(0.1, 0.6), 2) for num in _ATTACKER_NUMS
 }
 
 # attack_min, attack_max, rest_min, rest_max in seconds
-# rest windows shrunk, active windows lengthened, so IF sees a sustained
-# anomaly instead of a noisy on/off pattern that blends into baseline jitter
-_ATTACKER_CYCLES = {
-    6:  (30, 60, 1, 3),
-    7:  (30, 55, 1, 3),
-    8:  (35, 60, 1, 3),
-    9:  (30, 50, 1, 3),
-    10: (35, 55, 1, 3),
-    11: (60, 120, 2, 5),
-    12: (65, 120, 2, 5),
-    13: (55, 110, 2, 5),
-    14: (60, 105, 2, 5),
-    15: (55, 100, 2, 5),
-    16: (40, 70, 1, 4),
-    17: (40, 65, 1, 4),
-    18: (40, 70, 1, 4),
-    19: (40, 65, 1, 4),
-    22: (45, 90, 1, 3),
-    23: (45, 85, 1, 3),
-    24: (40, 80, 1, 3),
-    25: (45, 85, 1, 3),
-    26: (60, 120, 2, 5),
-    27: (58, 115, 2, 5),
-}
+# (dead _ATTACKER_CYCLES dict removed 2026-08-26: defined once, never read
+# by any code path; all attackers run pure continuous --flood)
 
 _mixed_stop_event = threading.Event()
 _campaign_threads: list = []
@@ -113,8 +115,11 @@ _UDP_PROFILES = {
     1900: (64, 256, 3.0, 6.0),
 }
 
-# host slot pools, picked randomly each active cycle
-# TCP heavy, UDP moderate, ICMP light, matches real traffic
+# host slot pools, picked randomly each active cycle. These are the exact
+# trained signatures: a normal-side diversity experiment (cross-type slots,
+# timing mixtures, mesh pings) was REVERTED after it produced a 10.23 pct
+# live false-positive rate against the frozen model, which only recognizes
+# the old capture's normality as normal.
 _HOST_SLOTS = {
     1: [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
     2: [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
@@ -139,8 +144,16 @@ _DEFAULT_DURATIONS = {
 _host_switch_map:    dict[str, str]              = {}
 _attack_assignments: list[dict]                  = []
 _active_attackers:   set[str]                    = set()
+# per-IP campaign start times: lets stop posts carry a cutoff so a stranded
+# stop can never delete a newer campaign's ground-truth entry (Round 5 S8)
+_attack_started_at:  dict[str, float]            = {}
 _baseline_threads:   dict[str, threading.Thread] = {}
 _baseline_stop:      dict[str, threading.Event]  = {}
+_baseline_lock       = threading.Lock()
+# live Popen handles of baseline slot launches per host, drained by
+# _kill_baseline_procs so cleanup kills exact pids instead of pattern
+# matching /proc globally
+_baseline_slot_procs: dict[str, list] = {}
 _idle_host_ref:      list = [-1]
 _restore_log = _logging.getLogger("restore_poller")
 
@@ -173,7 +186,7 @@ def _weighted_distribute(n_hosts: int, n_switches: int) -> list[int]:
 def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
     # 1 core switch, n_edge switches, hosts on flat 10.0.0.x/24.
     # Layout is fixed — not random — so topology is identical every run:
-    #   s1–s7 → h1–h19 evenly spread (2–3 hosts each)
+    #   s1–s7 → h1–h19 + h22–h24 evenly spread (2–4 hosts each)
     #   s8    → h20 server only (dedicated, isolated from attacker switches)
     global _host_switch_map
     _net = Mininet(
@@ -191,7 +204,8 @@ def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
         edge_switches.append(sw)
 
     # Fixed host-to-switch mapping — deterministic every run.
-    # h1-h19 + h22-h27 spread across s1-s7 (3-4 per switch).
+    # h1-h19 + h22-h27 spread across s1-s7 (3-4 per switch). Note: hosts
+    # h19,h24-h27 are RETIRED (built, silent) since the 15-attacker cut.
     # h20 server on s8 only — dedicated, no attacker on same switch.
     # h21 is the sinkhole, added separately below, skipped in this loop.
     _HOST_TO_SWITCH = {
@@ -218,7 +232,8 @@ def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
         _hosts.append(host)
         _host_switch_map[f"h{host_num}"] = sw.name
 
-    # Distribution count per switch — used for banner display only
+    # Distribution count per switch — dead value, never read:
+    # _print_banner computes the live table from _host_switch_map
     distribution = [5, 5, 5, 5, 5, 5, 5, 1]
 
     # h21 silent sinkhole — connected to core, receives redirected traffic
@@ -262,27 +277,36 @@ def _assign_attacks() -> list[dict]:
 # === BASELINE TRAFFIC ===
 
 def _kill_baseline_procs(host) -> None:
-    # kill ping and hping3 inside host netns
-    for proc in ("ping", "hping3"):
-        subprocess.run(
-            f"nsenter -t {host.pid} -n -- pkill -9 -x {proc} || true",
-            shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+    # SIGKILL exactly this host's tracked baseline processes. The old global
+    # pkill walked /proc across ALL hosts (Mininet hosts share the root pid
+    # namespace), transiently killing every attacker flood whenever a legit
+    # host idled or baseline stopped.
+    procs = _baseline_slot_procs.pop(host.name, [])
+    for proc in procs:
+        try:
+            proc.kill()
+        except Exception:
+            pass
 
 
-def _nsrun(host, cmd: str, wait: bool = False) -> None:
+def _nsrun(host, cmd: str, wait: bool = False, return_proc: bool = False):
     # run a command inside host netns + pid namespace
     # start_new_session=True detaches child from our process group,
     # so Ctrl+C / SIGINT to this script does not kill the flood too.
     full = f"nsenter -t {host.pid} -n -p -- bash -c {cmd!r}"
     if wait:
-        subprocess.run(full, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    else:
-        subprocess.Popen(
-            full, shell=True,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
+        try:
+            subprocess.run(full, shell=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30)
+        except subprocess.TimeoutExpired:
+            info(f"    nsenter timeout on {host.name}\n")
+        return None
+    p = subprocess.Popen(
+        full, shell=True,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True
+    )
+    return p if return_proc else None
 
 
 _HOST_START_STATE = {1: "active", 2: "active", 3: "active", 4: "active", 5: "active"}
@@ -290,12 +314,25 @@ _STATE_CYCLE = ["active", "idle"]
 _idle_slot = threading.Semaphore(1)
 
 
-def _kill_attacker(host) -> None:
-    # kill hping3 inside host pid namespace, regardless of who launched it
-    subprocess.run(
-        f"nsenter -t {host.pid} -n -p -- pkill -9 -x hping3 2>/dev/null; true",
-        shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+def _hping_state(host):
+    # True = hping3 running, False = confirmed gone, None = unknown.
+    # Only pgrep exit code 1 means no match. Exit codes >= 2 mean pgrep or
+    # nsenter itself failed; treating that as death stacked duplicate flood
+    # processes on the same host.
+    try:
+        r = subprocess.run(
+            f"nsenter -t {host.pid} -n -p -- pgrep -x hping3",
+            shell=True, capture_output=True, timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        info(f"    pgrep timeout on {host.name}, assuming alive\n")
+        return None
+    if r.returncode == 0:
+        return True
+    if r.returncode == 1:
+        return False
+    info(f"    pgrep error on {host.name} (rc={r.returncode}), assuming alive\n")
+    return None
 
 
 def _write_slot_script(slot_type: str, slot_key: int, size: int, dst: str) -> str:
@@ -322,21 +359,39 @@ def _write_slot_script(slot_type: str, slot_key: int, size: int, dst: str) -> st
 
 
 def _run_slot(host, slot_type: str, slot_key: int) -> None:
+    proc = None
     if slot_type == "icmp_cont":
-        p     = _ICMP_CONTINUOUS[slot_key]
-        size  = random.randint(p[0], p[1])
-        sleep = round(random.uniform(p[2], p[3]), 4)
-        _nsrun(host, f"ping -i {sleep} -s {size} {SERVER_IP} > /dev/null 2>&1")
+        # Single-instance guard (Round 4 F2b): a ping process never exits on
+        # its own, so relaunching while one is alive stacks processes and
+        # multiplies this host's rate until even MATURE rows cross the
+        # anomaly threshold (the h5 repeat-incident mechanism). Scoped to
+        # icmp only; tcp/udp slot scripts are short-lived by design.
+        if any(q.poll() is None and getattr(q, "slot_icmp", False)
+               for q in _baseline_slot_procs.get(host.name, [])):
+            return
+        prof  = _ICMP_CONTINUOUS[slot_key]
+        size  = random.randint(prof[0], prof[1])
+        sleep = round(random.uniform(prof[2], prof[3]), 4)
+        proc = _nsrun(host, f"ping -i {sleep} -s {size} {SERVER_IP} > /dev/null 2>&1",
+                      return_proc=True)
+        if proc is not None:
+            proc.slot_icmp = True
     elif slot_type == "tcp":
-        p      = _TCP_PROFILES[slot_key]
-        size   = random.randint(p[0], p[1])
+        prof   = _TCP_PROFILES[slot_key]
+        size   = random.randint(prof[0], prof[1])
         script = _write_slot_script("tcp", slot_key, size, SERVER_IP)
-        _nsrun(host, f"python3 {script} > /dev/null 2>&1")
+        proc = _nsrun(host, f"python3 {script} > /dev/null 2>&1", return_proc=True)
     elif slot_type == "udp":
-        p      = _UDP_PROFILES[slot_key]
-        size   = random.randint(p[0], p[1])
+        prof   = _UDP_PROFILES[slot_key]
+        size   = random.randint(prof[0], prof[1])
         script = _write_slot_script("udp", slot_key, size, SERVER_IP)
-        _nsrun(host, f"python3 {script} > /dev/null 2>&1")
+        proc = _nsrun(host, f"python3 {script} > /dev/null 2>&1", return_proc=True)
+    # track the live handle so cleanup can kill exact pids; prune finished
+    if proc is not None:
+        lst = [q for q in _baseline_slot_procs.get(host.name, [])
+               if q.poll() is None]
+        lst.append(proc)
+        _baseline_slot_procs[host.name] = lst
 
 def _baseline_loop(host, stop_event: threading.Event, idle_host_ref: list) -> None:
     num   = int(host.name[1:])
@@ -395,19 +450,21 @@ def start_baseline_traffic() -> None:
             target=_baseline_loop, args=(host, stop_ev, idle_host_ref),
             name=f"baseline-{host.name}", daemon=True
         )
-        _baseline_stop[host.name]    = stop_ev
-        _baseline_threads[host.name] = t
+        with _baseline_lock:
+            _baseline_stop[host.name]    = stop_ev
+            _baseline_threads[host.name] = t
         t.start()
         info(f"    {host.name} ({host.IP()}): started\n")
 
 
 def _stop_baseline_threads() -> None:
-    for ev in _baseline_stop.values():
-        ev.set()
-    for t in _baseline_threads.values():
-        t.join(timeout=2)
-    _baseline_threads.clear()
-    _baseline_stop.clear()
+    with _baseline_lock:
+        for ev in _baseline_stop.values():
+            ev.set()
+        for t in _baseline_threads.values():
+            t.join(timeout=2)
+        _baseline_threads.clear()
+        _baseline_stop.clear()
 
 
 def stop_baseline() -> None:
@@ -451,29 +508,20 @@ def start_server() -> None:
 # === ATTACKS ===
 
 def _hping_cmd(attacker_num: int, target: str, count: int = None) -> str:
-    # Build hping3 command from attacker variant config.
-    # Pure continuous flood — no burst limit, no sleep between waves.
-    # Every attacker sends at full --flood rate until killed.
-    variant  = _ATTACKER_VARIANTS.get(attacker_num, ("SYN", "-S -p 80 --flood", 0, 0))
+    # Build hping3 command from attacker variant config. --flood keeps the
+    # dynamic full-rate behavior; payload sizes are capped so flood
+    # bandwidth stays within the VM budget (see _ATTACKER_VARIANTS note).
+    variant = _ATTACKER_VARIANTS.get(attacker_num, ("SYN", "-S -p 80", 0, 0))
     atype, flags, _, _ = variant
 
     if count:
-        # One-shot mode — send exact packet count once (used by flash_attack)
-        if atype == "MIXED":
-            return (f"hping3 -S -p 1900 -c {count} {target} 2>/dev/null & "
-                    f"hping3 --udp -p 11211 -c {count} {target} 2>/dev/null &")
         return f"hping3 {flags} -c {count} {target}"
-
-    # Pure continuous flood — no -c limit, no sleep
-    if atype == "MIXED":
-        return (f"hping3 -S -p 1900 --flood {target} > /dev/null 2>&1 & "
-                f"hping3 --udp -p 11211 --flood {target} > /dev/null 2>&1 & "
-                f"wait")
 
     return f"hping3 {flags} {target} > /dev/null 2>&1"
 
 
 def _notify_attack_start(ip: str, attack_type: str) -> None:
+    _attack_started_at[ip] = time.time()
     for attempt in range(3):
         try:
             req = urllib.request.Request(
@@ -492,11 +540,15 @@ def _notify_attack_start(ip: str, attack_type: str) -> None:
 
 def _notify_attack_stop(ip: str) -> None:
     _active_attackers.discard(ip)
+    # Round 5 S8-lite: carry this campaign's start time as a cutoff so the
+    # backend never lets a STRANDED stop post delete a NEWER campaign's GT
+    # entry for the same IP (the cross-race V2 identified).
+    cutoff = _attack_started_at.pop(ip, 0)
     for attempt in range(3):
         try:
             req = urllib.request.Request(
                 f"{BACKEND_API}/api/attack_ground_truth/stop",
-                data=_json.dumps({"ip": ip}).encode(),
+                data=_json.dumps({"ip": ip, "cutoff": cutoff}).encode(),
                 headers={"Content-Type": "application/json"}, method="POST",
             )
             with urllib.request.urlopen(req, timeout=2):
@@ -506,6 +558,117 @@ def _notify_attack_stop(ip: str) -> None:
             if attempt == 2:
                 info(f"*** Error: Failed to notify attack stop for {ip}: {e}\n")
             time.sleep(1.0)
+
+
+def _kill_all_attackers(deadline_s: float = 10.0) -> None:
+    # SIGKILL every attacker's hping3 CONCURRENTLY: one nsenter/pkill chain
+    # per host launched at once, reaped on a shared deadline. Serial sweeps
+    # pay one full fork chain per host while many floods pin the CPU, which
+    # stretched a stop into minutes; parallel caps wall time at about one
+    # chain's duration. Uses -x (exact comm match) so the kill never hits
+    # monitor probes, wrapper shells, or unrelated processes.
+    procs = []
+    for h in net.hosts:
+        if int(h.name[1:]) in _ATTACKER_POOL:
+            try:
+                p = subprocess.Popen(
+                    f"nsenter -t {h.pid} -n -p -- pkill -9 -x hping3",
+                    shell=True, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                procs.append(p)
+            except Exception as e:
+                info(f"    kill spawn failed on {h.name}: {e}\n")
+    deadline = time.time() + deadline_s
+    for p in procs:
+        try:
+            p.wait(timeout=max(0.05, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
+def _flush_flow_rules(prios, ips=None, proto_wildcard_pri=None,
+                      deadline_s: float = 10.0, label: str = "flows") -> None:
+    # Round 5 S2/S7: strict per-IP deletes batched into ONE shell-chained
+    # call per switch, executed CONCURRENTLY across switches. The old form
+    # ran 936 sequential fork chains inside stop_all_attacks (19-37s idle,
+    # up to minutes under load). Segments chain with ';' so one failed
+    # delete never skips the rest; each segment is an exact-match strict
+    # delete (plain `del-flows priority=N` is unreliable on OVS 2.17.9).
+    if net is None:
+        return
+    if ips is None:
+        ips = [h.IP() for h in hosts]
+    info(f"*** Flushing {label} on {len(net.switches)} switches "
+         f"(batched, concurrent)...\n")
+    procs = []
+    for sw in net.switches:
+        segs = [f"ovs-ofctl --strict del-flows {sw.name} "
+                f"priority={pri},ip,nw_src={ip}"
+                for pri in prios for ip in ips]
+        if proto_wildcard_pri is not None:
+            # best-effort: resource-guard proto drops carry no nw_src to
+            # match on, so delete STRICTLY per L4 protocol (ICMP/TCP/UDP).
+            # The plain priority-only del-flows form is REJECTED by the
+            # installed OVS 2.17.9, which is exactly how stale priority-50
+            # rules survived every earlier stop unnoticed.
+            segs += [f"ovs-ofctl --strict del-flows {sw.name} "
+                     f"priority={proto_wildcard_pri},ip,nw_proto={pr}"
+                     for pr in (1, 6, 17)]
+        chain = "; ".join(segs)
+        try:
+            procs.append(subprocess.Popen(
+                f"bash -c {chain!r}", shell=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
+        except Exception as e:
+            info(f"    flush spawn failed on {sw.name}: {e}\n")
+    deadline = time.time() + deadline_s
+    for p in procs:
+        try:
+            p.wait(timeout=max(0.05, deadline - time.time()))
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
+def _notify_gt_stop_all(cutoff: float, retries: int = 3) -> None:
+    # Round 5 S6: ONE batched ground-truth stop replaces per-host
+    # posts that each retried ~9s against a saturated backend. The cutoff
+    # makes it race-safe server-side: GT entries belonging to a campaign
+    # started after this stop began are left alone.
+    for attempt in range(retries):
+        try:
+            req = urllib.request.Request(
+                f"{BACKEND_API}/api/attack_ground_truth/stop_all",
+                data=_json.dumps({"cutoff": cutoff}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=2):
+                pass
+            return
+        except Exception as e:
+            if attempt == retries - 1:
+                info(f"*** Warning: batched ground-truth stop failed: {e}\n")
+            time.sleep(0.5)
+
+
+def _discard_attackers_locally() -> None:
+    for h in net.hosts:
+        if int(h.name[1:]) in _ATTACKER_POOL:
+            _active_attackers.discard(h.IP())
+
+
+def _stop_active_workers() -> None:
+    # one attack campaign at a time: any launcher first stops workers from
+    # previous campaigns so floods never stack across command types
+    _mixed_stop_event.set()
+    _stress_stop_event.set()
+    deadline = time.time() + 7
+    for t in (_campaign_threads + _stress_threads):
+        t.join(timeout=max(0.05, deadline - time.time()))
+    _campaign_threads.clear()
+    _stress_threads.clear()
+    if net is not None:
+        _kill_all_attackers()
 
 
 
@@ -535,18 +698,17 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
     # Restart loop — restarts hping3 if it dies unexpectedly
     while not stop_event.is_set():
         _nsrun(h, cmd)
-        # Poll every second — check inside host netns, not system-wide
+        # Poll every second, check inside host netns, not system-wide.
+        # Restart only on a CONFIRMED death (pgrep exit 1); pgrep or nsenter
+        # failures must not trigger spurious restarts that stack floods.
         while not stop_event.is_set():
             time.sleep(1)
-            alive = subprocess.run(
-                f"nsenter -t {h.pid} -n -p -- pgrep -x hping3",
-                shell=True, capture_output=True
-            ).stdout.strip()
-            if not alive:
-                break  # hping3 died — outer loop restarts it
+            if _hping_state(h) is False:
+                break  # confirmed dead, outer loop restarts it
 
-    # Stop flood and notify backend
-    _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
+    # Stop flood and notify backend (-x exact match: never kills sibling
+    # monitor probes or wrapper shells sharing this pid namespace)
+    _nsrun(h, "pkill -9 -x hping3 2>/dev/null; true", wait=True)
     _notify_attack_stop(ip)
 
 
@@ -555,6 +717,7 @@ def launch_attack(sustained: bool = True) -> None:
     # and keep flood running until stop_all_attacks() is called.
     # sustained flag kept for API compatibility but always runs continuous flood.
     global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
@@ -580,7 +743,7 @@ def launch_attack(sustained: bool = True) -> None:
     info("\n    -> Use  py stop_all_attacks()  to stop.\n")
 
 
-def launch_syn_flood(attacker_name="h6") -> None:
+def launch_syn_flood(attacker_name="h10") -> None:
     attacker = net.get(attacker_name)
     cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, ATTACK_PKT_COUNT)
     info(f"*** SYN burst ({ATTACK_PKT_COUNT:,} pkts): {attacker_name} -> {SERVER_IP}\n")
@@ -596,7 +759,7 @@ def launch_icmp_flood(attacker_name="h11") -> None:
     _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
 
 
-def launch_udp_flood(attacker_name="h16") -> None:
+def launch_udp_flood(attacker_name="h7") -> None:
     attacker = net.get(attacker_name)
     cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, ATTACK_PKT_COUNT)
     info(f"*** UDP burst ({ATTACK_PKT_COUNT:,} pkts): {attacker_name} -> {SERVER_IP}\n")
@@ -604,8 +767,9 @@ def launch_udp_flood(attacker_name="h16") -> None:
     _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
 
 
-def launch_syn_flood_sustained(attacker_name="h6") -> None:
+def launch_syn_flood_sustained(attacker_name="h10") -> None:
     global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
     _mixed_stop_event.clear()
     num = int(attacker_name[1:])
     info(f"*** SYN sustained: {attacker_name} -> {SERVER_IP}\n")
@@ -619,6 +783,7 @@ def launch_syn_flood_sustained(attacker_name="h6") -> None:
 
 def launch_icmp_flood_sustained(attacker_name="h11") -> None:
     global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
     _mixed_stop_event.clear()
     num = int(attacker_name[1:])
     info(f"*** ICMP sustained: {attacker_name} -> {SERVER_IP}\n")
@@ -630,8 +795,9 @@ def launch_icmp_flood_sustained(attacker_name="h11") -> None:
     t.start()
 
 
-def launch_udp_flood_sustained(attacker_name="h16") -> None:
+def launch_udp_flood_sustained(attacker_name="h7") -> None:
     global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
     _mixed_stop_event.clear()
     num = int(attacker_name[1:])
     info(f"*** UDP sustained: {attacker_name} -> {SERVER_IP}\n")
@@ -644,13 +810,14 @@ def launch_udp_flood_sustained(attacker_name="h16") -> None:
 
 
 def start_syn_flood_campaign() -> None:
-    # SYN flood — h10, h18, h19 continuous, watchdog auto-restarts if killed
+    # SYN flood — h10, h18, h22 continuous, watchdog auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
     _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
-    info("  [SYN CAMPAIGN]  h10 h18 h19  |  Continuous flood\n")
+    info("  [SYN CAMPAIGN]  h10 h18 h22  |  Continuous flood\n")
     info("=" * 55 + "\n")
-    for num in [10, 18, 19]:
+    for num in [10, 18, 22]:
         h = net.get(f"h{num}")
         t = threading.Thread(
             target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
@@ -669,6 +836,7 @@ def start_syn_flood_campaign() -> None:
 def start_icmp_flood_campaign() -> None:
     # ICMP flood — h11, h12, h13 continuous, watchdog auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
     _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
     info("  [ICMP CAMPAIGN]  h11 h12 h13  |  Continuous flood\n")
@@ -692,6 +860,7 @@ def start_icmp_flood_campaign() -> None:
 def start_udp_flood_campaign() -> None:
     # UDP flood — h6, h7, h8 continuous, watchdog auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
     _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
     info("  [UDP CAMPAIGN]  h6 h7 h8  |  Continuous flood\n")
@@ -713,22 +882,23 @@ def start_udp_flood_campaign() -> None:
 
 
 def start_mixed_campaign() -> None:
-    # all 20 attackers, staggered starts, continuous flood — no rest periods
+    # all 15 attackers, staggered starts, continuous flood — no rest periods
     global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
     info("\n" + "=" * 65 + "\n")
-    info("  [MIXED CAMPAIGN]  All 20 attackers  |  Continuous flood\n")
-    info("  SYN (h6-h10,h18,h22-h25) -> ICMP (h11-h15,h26-h27) -> UDP (h16,h17) -> MIXED (h19)\n")
+    info("  [MIXED CAMPAIGN]  All 15 attackers  |  Continuous flood\n")
+    info("  SYN (h10,h16,h18,h22,h23) -> UDP (h6-h9,h17) -> ICMP (h11-h15)\n")
     info("=" * 65 + "\n")
-    info(f"  {'HOST':<6} {'TYPE':<8} {'FLAGS':<35} START\n")
-    info("  " + "-" * 60 + "\n")
+    info(f"  {'HOST':<6} {'TYPE':<8} {'FLAGS':<40} START\n")
+    info("  " + "-" * 66 + "\n")
 
     for num in sorted(_ATTACKER_VARIANTS.keys()):
         atype, flags, _, _ = _ATTACKER_VARIANTS[num]
         delay = _ATTACKER_START_DELAYS.get(num, 0)
-        info(f"  h{num:<5} {atype:<8} {flags:<35} +{delay}s\n")
+        info(f"  h{num:<5} {atype:<8} {flags:<40} +{delay}s\n")
         t = threading.Thread(
             target=_attacker_cycle_worker,
             args=(num, _mixed_stop_event),
@@ -756,41 +926,21 @@ def start_stress_test() -> None:
     # Use for ML ON or ML OFF controller resource stress measurement.
     # RF accuracy is not meaningful here — random IPs have no flow history.
     global _stress_stop_event, _stress_threads
-    _stress_stop_event = threading.Event()
+    # Reuse ONE stop event forever. Rebinding it to a fresh Event stranded
+    # old watchdogs on an unset Event object and they kept respawning floods.
+    # Stop any running campaign first so floods never stack.
+    _stop_active_workers()
+    _stress_stop_event.clear()
     _stress_threads.clear()
 
-    # Build rand-source flood commands per attack type
-    _STRESS_CMDS = {
-        6:  "hping3 --udp -p 53    --flood --rand-source --data 64 {t} > /dev/null 2>&1",
-        7:  "hping3 --udp -p 123   --flood --rand-source --data 128 {t} > /dev/null 2>&1",
-        8:  "hping3 --udp -p 1900  --flood --rand-source --data 256 {t} > /dev/null 2>&1",
-        9:  "hping3 --udp -p 11211 --flood --rand-source --data 800 {t} > /dev/null 2>&1",
-        10: "hping3 -S -p 8080 --flood --rand-source {t} > /dev/null 2>&1",
-        11: "hping3 --icmp --flood --rand-source --data 1480 {t} > /dev/null 2>&1",
-        12: "hping3 --icmp --flood --rand-source --data 800 {t} > /dev/null 2>&1",
-        13: "hping3 --icmp --flood --rand-source --data 1024 {t} > /dev/null 2>&1",
-        14: "hping3 --icmp --flood --rand-source --data 1200 {t} > /dev/null 2>&1",
-        15: "hping3 --icmp --flood --rand-source --data 128 {t} > /dev/null 2>&1",
-        16: "hping3 --udp -p 53    --flood --rand-source --data 1024 {t} > /dev/null 2>&1",
-        17: "hping3 --udp -p 123   --flood --rand-source --data 1400 {t} > /dev/null 2>&1",
-        18: "hping3 -S -p 1900   --flood --rand-source {t} > /dev/null 2>&1",
-        19: "hping3 -S -p 1900   --flood --rand-source {t} > /dev/null 2>&1",
-        22: "hping3 -S -p 21   --flood --rand-source {t} > /dev/null 2>&1",
-        23: "hping3 -S -p 25   --flood --rand-source {t} > /dev/null 2>&1",
-        24: "hping3 -S -p 3389 --flood --rand-source {t} > /dev/null 2>&1",
-        25: "hping3 -S -p 5432 --flood --rand-source {t} > /dev/null 2>&1",
-        26: "hping3 --icmp --flood --rand-source --data 64 {t} > /dev/null 2>&1",
-        27: "hping3 --icmp --flood --rand-source --data 512 {t} > /dev/null 2>&1",
-    }
-
-    info("*** Starting stress test — all 20 attackers, rand-source flood -> {}\n".format(SERVER_IP))
+    info("*** Starting stress test — all 15 attackers, rand-source flood -> {}\n".format(SERVER_IP))
 
     # Stagger each attacker by 100ms — prevents OVS from being hit by all
-    # 20 floods in the same millisecond, which causes switch disconnects.
+    # many floods in the same millisecond, which causes switch disconnects.
     # 100ms per host = ~2.0s total ramp — still appears simultaneous in report.
     def _stress_worker(num: int) -> None:
         h   = net.get(f"h{num}")
-        cmd = _STRESS_CMDS[num].format(t=SERVER_IP)
+        cmd = _STRESS_CMDS[num]
         atype, _, _, _ = _ATTACKER_VARIANTS[num]
         _notify_attack_start(h.IP(), atype)
         # _nsrun uses Popen, survives after this call returns.
@@ -806,16 +956,13 @@ def start_stress_test() -> None:
             time.sleep(5)
             if _stress_stop_event.is_set():
                 break
-            check = subprocess.run(
-                f"nsenter -t {h.pid} -n -p -- pgrep -x hping3",
-                shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            if check.returncode != 0:
+            if _hping_state(h) is False:
                 info(f"    h{num}: hping3 died, restarting\n")
                 _nsrun(h, cmd)
 
     for i, num in enumerate(sorted(_ATTACKER_NUMS)):
         t = threading.Thread(target=_stress_worker, args=(num,), daemon=True)
+        _stress_threads.append(t)
         t.start()
         time.sleep(0.1)
 
@@ -825,12 +972,41 @@ def start_stress_test() -> None:
 def stop_stress_test() -> None:
     # stop all rand-source stress flood processes, inside each host netns
     info("*** Stopping stress test...\n")
+    # Round 5 S1: set BOTH stop events before killing. Stress floods die on
+    # _stress_stop_event alone, but _kill_all_attackers() kills ALL hping3,
+    # including any campaign flood still running; without the campaign event
+    # its watchdogs legitimately resurrect those floods.
     _stress_stop_event.set()
-    for h in net.hosts:
-        if int(h.name[1:]) in _ATTACKER_NUMS:
-            _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
-            _notify_attack_stop(h.IP())
+    _mixed_stop_event.set()
+    gt_cutoff = time.time()
+    _kill_all_attackers()
+    _discard_attackers_locally()
+    _notify_gt_stop_all(gt_cutoff)
+    deadline = time.time() + 3
+    for t in _stress_threads:
+        t.join(timeout=max(0.05, deadline - time.time()))
+    _stress_threads.clear()
     info("*** Stress test stopped.\n")
+
+
+def reset_flow_epochs() -> None:
+    # Flush priority-10 forward rules so every host's flow counters restart
+    # (bounds the cumulative age drift that slowly pushes clean hosts over
+    # the anomaly threshold). Strict per-IP deletes: the plain
+    # `del-flows <sw> priority=N` form is rejected by the installed OVS.
+    # Requires the controller RUNNING: switches fail secure, so unmatched
+    # packets are dropped, not forwarded, while Ryu is down.
+    if net is None:
+        return
+    info("*** Resetting flow epochs (flush priority=10 forwards)...\n")
+    ips = [h.IP() for h in hosts]
+    for sw in net.switches:
+        for ip in ips:
+            subprocess.run(
+                f"ovs-ofctl --strict del-flows {sw.name} "
+                f"priority=10,ip,nw_src={ip}",
+                shell=True, capture_output=True)
+    info("*** Flow epochs reset.\n")
 
 
 def stop_all_attacks() -> None:
@@ -838,43 +1014,68 @@ def stop_all_attacks() -> None:
 
     info("*** Stopping all attacks...\n")
 
-    # Set stop_event FIRST — before killing anything. Watchdog threads
-    # check this flag before restarting hping3. If we kill first and
-    # set the flag after, a watchdog can see hping3 dead and restart
-    # it in that gap (race condition).
+    # Set BOTH stop events FIRST, before killing anything. Stress watchdogs
+    # only watch _stress_stop_event, so setting just the campaign event left
+    # the entire first kill sweep inside the watchdog restart window, and
+    # every sweep iteration resurrected floods.
     _mixed_stop_event.set()
+    _stress_stop_event.set()
 
-    # Now kill hping3 — instant, watchdogs will not restart it.
-    info("*** Killing hping3 on all attackers...\n")
-    for h in net.hosts:
-        if int(h.name[1:]) in _ATTACKER_NUMS:
-            _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
+    # Kill hping3 on all attacker hosts CONCURRENTLY (wall time of one fork chain,
+    # not one per host). Workers exit on the already-set events; their own exit
+    # pkill is a no-op afterwards.
+    gt_cutoff = time.time()
+    info("*** Killing hping3 on all attackers (parallel)...\n")
+    _kill_all_attackers()
+    _discard_attackers_locally()
 
-    # stop stress test — sets its own stop event + pkill again for safety
-    stop_stress_test()
+    # Round 5 S3: starve zombie telemetry immediately after the kill. Dead
+    # floods' priority-10 entries keep reporting cumulative-average pps for
+    # up to ~60s and the backend re-creates quarantine entries from them.
+    # Deleting ONLY attacker forward rules here stops that feed at the
+    # source; legit entries keep aging naturally (flushing those would
+    # recreate the fresh-entry transients Round 4 fixed).
+    _flush_flow_rules([10], ips=[h.IP() for h in net.hosts
+                                 if int(h.name[1:]) in _ATTACKER_POOL],
+                      label="attacker forwards")
+
+    # Reap stress workers, then campaign workers, on short deadlines.
+    # Round 5 S9: stranded workers always terminate and cannot respawn, so
+    # long joins only burn wall time against a degraded backend.
+    deadline = time.time() + 3
+    for t in _stress_threads:
+        t.join(timeout=max(0.05, deadline - time.time()))
+    _stress_threads.clear()
 
     info("*** Waiting for attack threads to exit...\n")
+    deadline = time.time() + 3
     for t in _campaign_threads:
-        t.join(timeout=5)
+        t.join(timeout=max(0.05, deadline - time.time()))
     _campaign_threads.clear()
 
-    # force kill any stragglers spawned during the join window
-    time.sleep(0.3)
-    for h in net.hosts:
-        if int(h.name[1:]) in _ATTACKER_NUMS:
-            _nsrun(h, "pkill -9 -f hping3 2>/dev/null; true", wait=True)
+    # One parallel safety pass catches anything spawned during the join
+    # window. Cheap when idle; replaces the old second and third serial
+    # sweeps that made stops take minutes under flood load.
+    _kill_all_attackers()
+    # repeat the attacker-scoped forward flush: packets buffered in qdiscs
+    # at SIGKILL time can reinstall a priority-10 rule after the first pass
+    _flush_flow_rules([10], ips=[h.IP() for h in net.hosts
+                                 if int(h.name[1:]) in _ATTACKER_POOL],
+                      label="attacker forwards")
 
-    # notify ground truth stop for every attacker — covers burst/campaign
-    # functions that don't track their own stop event individually
-    for h in net.hosts:
-        if int(h.name[1:]) in _ATTACKER_NUMS:
-            _notify_attack_stop(h.IP())
+    # Round 5 S6: one batched ground-truth stop (race-safe via cutoff)
+    _notify_gt_stop_all(gt_cutoff)
 
     info("*** Flushing OVS block rules...\n")
-    for sw in net.switches:
-        for pri in [100, 90, 80]:
-            subprocess.run(f"ovs-ofctl del-flows {sw.name} priority={pri}",
-                           shell=True, capture_output=True)
+    # Round 5 S2/S7: batched concurrent flush covering every per-IP
+    # mitigation priority (100 ban / 90 time-ban meter / 85 sinkhole
+    # redirect / 80 quarantine meter) for ALL known host IPs, plus a
+    # best-effort wildcard delete for the resource-guard proto rule at
+    # priority 50. reset_flow_epochs() deliberately NOT called here: flow
+    # epochs self-heal at FLOW_EPOCH_S and flushing legit forward rules at
+    # stop manufactured the fresh-entry transients behind the h1/h2 FPs.
+    _flush_flow_rules([100, 90, 85, 80], ips=None,
+                      proto_wildcard_pri=50, label="ban rules")
 
     info("*** Clearing controller state via ZMQ...\n")
     try:
@@ -885,7 +1086,7 @@ def stop_all_attacks() -> None:
         _sock.setsockopt(_zmq.SNDTIMEO, 500)
         _sock.connect("tcp://127.0.0.1:5556")
         for h in hosts:
-            if int(h.name[1:]) in _ATTACKER_NUMS:
+            if int(h.name[1:]) in _ATTACKER_POOL:
                 _sock.send_json({"action": "clear", "src_ip": h.IP()})
                 info(f"    cleared: {h.IP()}\n")
         _sock.close()
@@ -910,23 +1111,55 @@ def stop_all_attacks() -> None:
     # run all cache invalidations in parallel
     inv_threads = []
     for h in hosts:
-        if int(h.name[1:]) in _ATTACKER_NUMS:
+        if int(h.name[1:]) in _ATTACKER_POOL:
             t = threading.Thread(target=_invalidate, args=(h.IP(),), daemon=True)
             inv_threads.append(t)
             t.start()
     for t in inv_threads:
         t.join(timeout=3)
 
-    try:
-        req2 = urllib.request.Request(
-            f"{BACKEND_API}/api/quarantine/clear_all",
-            data=b"{}", headers={"Content-Type": "application/json"}, method="POST",
-        )
-        with urllib.request.urlopen(req2, timeout=2) as r:
-            resp = _json.loads(r.read())
-        info(f"    quarantine cleared: {resp.get('cleared', 0)} entries\n")
-    except Exception as e:
-        info(f"    backend flush warning: {e}\n")
+    # Round 5 S4: bounded verification loop. Worker staleness is up to ~6s
+    # (enqueued_at resets on priority requeue) and hold_ip rows live ~15s,
+    # so in-flight detections can re-create entries AFTER the first
+    # clear_all. Poll, re-clear while dirty, warn only if still dirty.
+    verify_deadline = time.time() + 12
+
+    def _clear_quarantine_once() -> None:
+        try:
+            req2 = urllib.request.Request(
+                f"{BACKEND_API}/api/quarantine/clear_all",
+                data=b"{}", headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req2, timeout=2) as r:
+                resp = _json.loads(r.read())
+            info(f"    quarantine cleared: {resp.get('cleared', 0)} entries\n")
+        except Exception as e:
+            info(f"    backend flush warning: {e}\n")
+
+    _clear_quarantine_once()
+    still_dirty = False
+    for wait_s in (3.0, 6.0):
+        time.sleep(wait_s)
+        try:
+            with urllib.request.urlopen(f"{BACKEND_API}/api/quarantine_list",
+                                        timeout=2) as r:
+                leftover = _json.loads(r.read())
+        except Exception as e:
+            info(f"*** WARNING: could not verify backend state after stop: {e}\n")
+            break
+        if not leftover:
+            break
+        if time.time() >= verify_deadline:
+            still_dirty = True
+            break
+        _clear_quarantine_once()
+    else:
+        still_dirty = bool(leftover)
+    if still_dirty:
+        info(f"*** WARNING: backend still lists quarantined entries after "
+             f"verify loop (possible dirty criminal records; run the wipe "
+             f"runbook before the next session)\n")
 
     info("*** Attack stopped, forwarding restored.\n")
 
@@ -986,7 +1219,7 @@ def _flash_crowd_worker(legit: list, duration: int) -> None:
     _stop_baseline_threads()
 
     for h in legit:
-        _nsrun(h, "pkill -9 -f 'ping -i' 2>/dev/null; pkill -f hping3 2>/dev/null; true", wait=True)
+        _kill_baseline_procs(h)
     time.sleep(0.5)
 
     for h in legit:
@@ -997,7 +1230,7 @@ def _flash_crowd_worker(legit: list, duration: int) -> None:
     time.sleep(duration)
 
     for h in legit:
-        _nsrun(h, "pkill -9 -f 'ping -i' 2>/dev/null; pkill -f hping3 2>/dev/null; true", wait=True)
+        _kill_baseline_procs(h)
 
     info("*** Flash crowd ended, restoring baseline...\n")
     start_baseline_traffic()
@@ -1044,8 +1277,9 @@ def _warmup_macs() -> None:
                        shell=True, capture_output=True)
 
     # each legit host pings server once in parallel, just to populate ARP
+    # (legit hosts ONLY, 2026-08-26: retired hosts stay fully silent)
     info("*** Pinging server in parallel to populate MAC tables...\n")
-    legit = [h for h in hosts if int(h.name[1:]) not in _ATTACKER_NUMS]
+    legit = [h for h in hosts if int(h.name[1:]) in _LEGIT_NUMS]
     for src in legit:
         _nsrun(src, f"ping -c1 -W1 {SERVER_IP} > /dev/null 2>&1")
     time.sleep(2)
@@ -1064,7 +1298,7 @@ def _warmup_macs() -> None:
     _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     from backend.pipeline.flood_prefilter import flood_filter as _ff
     for h in hosts:
-        if int(h.name[1:]) not in _ATTACKER_NUMS:
+        if int(h.name[1:]) not in _ATTACKER_POOL:
             _ff.clear_flag(h.IP())
     info("*** Prefilter flags cleared for legit hosts.\n")
 
@@ -1134,6 +1368,9 @@ def check_traffic() -> None:
             role, attack_type = "SERVER", "-"
             srv_up = h.cmd("pgrep -f 'tcp_udp_server\\|time.sleep' 2>/dev/null").strip()
             status = "✓ HTTP running" if srv_up else "⚠ server down"
+        elif num in _RETIRED_NUMS:
+            role, attack_type = "RETIRED", "-"
+            status = "standby (silent)"
         elif is_attacker:
             role        = "ATTACKER"
             attack_type = next((f"[{a['attack_type']}] {a['flags']}"
@@ -1161,21 +1398,24 @@ def check_traffic() -> None:
 # === AUTO-RESTORE ===
 
 def restore_baseline_for_ip(src_ip: str) -> bool:
-    # restart baseline thread for a legit host released from quarantine
-    for h in hosts:
-        if h.IP() == src_ip and int(h.name[1:]) in _LEGIT_NUMS:
-            if h.name in _baseline_stop:
-                _baseline_stop[h.name].set()
-            stop_ev = threading.Event()
-            t = threading.Thread(
-                target=_baseline_loop, args=(h, stop_ev, _idle_host_ref),
-                name=f"baseline-{h.name}", daemon=True
-            )
-            _baseline_stop[h.name]    = stop_ev
-            _baseline_threads[h.name] = t
-            t.start()
-            _restore_log.info("Restored baseline for %s", src_ip)
-            return True
+    # restart baseline thread for a legit host released from quarantine.
+    # Lock spans check-and-spawn so the restore poller and the baseline
+    # watchdog cannot both spawn a replacement for the same host.
+    with _baseline_lock:
+        for h in hosts:
+            if h.IP() == src_ip and int(h.name[1:]) in _LEGIT_NUMS:
+                if h.name in _baseline_stop:
+                    _baseline_stop[h.name].set()
+                stop_ev = threading.Event()
+                t = threading.Thread(
+                    target=_baseline_loop, args=(h, stop_ev, _idle_host_ref),
+                    name=f"baseline-{h.name}", daemon=True
+                )
+                _baseline_stop[h.name]    = stop_ev
+                _baseline_threads[h.name] = t
+                t.start()
+                _restore_log.info("Restored baseline for %s", src_ip)
+                return True
     return False
 
 
@@ -1275,6 +1515,8 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
             role, atype = "SERVER", "(whitelisted)"
         elif num == 21:
             role, atype = "SINKHOLE", "(silent dummy)"
+        elif num in _RETIRED_NUMS:
+            role, atype = "RETIRED", "(silent)"
         elif num in _ATTACKER_NUMS:
             role  = "ATTACKER"
             atype = next((f"[{a['attack_type']}] {a['flags']}"
@@ -1287,22 +1529,22 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
     info("  COMMANDS\n")
     info("  " + "-" * 65 + "\n")
     info("  ── BURST (finite) ────────────────────────────────────────────\n")
-    info(f"  py launch_syn_flood()                  # {ATTACK_PKT_COUNT:,} pkts, h6\n")
+    info(f"  py launch_syn_flood()                  # {ATTACK_PKT_COUNT:,} pkts, h10\n")
     info(f"  py launch_icmp_flood()                 # {ATTACK_PKT_COUNT:,} pkts, h11\n")
-    info(f"  py launch_udp_flood()                  # {ATTACK_PKT_COUNT:,} pkts, h16\n\n")
+    info(f"  py launch_udp_flood()                  # {ATTACK_PKT_COUNT:,} pkts, h7\n\n")
     info("  ── SUSTAINED (unlimited) ─────────────────────────────────────\n")
-    info("  py launch_syn_flood_sustained()        # h6\n")
+    info("  py launch_syn_flood_sustained()        # h10\n")
     info("  py launch_icmp_flood_sustained()       # h11\n")
-    info("  py launch_udp_flood_sustained()        # h16\n\n")
+    info("  py launch_udp_flood_sustained()        # h7\n\n")
     info("  ── ALL ATTACKERS ─────────────────────────────────────────────\n")
-    info("  py launch_attack()                     # all 20, sustained\n")
-    info("  py launch_attack(sustained=False)      # all 20, burst\n\n")
+    info("  py launch_attack()                     # all 15, sustained\n")
+    info("  py launch_attack(sustained=False)      # all 15, burst\n\n")
     info("  ── CAMPAIGNS ─────────────────────────────────────────────────\n")
-    info("  py start_syn_flood_campaign()          # h6,h7,h8\n")
+    info("  py start_syn_flood_campaign()          # h10,h18,h22\n")
     info("  py start_icmp_flood_campaign()         # h11,h12,h13\n")
-    info("  py start_udp_flood_campaign()          # h16,h17,h18\n")
-    info("  py start_mixed_campaign()              # all 20, staggered cyclic\n")
-    info("  py start_stress_test()                 # all 20, rand-source, memory stress\n\n")
+    info("  py start_udp_flood_campaign()          # h6,h7,h8\n")
+    info("  py start_mixed_campaign()              # all 15, staggered cyclic\n")
+    info("  py start_stress_test()                 # all 15, rand-source, memory stress\n\n")
     info("  ── STOP ──────────────────────────────────────────────────────\n")
     info("  py stop_all_attacks()                  # kill + flush + clear\n")
     info("  py stop_baseline()                     # stop baseline\n\n")
@@ -1310,6 +1552,7 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
     info("  py flash_crowd()                       # 30s spike to server\n")
     info("  py flash_crowd(duration=60)            # custom duration\n")
     info("  py check_traffic()                     # live host status\n")
+    info("  py reset_flow_epochs()                 # fresh flow counters\n")
     info("  py watch_pipeline()                    # live ML scores\n")
     info("  py start_baseline_traffic()            # restart baseline\n")
     info("=" * 75 + "\n\n")
@@ -1341,22 +1584,20 @@ if __name__ == "__main__":
     _start_restore_poller()
     info("*** Network ready, starting CLI.\n\n")
 
-    # build globals dict with net, hosts, and host shortcuts like h1, h2
-    _g = globals().copy()
-    _g["net"]   = net
-    _g["hosts"] = hosts
+    # expose host shortcuts as real module globals so py commands always see
+    # live state. A copied snapshot goes stale after stop/start cycles.
     for _h in hosts:
-        _g[_h.name] = _h
+        globals()[_h.name] = _h
 
     class TopologyCLI(CLI):
         def do_py(self, line):
             try:
-                result = eval(line, _g)
+                result = eval(line, globals())
                 if result is not None:
                     print(result)
             except SyntaxError:
                 try:
-                    exec(line, _g)
+                    exec(line, globals())
                 except Exception as e:
                     print(f"Error: {e}")
             except Exception as e:

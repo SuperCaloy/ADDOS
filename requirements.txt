@@ -29,4 +29,4 @@ python-iptables==1.2.0
 # ── Fixed Ryu SDN Controller Architecture ────────────────────
 # Replaces broken upstream setups with the modern community patch
 ryu==4.34
-eventlet==0.34.3
+eventlet==0.40.4

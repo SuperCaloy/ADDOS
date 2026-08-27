@@ -40,11 +40,13 @@ _LEGIT_HOST_IPS: frozenset = frozenset([
     "10.0.0.5", # h5
 ])
 
-# Ground truth - attacker hosts h6-h19 + h22-h27 (20 total), per topology.py.
+# Ground truth - attacker hosts (15 total, 2026-08-26 reduction):
+# h6-h18 + h22,h23 (h16 repurposed SYN/5432, h22 repurposed SYN/3389;
+# h19,h24-h27 retired and silent), per topology.py.
 # h20 (server) and h21 (sinkhole) are excluded on purpose, not attackers.
 _ATTACKER_IPS: frozenset = frozenset(
-    [f"10.0.0.{i}" for i in range(6, 20)] +
-    [f"10.0.0.{i}" for i in range(22, 28)]
+    [f"10.0.0.{i}" for i in range(6, 19)] +
+    ["10.0.0.22", "10.0.0.23"]
 )
 
 _stats = {
@@ -60,6 +62,29 @@ _stats = {
     "total_latency_ms":    0.0,
     "latency_samples":     0,
 }
+
+# Rolling detection_ms samples for percentile reporting (observability).
+_latency_lock = threading.Lock()
+_latency_samples_ms: collections.deque = collections.deque(maxlen=2000)
+
+
+def record_detection_latency(ms: float) -> None:
+    with _latency_lock:
+        _latency_samples_ms.append(ms)
+
+
+def latency_percentiles() -> dict:
+    with _latency_lock:
+        samples = sorted(_latency_samples_ms)
+    n = len(samples)
+
+    def _pct(p):
+        if not samples:
+            return 0.0
+        idx = min(n - 1, max(0, round(p / 100.0 * (n - 1))))
+        return round(samples[idx], 1)
+
+    return {"p50": _pct(50), "p95": _pct(95), "p99": _pct(99), "n": n}
 
 _sse_lock   = threading.Lock()
 _sse_buffer: collections.deque = collections.deque(maxlen=200)
@@ -241,6 +266,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
     # Detection Time - flow queued (worker.submit) → IF/RF result ready here.
     # None when not provided (e.g. timeout fallback path) - left as None in DB.
     detection_ms = ((t_start - enqueued_at) * 1000.0) if enqueued_at is not None else None
+    if detection_ms is not None:
+        record_detection_latency(detection_ms)
 
     with _lock:
         _stats["total_packets"] += 1
@@ -469,7 +496,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
     from backend.api.stats import get_active_attacks as _get_gt
     _gt = _get_gt()
     _expected_class = _gt.get(src_ip)  # "SYN", "ICMP", "UDP" or None
-    # MIXED is a topology-only label (h19), RF's 3-class model was never
+    # MIXED is a legacy topology-only label (no variant emits it anymore),
+    # RF's 3-class model was never
     # trained to predict it. Scoring it as FN/FP either way corrupts the
     # confusion matrix, so it's excluded from RF ground truth entirely,
     # same as if the IP had never been registered.

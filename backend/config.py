@@ -31,6 +31,11 @@ WORKER_ITEM_TIMEOUT_S   = 3.0
 EXTRACTION_TRIGGER_PKTS = 1
 EXTRACTION_TRIGGER_S    = 0.05
 
+# --- RF micro-batching (B1) ---
+RF_BATCH_ENABLED  = True
+RF_BATCH_MAX      = 16
+RF_BATCH_WINDOW_MS = 50
+
 # --- Simulation mode ---
 SIMULATION_MODE = True
 

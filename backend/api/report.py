@@ -470,7 +470,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     lat_data = [
         ["Metric", "Value", "Description"],
         ["Detection Time",           _ms(lat_m.get("detection_ms", 0)),
-         "Interval between attack traffic arrival and the IF anomaly flag"],
+         "Interval between pipeline submission (worker queue entry) and the IF anomaly classification"],
         ["Mitigation Response Time", _ms(lat_m.get("mitigation_ms", 0)),
          "Interval between the anomaly flag and the FlowMod blocking rule install"],
     ]

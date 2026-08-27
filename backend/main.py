@@ -36,6 +36,11 @@ def create_app() -> Flask:
 
     state_machine.set_commander(commander)
 
+    # Restore persisted permanent states (BFA-P2): re-issues block/rate_limit
+    # commands for entries that survived a backend restart. Must run after
+    # the commander is wired and before the tick thread starts.
+    state_machine.restore_from_db()
+
     # Wire deception module — must happen before start_tick_thread
     deception.set_commander(commander)
     deception.set_callbacks(
@@ -63,13 +68,18 @@ def create_app() -> Flask:
     from backend.pipeline import decision_engine
     decision_engine.start()
 
+    # --- Start observability reporter (percentiles + queue/drop gauges) ---
+    from backend.pipeline import observability
+    observability.start()
+
     # --- Start ZMQ telemetry receiver (resilient — ok if Ryu is offline) ---
     from backend.transport import zmq_receiver
     zmq_receiver.start()
 
     # --- Start database summary flush thread ---
-    from backend.database.writer import start_flush_thread
+    from backend.database.writer import start_flush_thread, register_exit_flush
     start_flush_thread()
+    register_exit_flush()
 
     # --- Start database archiver (hot → archive rotation every hour) ---
     from backend.database import archiver
