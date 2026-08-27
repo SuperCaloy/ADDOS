@@ -66,16 +66,14 @@ _stats = {
 # Rolling detection_ms samples for percentile reporting (observability).
 _latency_lock = threading.Lock()
 _latency_samples_ms: collections.deque = collections.deque(maxlen=2000)
+_latency_by_origin: dict[str, collections.deque] = {
+    "full":     collections.deque(maxlen=2000),
+    "low_rate": collections.deque(maxlen=2000),
+    "cached":   collections.deque(maxlen=2000),
+}
 
 
-def record_detection_latency(ms: float) -> None:
-    with _latency_lock:
-        _latency_samples_ms.append(ms)
-
-
-def latency_percentiles() -> dict:
-    with _latency_lock:
-        samples = sorted(_latency_samples_ms)
+def _percentile_snapshot(samples: list) -> dict:
     n = len(samples)
 
     def _pct(p):
@@ -85,6 +83,25 @@ def latency_percentiles() -> dict:
         return round(samples[idx], 1)
 
     return {"p50": _pct(50), "p95": _pct(95), "p99": _pct(99), "n": n}
+
+
+def record_detection_latency(ms: float, origin: str | None = None) -> None:
+    with _latency_lock:
+        _latency_samples_ms.append(ms)
+        if origin in _latency_by_origin:
+            _latency_by_origin[origin].append(ms)
+
+
+def latency_percentiles() -> dict:
+    with _latency_lock:
+        samples = sorted(_latency_samples_ms)
+    return _percentile_snapshot(samples)
+
+
+def latency_percentiles_by_origin() -> dict:
+    with _latency_lock:
+        return {origin: _percentile_snapshot(sorted(buf))
+                for origin, buf in _latency_by_origin.items()}
 
 _sse_lock   = threading.Lock()
 _sse_buffer: collections.deque = collections.deque(maxlen=200)
@@ -250,7 +267,7 @@ def _should_log_detection(src_ip: str, phase_entered: float | None) -> bool:
             return False
         _detection_logged[src_ip] = phase_entered
         if len(_detection_logged) > _DETECTION_LOGGED_MAX:
-            live_states = state_machine._states
+            live_states = state_machine.get_state_ips()
             for ip in [k for k in _detection_logged if k not in live_states]:
                 del _detection_logged[ip]
         return True
@@ -259,7 +276,8 @@ def _should_log_detection(src_ip: str, phase_entered: float | None) -> bool:
 def on_result(src_ip: str, if_score, is_anomaly,
               attack_class, confidence, *,
               flow_stats: dict = None, switch_stats: dict = None,
-              timed_out: bool, enqueued_at: float = None) -> None:
+              timed_out: bool, enqueued_at: float = None,
+              origin: str = None) -> None:
     from backend.api.stats import get_active_attacks as _get_gt
     t_start = time.monotonic()
 
@@ -267,7 +285,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     # None when not provided (e.g. timeout fallback path) - left as None in DB.
     detection_ms = ((t_start - enqueued_at) * 1000.0) if enqueued_at is not None else None
     if detection_ms is not None:
-        record_detection_latency(detection_ms)
+        record_detection_latency(detection_ms, origin=origin)
 
     with _lock:
         _stats["total_packets"] += 1
@@ -417,18 +435,13 @@ def on_result(src_ip: str, if_score, is_anomaly,
         from backend.mitigation.resource_guard import resource_guard
         resource_guard.set_attack_proto(attack_class)
 
-        # Update recent_pps so phase1 can check if traffic is still active.
-        _recent_pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
-        with state_machine._lock:
-            _existing_state = state_machine._states.get(src_ip)
-            if _existing_state is not None:
-                _existing_state.recent_pps = _recent_pps
+        # recent_pps is already refreshed for every result by
+        # state_machine.update_observation() above - no direct mutation here.
 
         # Mitigation response time, result ready to FlowMod dispatched.
         t_mitigate_start = time.monotonic()
 
-        with state_machine._lock:
-            existing = state_machine._states.get(src_ip)
+        existing = state_machine.get_state(src_ip)
         if existing is None:
             from backend.database.db import query as _q
             prior = _q(
@@ -440,7 +453,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
                 prev_occ   = int(prior[0].get("offence_count", 0) or 0)
                 if prev_ban > 0:
                     state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_occ)
-                    action_taken = state_machine._states[src_ip].action_taken if src_ip in state_machine._states else "Quarantined"
+                    _post_state = state_machine.get_state(src_ip)
+                    action_taken = _post_state.action_taken if _post_state else "Quarantined"
                 else:
                     action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
             else:
@@ -458,7 +472,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    ip_state    = state_machine._states.get(src_ip)
+    ip_state    = state_machine.get_state(src_ip)
     phase_label = ip_state.phase_label() if ip_state else None
 
     # Skip write for legit hosts, and for flash crowd, no action taken.

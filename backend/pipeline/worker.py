@@ -7,6 +7,10 @@ from backend.config import (
     WORKER_QUEUE_MAXSIZE, WORKER_ITEM_TIMEOUT_S,
     EXTRACTION_TRIGGER_PKTS, EXTRACTION_TRIGGER_S,
     ML_ENABLED, RF_BATCH_ENABLED, RF_BATCH_WINDOW_MS,
+    ADMISSION_CONTROL_ENABLED, WORKER_ADMISSION_DEPTH, HOTPATH_QUIET,
+    IF_BATCH_ENABLED, IF_BATCH_WINDOW_MS,
+    DEADLINE_ADMISSION_ENABLED, DEADLINE_ADMISSION_MARGIN_S,
+    SVC_EMA_ALPHA, SVC_EMA_FALLBACK_MS,
 )
 from backend.models import if_pipeline, rf_pipeline, loader
 from backend.pipeline.flow_tracker import tracker
@@ -55,6 +59,106 @@ def get_drop_counters() -> dict:
         return dict(_drop_counters)
 
 
+_submit_lock = threading.Lock()
+_submit_counters = {"submitted": 0, "requeued": 0}
+
+
+def _inc_submit(key: str) -> None:
+    with _submit_lock:
+        _submit_counters[key] += 1
+
+
+def get_submit_counters() -> dict:
+    with _submit_lock:
+        return dict(_submit_counters)
+
+
+_batch_fallback_lock = threading.Lock()
+_batch_fallback_counters = {"rf": 0, "if": 0}
+
+
+def _inc_batch_fallback(key: str) -> None:
+    with _batch_fallback_lock:
+        _batch_fallback_counters[key] += 1
+
+
+def get_batch_fallback_counters() -> dict:
+    with _batch_fallback_lock:
+        return dict(_batch_fallback_counters)
+
+
+_admission_lock = threading.Lock()
+_admission_counters = {"admission_dropped": 0, "admission_deadline_dropped": 0}
+
+
+def _inc_admission(key: str) -> None:
+    with _admission_lock:
+        _admission_counters[key] += 1
+
+
+def get_admission_counters() -> dict:
+    with _admission_lock:
+        return dict(_admission_counters)
+
+
+# --- Service-time EMA (S7) ---
+# Per-origin EMA over samples that ran FULL inference. Skip/cached/low-rate
+# branches never update it, so the value tracks real inference occupancy
+# instead of being diluted toward microseconds. Feeds deadline admission.
+_svc_ema_lock = threading.Lock()
+_svc_ema = {"full": None}
+
+
+def _record_svc_ema(ms: float) -> None:
+    with _svc_ema_lock:
+        current = _svc_ema["full"]
+        if current is None:
+            _svc_ema["full"] = ms
+        else:
+            _svc_ema["full"] = SVC_EMA_ALPHA * ms + (1 - SVC_EMA_ALPHA) * current
+
+
+def get_svc_ema_ms() -> float:
+    with _svc_ema_lock:
+        return _svc_ema["full"] if _svc_ema["full"] is not None \
+            else SVC_EMA_FALLBACK_MS
+
+
+# Worker pool size for drain math; set by start(), falls back to the
+# default derivation when workers were never started (tests, dry import).
+_num_workers = 0
+
+
+def _effective_workers() -> int:
+    return max(1, _num_workers if _num_workers > 0 else _default_num_workers())
+
+
+def _is_exempt_ip(src_ip: str) -> bool:
+    """Phase >= 2 IPs (Time Ban / Blackhole) bypass admission shedding so
+    probation and ban-expiry keep receiving live evidence (RT-J)."""
+    try:
+        from backend.mitigation.state_machine import state_machine
+        ip_state = state_machine._states.get(src_ip)
+        return ip_state is not None and ip_state.phase >= 2
+    except Exception:
+        return False
+
+
+_stage_lock = threading.Lock()
+_stage_timers = {"service_ms_sum": 0.0, "service_n": 0}
+
+
+def _record_service_time(ms: float) -> None:
+    with _stage_lock:
+        _stage_timers["service_ms_sum"] += ms
+        _stage_timers["service_n"] += 1
+
+
+def get_stage_timers() -> dict:
+    with _stage_lock:
+        return dict(_stage_timers)
+
+
 def get_queue_depth() -> int:
     return _queue.qsize()
 
@@ -71,14 +175,50 @@ def _next_seq() -> int:
         return _seq_counter
 
 
+def _emit_feedback(is_anomaly: bool, flow_stats: dict | None) -> None:
+    """Dual TEA feedback emission.
+
+    IF channel: per-flow, streak-only, never locks baselines.
+    TEA channel: attached per-interval verdict, deduped by eval_seq so a
+    cached verdict shared by N flows still counts as one interval.
+    Never raises - feedback must not take down inference.
+    """
+    try:
+        from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
+        _tea.feedback_if(is_anomaly)
+        fs = flow_stats or {}
+        if "tea_eval_seq" in fs or "tea_attack_pattern" in fs or "tea_confidence" in fs:
+            _tea.feedback_tea(
+                bool(fs.get("tea_attack_pattern", False)),
+                str(fs.get("tea_confidence", "low")),
+                eval_seq=fs.get("tea_eval_seq"),
+            )
+    except Exception:
+        pass
+
+
 def submit(src_ip: str, flow_stats: dict, switch_stats: dict) -> None:
     # priority=1 normal, priority=0 goes first. seq keeps FIFO order per priority.
     # Flagged IPs (already under quarantine/sinkhole observation) jump the
     # queue — they were waiting FIFO behind ordinary background flows,
     # which is what made live telemetry lag 10-20s behind actual detection.
     _priority = 0 if flood_filter.is_flagged_any(src_ip) else 1
+    if (ADMISSION_CONTROL_ENABLED and _priority == 1
+            and not _is_exempt_ip(src_ip)):
+        if DEADLINE_ADMISSION_ENABLED:
+            # Deadline admission (R3b): refuse when the queue cannot drain
+            # inside the freshness budget. Replaces the static depth check.
+            drain_s = (_queue.qsize() * (get_svc_ema_ms() / 1000.0)
+                       / _effective_workers())
+            if drain_s > WORKER_ITEM_TIMEOUT_S - DEADLINE_ADMISSION_MARGIN_S:
+                _inc_admission("admission_deadline_dropped")
+                return
+        elif _queue.qsize() > WORKER_ADMISSION_DEPTH:
+            _inc_admission("admission_dropped")
+            return
     try:
         _queue.put_nowait((_priority, _next_seq(), src_ip, flow_stats, switch_stats, time.monotonic(), 0))
+        _inc_submit("submitted")
     except queue.Full:
         _inc_drop("queue_full")
         log.warning("Worker queue full, dropped submission for %s", src_ip)
@@ -87,9 +227,29 @@ def submit(src_ip: str, flow_stats: dict, switch_stats: dict) -> None:
 def _requeue_priority(src_ip: str, flow_stats: dict, switch_stats: dict, retry_count: int) -> None:
     try:
         _queue.put_nowait((0, _next_seq(), src_ip, flow_stats, switch_stats, time.monotonic(), retry_count))
+        _inc_submit("requeued")
     except queue.Full:
         _inc_drop("requeue_full")
         log.warning("Worker queue full, priority requeue dropped for %s", src_ip)
+
+
+def _infer_if(if_vec):
+    """IF scoring via the micro-batch tray when enabled; solo otherwise.
+
+    Mirrors _infer_rf: any batch-path failure (future exception or wait
+    timeout) degrades to a solo predict so worst-case behavior equals
+    the non-batched pipeline.
+    """
+    if not IF_BATCH_ENABLED:
+        return if_pipeline.run_if_inference(if_vec)
+    from backend.pipeline import if_batcher
+    if_batcher.ensure_started()
+    fut = if_batcher.infer(if_vec)
+    try:
+        return fut.result(timeout=(IF_BATCH_WINDOW_MS / 1000.0) * 2 + 0.05)
+    except Exception:
+        _inc_batch_fallback("if")
+        return if_pipeline.run_if_inference(if_vec)
 
 
 def _infer_rf(rf_vec):
@@ -106,6 +266,7 @@ def _infer_rf(rf_vec):
     try:
         return fut.result(timeout=(RF_BATCH_WINDOW_MS / 1000.0) * 2 + 0.05)
     except Exception:
+        _inc_batch_fallback("rf")
         return rf_pipeline.run_rf_inference(rf_vec)
 
 
@@ -137,36 +298,10 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     # IF handles per-host anomaly correctly on its own. Only flood_filter flag matters.
     is_flagged = flood_filter.is_flagged_any(src_ip)
 
-    # --- Skip young flows — pps unreliable until flow matures ---
-    # Exemption: flood-prefilter-flagged IPs need immediate action
-    flow_dur = float(flow_stats.get("flow_duration_sec", 0)) if flow_stats else 0.0
-    if not is_flagged:
-        if flow_dur < EXTRACTION_TRIGGER_S and pkt_count < EXTRACTION_TRIGGER_PKTS:
-            tracker.invalidate_cache(src_ip)
-            return
-
-    # --- Dynamic low-rate gate using TEA baseline ---
-    # Skip flows well below learned normal baseline — too slow to be an attack.
-    # Falls back to pps < 0.05 floor when TEA has not learned yet.
-    if not is_flagged:
-        try:
-            from backend.pipeline.entropy_analyzer import entropy_analyzer
-            _tea_mean = entropy_analyzer._global_state.size_base.mean
-            _dynamic_min = max(0.05, _tea_mean * 0.1) if _tea_mean > 0 else 0.05
-        except Exception:
-            _dynamic_min = 0.05
-        if pps < _dynamic_min:
-            # Too slow to be an attack — count as normal without IF scoring
-            if _result_callback:
-                try:
-                    _result_callback(src_ip, 0.0, False, "Normal", 0.0,
-                                     flow_stats=flow_stats, switch_stats=switch_stats,
-                                     timed_out=False, enqueued_at=enqueued_at)
-                except Exception:
-                    log.exception("Worker error in low-rate callback for %s", src_ip)
-            return
-
     # --- Drop stale queue items ---
+    # Must run BEFORE the young-flow and low-rate gates: those fire callbacks
+    # carrying enqueued_at, which would record uncapped queue age as
+    # detection_ms for backlog-drained items (metric contamination bug).
     # Only timeout-block IPs already flagged by flood prefilter.
     # Innocent hosts (not flagged) are silently dropped — IF never confirmed them.
     if time.monotonic() - enqueued_at > WORKER_ITEM_TIMEOUT_S:
@@ -187,6 +322,40 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
             log.debug("Worker timeout for %s (not flagged) — dropped silently", src_ip)
         return
 
+    # --- Skip young flows — pps unreliable until flow matures ---
+    # Exemption: flood-prefilter-flagged IPs need immediate action
+    flow_dur = float(flow_stats.get("flow_duration_sec", 0)) if flow_stats else 0.0
+    if not is_flagged:
+        if flow_dur < EXTRACTION_TRIGGER_S and pkt_count < EXTRACTION_TRIGGER_PKTS:
+            tracker.invalidate_cache(src_ip)
+            return
+
+    # --- Dynamic low-rate gate using TEA baseline ---
+    # Skip flows well below learned normal baseline — too slow to be an attack.
+    # Falls back to pps < 0.05 floor when TEA has not learned yet.
+    if not is_flagged:
+        try:
+            from backend.pipeline.entropy_analyzer import entropy_analyzer
+            _tea_mean = entropy_analyzer.mean_size_baseline()
+            _dynamic_min = max(0.05, _tea_mean * 0.1) if _tea_mean > 0 else 0.05
+        except Exception:
+            _dynamic_min = 0.05
+        if pps < _dynamic_min:
+            # Too slow to be an attack — count as normal without IF scoring.
+            # Feed the IF streak here too: this is exactly the quiet legit
+            # traffic that arrives after an attack stops, and skipping it
+            # starves the unlock hysteresis (see tea-dual-feedback-fix).
+            _emit_feedback(False, flow_stats)
+            if _result_callback:
+                try:
+                    _result_callback(src_ip, 0.0, False, "Normal", 0.0,
+                                     flow_stats=flow_stats, switch_stats=switch_stats,
+                                     timed_out=False, enqueued_at=enqueued_at,
+                                     origin="low_rate")
+                except Exception:
+                    log.exception("Worker error in low-rate callback for %s", src_ip)
+            return
+
     # --- Update Flow Tracker ---
     tracker.update_flow(src_ip, flow_stats)
 
@@ -197,7 +366,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
 
     if cached:
         from backend.mitigation.state_machine import state_machine
-        ip_state       = state_machine._states.get(src_ip)
+        ip_state       = state_machine.get_state(src_ip)
         already_banned = ip_state is not None and ip_state.phase >= 2
 
         # Re-check banned IPs every 10s — avoids permanent wrong-class lock
@@ -213,6 +382,9 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
             )
         )
         if is_locked:
+            # Cached verdict re-served: feed both channels so streaks keep
+            # moving during cache-heavy periods.
+            _emit_feedback(bool(cached.is_anomaly), flow_stats)
             if _result_callback:
                 # Wrapped — an uncaught exception here previously killed the
                 # entire worker thread permanently (e.g. bad downstream call
@@ -225,6 +397,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                         cached.attack_class, cached.confidence,
                         flow_stats=flow_stats, switch_stats=switch_stats,
                         timed_out=False, enqueued_at=enqueued_at,
+                        origin="cached",
                     )
                 except Exception:
                     log.exception("Worker error in cached-result callback for %s", src_ip)
@@ -243,19 +416,15 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         # None = near-zero duration flow — skip scoring, treat as normal
         if if_vec is None:
             return
-        if_score, is_anomaly = if_pipeline.run_if_inference(if_vec)
+        if_score, is_anomaly = _infer_if(if_vec)
         _record_worker_latency((time.monotonic() - _inf_start) * 1000)
 
         # Threshold: use model contract value
         _effective_threshold = loader.if_threshold
         is_anomaly = (if_score >= _effective_threshold)
 
-        # --- TEA feedback ---
-        try:
-            from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
-            _tea.feedback(is_anomaly)
-        except Exception:
-            pass
+        # --- TEA dual feedback (IF streak + TEA verdict latch) ---
+        _emit_feedback(is_anomaly, flow_stats)
 
         # --- Flood prefilter override — flagged IP + IF score above threshold ---
         # Flood prefilter already confirmed this IP sent a burst — trust IF score.
@@ -286,15 +455,18 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                 confidence   = _prior_conf
 
         # --- Log scan result ---
+        # HOTPATH_QUIET: the per-item [SCAN] line burns CPU under saturation;
+        # quiet mode drops it from INFO so the hot path stays light.
         pps_display  = float(flow_stats.get("packet_count_per_second", 0.0)) if flow_stats else 0.0
         conf_display = f"{confidence*100:.1f}%" if is_anomaly else "—"
 
-        log.info(
-            "[SCAN] %-15s  pps=%7.1f  IF=%.4f(thr=%.4f)  "
-            "anomaly=%-5s  RF=%-12s  conf=%s",
-            src_ip, pps_display, if_score, _effective_threshold,
-            str(is_anomaly), attack_class if is_anomaly else "—", conf_display
-        )
+        if not HOTPATH_QUIET:
+            log.info(
+                "[SCAN] %-15s  pps=%7.1f  IF=%.4f(thr=%.4f)  "
+                "anomaly=%-5s  RF=%-12s  conf=%s",
+                src_ip, pps_display, if_score, _effective_threshold,
+                str(is_anomaly), attack_class if is_anomaly else "—", conf_display
+            )
 
         # --- Push result to decision engine ---
         try:
@@ -312,16 +484,17 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
             tracker.invalidate_cache(src_ip)
 
         # --- Expert event: live IF/RF result ---
-        _push_expert_worker_event({
-            "inference": {
-                "src_ip": src_ip,
-                "if_score": round(if_score, 4),
-                "is_anomaly": is_anomaly,
-                "attack_class": attack_class if is_anomaly else "Normal",
-                "confidence": round(confidence, 3),
-                "threshold": round(_effective_threshold, 4),
-            }
-        })
+        if not HOTPATH_QUIET:
+            _push_expert_worker_event({
+                "inference": {
+                    "src_ip": src_ip,
+                    "if_score": round(if_score, 4),
+                    "is_anomaly": is_anomaly,
+                    "attack_class": attack_class if is_anomaly else "Normal",
+                    "confidence": round(confidence, 3),
+                    "threshold": round(_effective_threshold, 4),
+                }
+            })
 
         # --- Fire result callback ---
         if _result_callback:
@@ -331,12 +504,30 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                     attack_class, confidence,
                     flow_stats=flow_stats, switch_stats=switch_stats,
                     timed_out=False, enqueued_at=enqueued_at,
+                    origin="full",
                 )
             except Exception:
                 log.exception("Worker error in result callback for %s", src_ip)
 
+        # S7: full-inference service sample = feature extraction + IF (+RF
+        # when anomalous) + telemetry + callback, i.e. true worker occupancy.
+        # Single site: every full-path item passes here exactly once.
+        _record_svc_ema((time.monotonic() - _inf_start) * 1000.0)
+
     except Exception:
         log.exception("Worker error processing %s", src_ip)
+
+
+def _process_item_with_metrics(priority: int, seq: int, src_ip: str,
+                               flow_stats: dict, switch_stats: dict,
+                               enqueued_at: float, retry_count: int) -> None:
+    """_process_item plus worker service-time accounting (dequeue to return)."""
+    _t0 = time.monotonic()
+    try:
+        _process_item(priority, seq, src_ip, flow_stats, switch_stats,
+                      enqueued_at, retry_count)
+    finally:
+        _record_service_time((time.monotonic() - _t0) * 1000.0)
 
 
 def _worker_loop() -> None:
@@ -348,7 +539,7 @@ def _worker_loop() -> None:
             # and kill the thread permanently. Now it is always caught,
             # logged, and the thread keeps consuming the queue.
             try:
-                _process_item(*item)
+                _process_item_with_metrics(*item)
             except Exception:
                 log.exception("Unhandled worker error, thread staying alive")
             _queue.task_done()
@@ -370,8 +561,10 @@ def _default_num_workers() -> int:
 
 
 def start(num_workers: int = None) -> None:
+    global _num_workers
     if num_workers is None:
         num_workers = _default_num_workers()
+    _num_workers = num_workers
     for i in range(num_workers):
         t = threading.Thread(target=_worker_loop, name=f"pipeline-worker-{i}", daemon=True)
         t.start()

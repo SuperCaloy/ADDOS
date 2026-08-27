@@ -34,10 +34,12 @@ def vectors(real_models):
             for p in range(32)]
 
 
-def test_config_defaults_keep_batching_off():
+def test_config_b1_enabled_by_default():
+    """c913b40 flipped RF_BATCH_ENABLED to True deliberately (run-3 rollout);
+    the runtime solo-fallback path still guarantees old behavior on failure."""
     from backend import config
 
-    assert config.RF_BATCH_ENABLED is False
+    assert config.RF_BATCH_ENABLED is True
     assert 8 <= config.RF_BATCH_MAX <= 16
     assert config.RF_BATCH_WINDOW_MS <= 50
 
@@ -144,7 +146,8 @@ def test_worker_disabled_flag_keeps_solo_path(
         return concurrent.futures.Future()
 
     monkeypatch.setattr(rf_batcher, "infer", _fake_infer)
-    assert worker.RF_BATCH_ENABLED is False
+    # Solo path is selected by the runtime flag, not by config default.
+    monkeypatch.setattr(worker, "RF_BATCH_ENABLED", False)
 
     fs = _attack_flow()
     worker._process_item(0, 1, "10.0.0.91", fs, {}, time.monotonic(), 0)

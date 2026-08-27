@@ -392,6 +392,32 @@ def scenario_install_drop_rule_forgets_via_real_ofpmatch():
     assert "10.0.0.66" not in c._recent_installs[1]
 
 
+def scenario_reconnect_flush_invalidates_dedup():
+    c = make_controller()
+    dp = FakeDP(1)
+    over_limit(c)
+    throttle_call(c, dp, "10.0.0.66")
+    assert len(installs(dp)) == 1
+    assert "10.0.0.66" in c._recent_installs[1]
+
+    # TCP flap: the switch reconnects and the features-handler flush wipes
+    # the flow table (non-strict wildcard DELETE). Dedup entries for that
+    # dpid must die with their rules; otherwise packet-ins for srcs
+    # installed pre-flap are swallowed for up to INSTALL_DEDUP_TTL_S
+    # against an empty table.
+    c.switch_features_handler(SimpleNamespace(
+        msg=SimpleNamespace(datapath=dp)))
+
+    assert 1 not in c._recent_installs
+    assert 1 not in c._install_budget
+
+    # Post-reconnect packet from the same src must reinstall, not be
+    # swallowed by the stale presumed-live entry.
+    over_limit(c)
+    throttle_call(c, dp, "10.0.0.66")
+    assert len(installs(dp)) == 2
+
+
 def scenario_meter_install_deletes_before_add():
     c = make_controller()
     dp = FakeDP(1)
@@ -468,6 +494,7 @@ _SCENARIO_NAMES = [
     "throttle_dedup_expires_after_ttl",
     "stats_sighting_does_not_extend_dedup",
     "install_drop_rule_forgets_via_real_ofpmatch",
+    "reconnect_flush_invalidates_dedup",
     "meter_install_deletes_before_add",
     "error_msg_handler_exists_and_is_rate_limited",
 ]

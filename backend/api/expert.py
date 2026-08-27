@@ -138,7 +138,9 @@ def expert_live():
                 "unique_ips": curr.get("unique_ips", 0),
                 "learning_interval": len(size_base._samples) if not size_base.is_learned else None,
                 "_locked": entropy_analyzer.is_locked,
+                "_attack_latched": entropy_analyzer.attack_latched,
                 "_fb_normal_streak": entropy_analyzer.fb_normal_streak,
+                "_tea_normal_streak": entropy_analyzer.tea_normal_streak,
                 "_would_block_count": entropy_analyzer.would_block_count,
                 "dynamic_attack_sigma": round(attack_sigma, 2),
                 "dynamic_crowd_sigma": round(crowd_sigma, 2),
@@ -149,11 +151,9 @@ def expert_live():
                 "proto_baseline_history": [round(v, 4) for v in proto_base.baseline_history],
             }
 
-    # State machine active states
+    # State machine active states (locked accessor, shallow copies)
     sm_states = {}
-    with state_machine._lock:
-        states_snapshot = list(state_machine._states.items())
-    for ip, ip_state in states_snapshot:
+    for ip, ip_state in state_machine.get_states_snapshot().items():
         sm_states[ip] = {
             "phase": ip_state.phase,
             "phase_label": ip_state.phase_label(),

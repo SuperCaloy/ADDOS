@@ -38,6 +38,12 @@ def history_dates():
 
 def _validate_dates(body: dict) -> tuple[str, str, str | None]:
     today     = datetime.date.today()
+    client_today_str = body.get("client_today", "")
+    if client_today_str:
+        try:
+            today = datetime.date.fromisoformat(client_today_str)
+        except ValueError:
+            pass
     start_str = body.get("start_date", "")
     end_str   = body.get("end_date", "")
     try:
@@ -470,7 +476,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     lat_data = [
         ["Metric", "Value", "Description"],
         ["Detection Time",           _ms(lat_m.get("detection_ms", 0)),
-         "Interval between pipeline submission (worker queue entry) and the IF anomaly classification"],
+         "Average time taken to detect an attack"],
         ["Mitigation Response Time", _ms(lat_m.get("mitigation_ms", 0)),
          "Interval between the anomaly flag and the FlowMod blocking rule install"],
     ]
@@ -635,6 +641,47 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
             ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
         ]))
         story.append(hist_tbl)
+
+    # ── Verification and Approval ─────────────────────────────────────────
+    story.append(Paragraph("Verification and Approval",
+        ParagraphStyle("sub6", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                       textColor=C_DARK, spaceBefore=14, spaceAfter=6)))
+    story.append(Paragraph(
+        "I hereby verify that the findings in this incident report are "
+        "accurate and that the listed mitigation actions were carried out "
+        "under my supervision.",
+        styles["Normal"]))
+    story.append(Spacer(1, 1.6*cm))
+
+    sig_role = Paragraph(
+        '<b>Network Administrator</b>',
+        ParagraphStyle("sigrole", parent=styles["Normal"], fontSize=10.5,
+                       alignment=1))
+    # Middle column is an empty spacer so the two rules stay separated.
+    sig_data = [
+        ["", "", ""],
+        ["SIGNATURE OVER PRINTED NAME", "", "DATE"],
+        [sig_role, "", ""],
+    ]
+    sig_tbl = Table(sig_data, colWidths=[7.2*cm, 1.6*cm, 6.2*cm],
+                    hAlign="CENTER")
+    sig_tbl.setStyle(TableStyle([
+        # signing space above the rule
+        ("TOPPADDING",    (0, 0), (-1, 0), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 26),
+        # solid rule: top edge of the caption row (left and right only)
+        ("LINEABOVE",     (0, 1), (0, 1), 1, colors.black),
+        ("LINEABOVE",     (2, 1), (2, 1), 1, colors.black),
+        ("FONTNAME",      (0, 1), (-1, 1), "Helvetica"),
+        ("FONTSIZE",      (0, 1), (-1, 1), 9),
+        ("TOPPADDING",    (0, 1), (-1, 1), 4),
+        ("TOPPADDING",    (0, 2), (-1, 2), 2),
+        ("BOTTOMPADDING", (0, 2), (-1, 2), 0),
+        ("ALIGN",         (0, 0), (-1, -1), "CENTER"),
+        ("VALIGN",        (0, 0), (-1, -1), "BOTTOM"),
+    ]))
+    story.append(sig_tbl)
 
     doc.build(story)
     return buf.getvalue()

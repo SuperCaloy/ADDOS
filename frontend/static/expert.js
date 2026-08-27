@@ -958,9 +958,10 @@ function renderMLPanel(ifData, rfData, teaData) {
       const isAttack = teaGlobal.is_attack;
       const isFlash = teaGlobal.is_flash_crowd;
       const isLearned = teaGlobal.learned;
+      const isLocked = teaGlobal._locked === true;
 
-      const statusClass = isAttack ? 'attack' : isFlash ? 'flash-crowd' : !isLearned ? 'learning' : 'learned';
-      const statusText = isAttack ? 'ATTACK' : isFlash ? 'FLASH CROWD' : !isLearned ? 'LEARNING' : 'NORMAL';
+      const statusClass = isAttack ? 'attack' : isFlash ? 'flash-crowd' : !isLearned ? 'learning' : isLocked ? 'uncertain' : 'learned';
+      const statusText = isAttack ? 'ATTACK' : isFlash ? 'FLASH CROWD' : !isLearned ? 'LEARNING' : isLocked ? 'UNCERTAIN' : 'NORMAL';
 
       const maxSizeZ = teaGlobal.size_z || 0;
       const maxIntZ = teaGlobal.intensity_z || 0;
@@ -997,13 +998,18 @@ function renderMLPanel(ifData, rfData, teaData) {
         const min = Math.min(...data);
         const range = max - min || 1;
         const w = 120, h = 30;
+        // Vertical padding keeps the line in a band centered on its row so
+        // the trace stays visually aligned with the baseline label instead
+        // of riding the top/bottom edge when the data trends.
+        const pad = h * 0.2;
+        const usable = h - pad * 2;
         const points = data.map((v, i) => {
           const x = (i / (data.length - 1)) * w;
-          const y = h - ((v - min) / range) * h;
+          const y = h - pad - ((v - min) / range) * usable;
           return `${x.toFixed(1)},${y.toFixed(1)}`;
         }).join(' ');
         return `<svg class="sparkline" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-          <polyline fill="none" stroke="${color}" stroke-width="1.5" points="${points}"/>
+          <polyline fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke" points="${points}"/>
         </svg>`;
       }
 
@@ -1143,6 +1149,12 @@ function updateTEASwitch(tea) {
     } else if (!tea.is_learned) {
       statusEl.className = 'tea-switch-status learning';
       statusEl.textContent = 'LEARNING';
+    } else if (tea._locked === true) {
+      // Latch still closed after the attack signal stopped - baselines are
+      // frozen but traffic looks normal, so the verdict is not trustworthy
+      // in either direction. Matches the poll path's Uncertain display.
+      statusEl.className = 'tea-switch-status uncertain';
+      statusEl.textContent = 'UNCERTAIN';
     } else {
       statusEl.className = 'tea-switch-status learned';
       statusEl.textContent = 'NORMAL';

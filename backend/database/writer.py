@@ -3,6 +3,7 @@ import threading
 import logging
 from backend.database.db import execute, executemany, query
 from backend.config import ML_ENABLED
+import json
 
 log = logging.getLogger(__name__)
 
@@ -812,19 +813,43 @@ def get_latency_metrics(start: str, end: str) -> dict:
 def log_system_metrics(cpu: float, mem_mb: float, pps: float,
                        is_attack: bool = False,
                        ctrl_cpu: float = 0.0, ctrl_mem: float = 0.0,
-                       is_mitigating: bool = False) -> None:
+                       is_mitigating: bool = False,
+                       proc_cpu_percent: float = 0.0) -> None:
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         execute("""
             INSERT INTO system_metrics
                 (timestamp, cpu_percent, mem_mb, pps_processed, is_attack,
-                 ctrl_cpu_percent, ctrl_mem_mb, is_mitigating)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 ctrl_cpu_percent, ctrl_mem_mb, is_mitigating,
+                 proc_cpu_percent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (ts, round(cpu, 2), round(mem_mb, 2), round(pps, 2),
               int(is_attack), round(ctrl_cpu, 2), round(ctrl_mem, 2),
-              int(is_mitigating)))
+              int(is_mitigating), round(proc_cpu_percent, 2)))
     except Exception:
         log.exception("Failed to log system metrics")
+
+
+def log_obs_snapshot(snap: dict) -> None:
+    # Uses the module-level `execute` imported at writer.py:4 (same pattern
+    # as log_system_metrics); no local re-import, no new db-access pattern.
+    dms = snap.get("detection_ms", {})
+    try:
+        execute(
+            """INSERT INTO obs_snapshots
+               (timestamp, p50, p95, p99, n, queue_depth, drops,
+                submit_counters, admission_counters, service, batch_fallback)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             dms.get("p50", 0.0), dms.get("p95", 0.0), dms.get("p99", 0.0),
+             dms.get("n", 0), snap.get("queue_depth", 0),
+             json.dumps(snap.get("drops", {})),
+             json.dumps(snap.get("submits", {})),
+             json.dumps(snap.get("admission", {})),
+             json.dumps(snap.get("service", {})),
+             json.dumps(snap.get("batch_fallback", {}))))
+    except Exception:
+        log.exception("Failed to log obs snapshot")
 
 
 def get_system_metrics_avg(start: str, end: str) -> dict:

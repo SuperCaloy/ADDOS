@@ -347,10 +347,10 @@ The topology script builds the network, warms MAC tables, starts baseline traffi
 
 ```python
 launch_attack()                 # all 15 attackers, sustained floods
-start_syn_flood_campaign()      # h10, h18, h22
-start_icmp_flood_campaign()     # h11, h12, h13
-start_udp_flood_campaign()      # h6, h7, h8
-start_mixed_campaign()          # all 15, staggered
+start_syn_flood_campaign()      # every SYN attacker (h10, h16, h18, h22, h23)
+start_icmp_flood_campaign()     # every ICMP attacker (h11-h15)
+start_udp_flood_campaign()      # every UDP attacker (h6-h9, h17)
+start_mixed_campaign()          # all 15 in staged vector waves (SYN -> UDP -> ICMP, 20-30s gaps)
 start_stress_test()             # same floods with --rand-source spoofing
 flash_crowd(30)                 # legitimate burst; should not trigger mitigation
 check_traffic()                 # per-host status table from the backend

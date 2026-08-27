@@ -3,7 +3,7 @@ import datetime
 import threading
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from backend.database import writer
@@ -1042,6 +1042,31 @@ class StateMachine:
     def is_active(self, src_ip: str) -> bool:
         with self._lock:
             return src_ip in self._states
+
+    # ── Locked state accessors ───────────────────────────────────────
+    # All cross-module reads of _states MUST go through these. They return
+    # shallow copies so field reads are atomic w.r.t. concurrent ticks and
+    # callers can never mutate live state accidentally.
+
+    def get_state(self, src_ip: str) -> Optional[IpState]:
+        with self._lock:
+            state = self._states.get(src_ip)
+            return replace(state) if state is not None else None
+
+    def get_state_fields(self, src_ip: str, *fields) -> tuple:
+        with self._lock:
+            state = self._states.get(src_ip)
+            if state is None:
+                return (None,) * len(fields)
+            return tuple(getattr(state, f) for f in fields)
+
+    def get_state_ips(self) -> list[str]:
+        with self._lock:
+            return list(self._states.keys())
+
+    def get_states_snapshot(self) -> dict[str, IpState]:
+        with self._lock:
+            return {ip: replace(s) for ip, s in self._states.items()}
 
     # ── Internal ─────────────────────────────────────────────────────
 

@@ -672,11 +672,15 @@ def _stop_active_workers() -> None:
 
 
 
-def _attacker_cycle_worker(num: int, stop_event: threading.Event) -> None:
+def _attacker_cycle_worker(num: int, stop_event: threading.Event,
+                           delay: float = None) -> None:
     # Continuous flood — no rest periods.
     # Staggered start only, then floods until stop_event is set.
+    # delay (seconds) overrides the host's own _ATTACKER_START_DELAYS jitter;
+    # staged-wave scheduling uses this to time hosts into vector waves.
     h     = net.get(f"h{num}")
-    delay = _ATTACKER_START_DELAYS.get(num, 0)
+    if delay is None:
+        delay = _ATTACKER_START_DELAYS.get(num, 0)
     ip    = h.IP()
 
     # Wait for stagger delay before starting
@@ -809,15 +813,24 @@ def launch_udp_flood_sustained(attacker_name="h7") -> None:
     t.start()
 
 
+def _attackers_of_type(atype: str) -> list:
+    # Single source of truth for single-vector campaign rosters: every
+    # ACTIVE attacker whose fixed variant matches the requested type.
+    return sorted(n for n, v in _ATTACKER_VARIANTS.items() if v[0] == atype)
+
+
 def start_syn_flood_campaign() -> None:
-    # SYN flood — h10, h18, h22 continuous, watchdog auto-restarts if killed
+    # SYN flood — every SYN-assigned attacker, continuous, watchdog
+    # auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
+    nums = _attackers_of_type("SYN")
     _stop_active_workers()
     _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
-    info("  [SYN CAMPAIGN]  h10 h18 h22  |  Continuous flood\n")
+    info("  [SYN CAMPAIGN]  " + " ".join(f"h{n}" for n in nums)
+         + "  |  Continuous flood\n")
     info("=" * 55 + "\n")
-    for num in [10, 18, 22]:
+    for num in nums:
         h = net.get(f"h{num}")
         t = threading.Thread(
             target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
@@ -834,14 +847,17 @@ def start_syn_flood_campaign() -> None:
 
 
 def start_icmp_flood_campaign() -> None:
-    # ICMP flood — h11, h12, h13 continuous, watchdog auto-restarts if killed
+    # ICMP flood — every ICMP-assigned attacker, continuous, watchdog
+    # auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
+    nums = _attackers_of_type("ICMP")
     _stop_active_workers()
     _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
-    info("  [ICMP CAMPAIGN]  h11 h12 h13  |  Continuous flood\n")
+    info("  [ICMP CAMPAIGN]  " + " ".join(f"h{n}" for n in nums)
+         + "  |  Continuous flood\n")
     info("=" * 55 + "\n")
-    for num in [11, 12, 13]:
+    for num in nums:
         h = net.get(f"h{num}")
         t = threading.Thread(
             target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
@@ -858,14 +874,17 @@ def start_icmp_flood_campaign() -> None:
 
 
 def start_udp_flood_campaign() -> None:
-    # UDP flood — h6, h7, h8 continuous, watchdog auto-restarts if killed
+    # UDP flood — every UDP-assigned attacker, continuous, watchdog
+    # auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
+    nums = _attackers_of_type("UDP")
     _stop_active_workers()
     _mixed_stop_event.clear()
     info("\n" + "=" * 55 + "\n")
-    info("  [UDP CAMPAIGN]  h6 h7 h8  |  Continuous flood\n")
+    info("  [UDP CAMPAIGN]  " + " ".join(f"h{n}" for n in nums)
+         + "  |  Continuous flood\n")
     info("=" * 55 + "\n")
-    for num in [6, 7, 8]:
+    for num in nums:
         h = net.get(f"h{num}")
         t = threading.Thread(
             target=_attacker_cycle_worker, args=(num, _mixed_stop_event),
@@ -882,31 +901,52 @@ def start_udp_flood_campaign() -> None:
 
 
 def start_mixed_campaign() -> None:
-    # all 15 attackers, staggered starts, continuous flood — no rest periods
+    # all 15 attackers launch in staged VECTOR WAVES (2026-08-27): SYN at
+    # t+0, UDP after a randomized 20-30s gap, ICMP after another 20-30s —
+    # mimicking how real multi-vector campaigns ramp up and keeping each
+    # vector's detection window attributable. Within a wave, hosts keep
+    # their own small jitter from _ATTACKER_START_DELAYS on top of the wave
+    # base time. Floods are continuous once started, no rest periods.
     global _mixed_stop_event, _campaign_threads
     _stop_active_workers()
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
+    waves = []            # (attack_type, wave start offset in seconds)
+    base = 0.0
+    for i, atype in enumerate(("SYN", "UDP", "ICMP")):
+        if i:
+            base += random.uniform(20.0, 30.0)
+        waves.append((atype, base))
+
     info("\n" + "=" * 65 + "\n")
-    info("  [MIXED CAMPAIGN]  All 15 attackers  |  Continuous flood\n")
-    info("  SYN (h10,h16,h18,h22,h23) -> UDP (h6-h9,h17) -> ICMP (h11-h15)\n")
+    info("  [MIXED CAMPAIGN]  All 15 attackers  |  Staged vector waves\n")
     info("=" * 65 + "\n")
-    info(f"  {'HOST':<6} {'TYPE':<8} {'FLAGS':<40} START\n")
+    info(f"  {'WAVE':<6} {'HOSTS':<28} FLOOD START\n")
     info("  " + "-" * 66 + "\n")
 
-    for num in sorted(_ATTACKER_VARIANTS.keys()):
+    schedule = {}         # attacker num -> absolute flood-start delay
+    for atype, t_start in waves:
+        nums = _attackers_of_type(atype)
+        hosts = " ".join(f"h{n}" for n in nums)
+        info(f"  {atype:<6} {hosts:<28} t+{t_start:.1f}s\n")
+        for n in nums:
+            schedule[n] = t_start + _ATTACKER_START_DELAYS.get(n, 0)
+
+    for num in sorted(schedule):
+        h = net.get(f"h{num}")
         atype, flags, _, _ = _ATTACKER_VARIANTS[num]
-        delay = _ATTACKER_START_DELAYS.get(num, 0)
-        info(f"  h{num:<5} {atype:<8} {flags:<40} +{delay}s\n")
-        t = threading.Thread(
+        delay = schedule[num]
+        info(f"  h{num:<5} ({h.IP()})  {atype:<8} {flags:<40} +{delay:.1f}s\n")
+        thread = threading.Thread(
             target=_attacker_cycle_worker,
             args=(num, _mixed_stop_event),
+            kwargs={"delay": delay},
             name=f"attacker-h{num}",
             daemon=True,
         )
-        _campaign_threads.append(t)
-        t.start()
+        _campaign_threads.append(thread)
+        thread.start()
 
     info("=" * 65 + "\n")
     info("  Stop: py stop_all_attacks()\n")
@@ -1540,10 +1580,10 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
     info("  py launch_attack()                     # all 15, sustained\n")
     info("  py launch_attack(sustained=False)      # all 15, burst\n\n")
     info("  ── CAMPAIGNS ─────────────────────────────────────────────────\n")
-    info("  py start_syn_flood_campaign()          # h10,h18,h22\n")
-    info("  py start_icmp_flood_campaign()         # h11,h12,h13\n")
-    info("  py start_udp_flood_campaign()          # h6,h7,h8\n")
-    info("  py start_mixed_campaign()              # all 15, staggered cyclic\n")
+    info("  py start_syn_flood_campaign()          # all SYN attackers\n")
+    info("  py start_icmp_flood_campaign()         # all ICMP attackers\n")
+    info("  py start_udp_flood_campaign()          # all UDP attackers\n")
+    info("  py start_mixed_campaign()              # all 15, staged vector waves\n")
     info("  py start_stress_test()                 # all 15, rand-source, memory stress\n\n")
     info("  ── STOP ──────────────────────────────────────────────────────\n")
     info("  py stop_all_attacks()                  # kill + flush + clear\n")

@@ -3,7 +3,16 @@ import time
 import threading
 import numpy as np
 from collections import deque
-from backend.config import TEA_WINDOW_SIZE
+from backend.config import (
+    TEA_WINDOW_SIZE,
+    TEA_IF_UNLOCK_STREAK,
+    TEA_TEA_LOCK_STREAK,
+    TEA_TEA_UNLOCK_STREAK,
+    TEA_TEA_HIGH_CONF_LOCK,
+    TEA_IDLE_UNLOCK_S,
+    TEA_MIN_FLOWS_PER_INTERVAL,
+    TEA_IP_PROFILE_TTL_S,
+)
 
 import logging
 log = logging.getLogger(__name__)
@@ -25,7 +34,7 @@ TEA_EMA_ALPHA_MIN     = 0.02
 TEA_EMA_ALPHA_MAX     = 0.10
 TEA_VARIANCE_STABLE_THRESHOLD = 0.01
 TEA_ROBUST_REJECT_SIGMA = 3.0
-TEA_FEEDBACK_UNLOCK_STREAK = 10
+TEA_FEEDBACK_UNLOCK_STREAK = TEA_IF_UNLOCK_STREAK  # legacy alias
 TEA_BASELINE_HISTORY_MAX = 60
 TEA_UNIFORM_SHARE_SIGMA = TEA_CROWD_SIGMA
 
@@ -75,7 +84,7 @@ class _AdaptiveBaseline:
         var_old  = sum((x - sum(older)  / len(older))  ** 2 for x in older)  / len(older)
         return abs(var_new - var_old) < TEA_VARIANCE_STABLE_THRESHOLD
 
-    def push(self, value: float) -> None:
+    def push(self, value: float, force: bool = False) -> None:
         if not self._learned:
             self._samples.append(value)
             ready = (
@@ -95,15 +104,19 @@ class _AdaptiveBaseline:
                 )
             return
 
-        if self._locked:
+        if self._locked and not force:
             return
 
-        z = abs(value - self._mean) / self._std
-        if z >= TEA_ROBUST_REJECT_SIGMA:
-            log.debug("TEA robust reject: value=%.4f  z=%.2f >= %.1f", value, z, TEA_ROBUST_REJECT_SIGMA)
-            return
-
-        self._alpha    = self._compute_alpha()
+        if force:
+            # Supervised relearning: pin to min alpha so frozen baselines
+            # drift reliably toward the observed distribution.
+            self._alpha = TEA_EMA_ALPHA_MIN
+        else:
+            z = abs(value - self._mean) / self._std
+            if z >= TEA_ROBUST_REJECT_SIGMA:
+                log.debug("TEA robust reject: value=%.4f  z=%.2f >= %.1f", value, z, TEA_ROBUST_REJECT_SIGMA)
+                return
+            self._alpha    = self._compute_alpha()
         self._mean     = self._alpha * value + (1 - self._alpha) * self._mean
         err            = (value - self._mean) ** 2
         self._variance = self._alpha * err + (1 - self._alpha) * self._variance
@@ -175,11 +188,11 @@ class _GlobalEntropyState:
     def observe(self, snapshot: dict) -> None:
         self.window.append(snapshot)
 
-    def learn(self, snapshot: dict) -> None:
-        self.size_base.push(snapshot["size_var"])
-        self.intensity_base.push(snapshot["intensity_var"])
-        self.proto_base.push(snapshot["proto_entropy"])
-        self.share_base.push(snapshot["uniform_share"])
+    def learn(self, snapshot: dict, force: bool = False) -> None:
+        self.size_base.push(snapshot["size_var"], force=force)
+        self.intensity_base.push(snapshot["intensity_var"], force=force)
+        self.proto_base.push(snapshot["proto_entropy"], force=force)
+        self.share_base.push(snapshot["uniform_share"], force=force)
 
     def push(self, snapshot: dict) -> None:
         self.observe(snapshot)
@@ -212,10 +225,12 @@ class _IpEntropyProfile:
         self._pps_samples = deque(maxlen=IP_PROFILE_WINDOW)
         self._bps_samples = deque(maxlen=IP_PROFILE_WINDOW)
         self._last_verdict = "uncertain"
+        self._last_update = time.monotonic()
 
     def update(self, pps: float, bps: float) -> None:
         self._pps_samples.append(pps)
         self._bps_samples.append(bps)
+        self._last_update = time.monotonic()
 
     def _trend(self, samples: deque) -> float:
         n = len(samples)
@@ -296,15 +311,43 @@ class EntropyAnalyzer:
         self._ip_profiles: dict[str, _IpEntropyProfile] = {}
         self._fb_normal_streak = 0
         self._would_block_count = 0
-        
+
+        # Dual feedback latch (see notes/tasks/tea-dual-feedback-fix.md):
+        # IF feedback only feeds _if_normal_streak; TEA verdicts drive the
+        # latch through AND-ed hysteresis. Baselines lock/unlock on latch
+        # transitions, never from per-flow IF anomalies.
+        self._if_normal_streak = 0
+        self._tea_normal_streak = 0
+        self._tea_attack_streak = 0
+        self._attack_latched = False
+        self._last_attack_event = time.monotonic()
+        self._last_if_anomaly_ts = time.monotonic()
+        self._last_tea_eval_seq = -1
+
         self._flow_buffer = deque(maxlen=2000)
         self._last_eval_time = 0.0
         self._eval_interval = 0.5
+        self._eval_seq = 0
 
     @property
     def fb_normal_streak(self) -> int:
         with self._lock:
-            return self._fb_normal_streak
+            return self._if_normal_streak
+
+    @property
+    def if_normal_streak(self) -> int:
+        with self._lock:
+            return self._if_normal_streak
+
+    @property
+    def tea_normal_streak(self) -> int:
+        with self._lock:
+            return self._tea_normal_streak
+
+    @property
+    def attack_latched(self) -> bool:
+        with self._lock:
+            return self._attack_latched
 
     @property
     def would_block_count(self) -> int:
@@ -323,21 +366,27 @@ class EntropyAnalyzer:
 
     def update(self, dpid: int, flows: list[dict]) -> dict:
         with self._lock:
-            now = time.time()
+            now = time.monotonic()
             self._flow_buffer.extend(flows)
-            
+
             if now - self._last_eval_time < self._eval_interval and self._global_state.last_result:
                 return self._global_state.last_result
-            
+
             self._last_eval_time = now
+            self._eval_seq += 1
             current_flows = list(self._flow_buffer)
             self._flow_buffer.clear()
 
         if not current_flows:
-            res = self._neutral(0.0, 0.0, learned=False)
-            with self._lock:
-                self._global_state.last_result = res
-            return res
+            # Idle gap: never overwrite the verdict with a neutral
+            # learned=False result (that made an idle analyzer display
+            # "Learning"). Preserve the previous result verbatim.
+            prev = self._global_state.last_result
+            if prev:
+                res = dict(prev)
+                res["idle"] = True
+                return res
+            return self._neutral(0.0, 0.0, learned=False)
 
         eps = 1e-9
         sizes = []
@@ -405,6 +454,7 @@ class EntropyAnalyzer:
             if not state.is_ready():
                 state.learn(snapshot)
                 res = self._neutral(size_var, intensity_var, learned=False)
+                res["eval_seq"] = self._eval_seq
                 state.last_result = res
                 return res
 
@@ -442,16 +492,23 @@ class EntropyAnalyzer:
             with self._lock:
                 state.learn(snapshot)
             res = self._neutral(size_var, intensity_var, learned=False)
+            res["eval_seq"] = self._eval_seq
             with self._lock:
                 state.last_result = res
             return res
 
+        # Degenerate-interval guard: too few flows for meaningful aggregate
+        # stats (1 flow -> uniform_share=1.0, variance=0 produces false
+        # "mechanized cluster"). Suppress the verdict, keep streaks moving,
+        # protect baselines. Small attackers stay covered by per-IP profiles.
+        degenerate = len(current_flows) < TEA_MIN_FLOWS_PER_INTERVAL
+        is_flash_crowd = False
+        confidence = "low"
         is_attack_pattern = (
             mechanized_cluster or proto_surge or proto_collapsed
             or size_collapsed or intensity_collapsed
             or size_surge or intensity_surge
-        )
-        is_flash_crowd    = False
+        ) if not degenerate else False
 
         if is_attack_pattern:
             if ((size_collapsed or size_surge) and (intensity_collapsed or intensity_surge)) or (
@@ -463,12 +520,19 @@ class EntropyAnalyzer:
                 confidence = "high"  # Multi-dimension confirmation
             else:
                 confidence = "moderate"  # Single dimension fired
-        else:
-            confidence = "low"
 
-        if not is_attack_pattern:
+        # Supervised relearning: while latched, once the IF channel has
+        # seen a normal streak, force-learn the frozen baselines from the
+        # live snapshot so post-attack quiet traffic re-anchors them.
+        with self._lock:
+            supervised = (
+                self._attack_latched
+                and self._if_normal_streak >= TEA_IF_UNLOCK_STREAK
+            )
+
+        if not degenerate and (not is_attack_pattern or supervised):
             with self._lock:
-                state.learn(snapshot)
+                state.learn(snapshot, force=supervised)
 
         result = {
             "size_var":  round(curr["size_var"],  4),
@@ -491,7 +555,10 @@ class EntropyAnalyzer:
             "is_flash_crowd":     is_flash_crowd,
             "is_learned":         True,
             "confidence":         confidence,
+            "eval_seq":           self._eval_seq,
         }
+        if degenerate:
+            result["degenerate_interval"] = True
 
         if is_attack_pattern:
             log.info("TEA global attack pattern - size_z=%.2f  int_z=%.2f  conf=%s", size_z, intensity_z, confidence)
@@ -513,7 +580,10 @@ class EntropyAnalyzer:
                 "is_learned": True,
                 "confidence": confidence,
                 "_locked": self.is_locked,
+                "_attack_latched": self.attack_latched,
                 "_fb_normal_streak": self.fb_normal_streak,
+                "_tea_normal_streak": self.tea_normal_streak,
+                "eval_seq": self._eval_seq,
             }
         })
 
@@ -534,36 +604,126 @@ class EntropyAnalyzer:
             log.info("TEA gate advisory: would have blocked (total=%d)", self._would_block_count)
         return True
 
-    def confirm_normal(self, dpid: int = 0) -> None:
-        with self._lock:
-            self._global_state.size_base.unlock()
-            self._global_state.intensity_base.unlock()
-            self._global_state.proto_base.unlock()
-            self._global_state.share_base.unlock()
+    def _lock_all(self) -> None:
+        self._global_state.size_base.lock()
+        self._global_state.intensity_base.lock()
+        self._global_state.proto_base.lock()
+        self._global_state.share_base.lock()
 
-    def confirm_attack(self, dpid: int = 0) -> None:
-        with self._lock:
-            self._global_state.size_base.lock()
-            self._global_state.intensity_base.lock()
-            self._global_state.proto_base.lock()
-            self._global_state.share_base.lock()
+    def _unlock_all(self) -> None:
+        self._global_state.size_base.unlock()
+        self._global_state.intensity_base.unlock()
+        self._global_state.proto_base.unlock()
+        self._global_state.share_base.unlock()
 
-    def feedback(self, is_anomaly: bool) -> None:
+    def _set_latch(self, latched: bool, reason: str, caller_holds_lock: bool = False) -> None:
+        if not caller_holds_lock:
+            with self._lock:
+                return self._set_latch(latched, reason, caller_holds_lock=True)
+        if self._attack_latched == latched:
+            return
+        self._attack_latched = latched
+        if latched:
+            self._lock_all()
+            log.info("TEA latch LOCKED (%s): tea_attack_streak=%d", reason, self._tea_attack_streak)
+        else:
+            self._unlock_all()
+            log.info("TEA latch UNLOCKED (%s): if_streak=%d tea_normal_streak=%d",
+                     reason, self._if_normal_streak, self._tea_normal_streak)
+
+    def _try_unlock(self) -> None:
+        # AND logic: both channels must independently agree traffic is normal.
+        # (RLock held by caller.)
+        if (
+            self._if_normal_streak >= TEA_IF_UNLOCK_STREAK
+            and self._tea_normal_streak >= TEA_TEA_UNLOCK_STREAK
+        ):
+            self._set_latch(False, "both streaks satisfied", caller_holds_lock=True)
+
+    def feedback_if(self, is_anomaly: bool) -> None:
+        """Per-flow IF feedback. Streak-only: NEVER locks baselines.
+
+        Isolated anomalies halve the streak (decay) instead of zeroing it,
+        so occasional IF false positives delay rather than restart recovery.
+        """
         with self._lock:
             if is_anomaly:
-                self._fb_normal_streak = 0
-                self._global_state.size_base.lock()
-                self._global_state.intensity_base.lock()
-                self._global_state.proto_base.lock()
-                self._global_state.share_base.lock()
+                self._if_normal_streak //= 2
+                self._last_if_anomaly_ts = time.monotonic()
                 return
-            self._fb_normal_streak += 1
-            if self._fb_normal_streak >= TEA_FEEDBACK_UNLOCK_STREAK:
-                self._fb_normal_streak = 0
-                self._global_state.size_base.unlock()
-                self._global_state.intensity_base.unlock()
-                self._global_state.proto_base.unlock()
-                self._global_state.share_base.unlock()
+            self._if_normal_streak += 1
+            self._try_unlock()
+
+    def feedback_tea(self, is_attack: bool, confidence: str = "low",
+                     eval_seq: int | None = None) -> None:
+        """Per-eval-interval TEA verdict feedback driving the latch.
+
+        eval_seq dedup guarantees one count per interval even when many
+        flows carry the same cached result.
+        """
+        with self._lock:
+            if eval_seq is not None:
+                if eval_seq <= self._last_tea_eval_seq:
+                    return
+                self._last_tea_eval_seq = eval_seq
+
+            # RT-1 ordering: the seq above is recorded even when we bail
+            # here. A moderate attack verdict while latched is presumed
+            # to be frozen-baseline noise: leave streaks, the attack
+            # streak, and the idle timer untouched so recovery paths
+            # keep working while uniform traffic flows.
+            if self._attack_latched and is_attack and confidence != "high":
+                return
+
+            if is_attack or confidence == "high":
+                if not is_attack and confidence == "high":
+                    is_attack = True
+                self._tea_normal_streak = 0
+                self._last_attack_event = time.monotonic()
+                if TEA_TEA_HIGH_CONF_LOCK and confidence == "high":
+                    self._set_latch(True, "high confidence attack", caller_holds_lock=True)
+                    return
+                self._tea_attack_streak += 1
+                if self._tea_attack_streak >= TEA_TEA_LOCK_STREAK:
+                    self._set_latch(True, "sustained attack intervals", caller_holds_lock=True)
+                return
+
+            self._tea_attack_streak = 0
+            self._tea_normal_streak += 1
+            self._try_unlock()
+
+    def idle_tick(self, now: float | None = None) -> None:
+        """Zero-traffic recovery path: no flow feedback arrives during
+        silence, so unlock is time-based on the last observed attack signal."""
+        now = now if now is not None else time.monotonic()
+        with self._lock:
+            if not self._attack_latched:
+                return
+            if (
+                now - self._last_attack_event >= TEA_IDLE_UNLOCK_S
+                and now - self._last_if_anomaly_ts >= TEA_IDLE_UNLOCK_S
+            ):
+                self._if_normal_streak = 0
+                self._tea_normal_streak = 0
+                self._set_latch(False, "idle timeout (no attack signal)", caller_holds_lock=True)
+
+    def mean_size_baseline(self) -> float:
+        """Lock-safe read of the size baseline mean for the dynamic low-rate gate."""
+        with self._lock:
+            return self._global_state.size_base.mean
+
+    def cleanup_stale_profiles(self, max_age_s: float = TEA_IP_PROFILE_TTL_S,
+                               now: float | None = None) -> int:
+        """Drop per-IP profiles untouched longer than max_age_s."""
+        now = now if now is not None else time.monotonic()
+        cutoff = now - max_age_s
+        removed = 0
+        with self._lock:
+            stale = [ip for ip, p in self._ip_profiles.items() if p._last_update < cutoff]
+            for ip in stale:
+                del self._ip_profiles[ip]
+                removed += 1
+        return removed
 
     def update_ip(self, src_ip: str, pps: float, bps: float) -> None:
         with self._lock:

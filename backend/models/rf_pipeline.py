@@ -1,7 +1,9 @@
 import math
+import warnings
 import numpy as np
-import pandas as pd
 from backend.models import loader
+
+_last_raw_vec = None
 
 
 def extract_rf_features(flow_stats: dict) -> np.ndarray:
@@ -54,8 +56,15 @@ def extract_rf_features(flow_stats: dict) -> np.ndarray:
 
     vec = np.where(np.isfinite(vec), vec, 0.0)
 
-    df = pd.DataFrame(vec.reshape(1, -1), columns=loader.rf_features)
-    return loader.rf_scaler.transform(df)
+    # numpy-direct transform: no per-item DataFrame (GIL-held hot-path cost).
+    # Byte-identical to the pandas reference for float64 input (T13).
+    global _last_raw_vec
+    _last_raw_vec = vec
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="X does not have valid feature names",
+            category=UserWarning)
+        return loader.rf_scaler.transform(vec.reshape(1, -1))
 
 
 def run_rf_inference(vec_scaled: np.ndarray) -> tuple[str, float]:
