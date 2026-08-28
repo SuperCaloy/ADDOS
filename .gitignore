@@ -40,3 +40,6 @@ RF_ACCURACY_BUG_ANALYSIS.md
 
 
 CSB5_Thesis 1 Manuscript.docx
+# Benchmark runner artifacts (source .py files stay tracked)
+simulation/runs/
+simulation/*.pdf

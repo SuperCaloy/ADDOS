@@ -81,3 +81,13 @@ def invalidate_cache():
 
     tracker.invalidate_cache(src_ip)
     return jsonify({"ok": True, "src_ip": src_ip})
+
+
+# Local admin endpoint for benchmark live reset, no auth layer in this backend.
+@bp.post("/api/admin/reset_reputation")
+def reset_reputation():
+    from backend.database.writer import clear_reputation_cache
+
+    clear_reputation_cache()
+    state_machine.clear_states()
+    return jsonify({"ok": True})

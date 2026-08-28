@@ -552,6 +552,13 @@ _reputation_cache: dict[str, list[str]] = {}
 _reputation_seq = 0
 
 
+def clear_reputation_cache() -> None:
+    # Live-reset support: drop every cached per-IP timestamp list so
+    # reputation scores reload from the database on next read.
+    with _reputation_lock:
+        _reputation_cache.clear()
+
+
 def get_offense_count(src_ip: str) -> float:
     # Returns weighted offense score using half-life decay (24h half-life).
     # Each offense adds +2.0, then decays: score = 2.0 * (0.5 ^ (hours_elapsed / 24))
@@ -603,15 +610,28 @@ def get_offense_count(src_ip: str) -> float:
 
 def get_offense_total_count(src_ip: str) -> int:
     # Raw count of past offenses for this IP — simple "caught N times".
+    # Returns the persisted offence_totals ledger total plus live episode
+    # rows: the ledger is only written at benchmark reset, which then deletes
+    # the live rows, so the sum is correct mid-session and post-reset.
     try:
         from backend.database.db import query
+        try:
+            ledger_rows = query(
+                "SELECT COALESCE(SUM(total_offences), 0) as total "
+                "FROM offence_totals WHERE src_ip = ?",
+                (src_ip,)
+            )
+            ledger_total = int(ledger_rows[0]["total"]) if ledger_rows else 0
+        except Exception:
+            # Ledger table may not exist yet; live counting must not break.
+            ledger_total = 0
         rows = query(
             "SELECT COUNT(*) as cnt FROM ip_attack_history WHERE src_ip = ?",
             (src_ip,)
         )
         if rows and rows[0]["cnt"] is not None:
-            return int(rows[0]["cnt"])
-        return 0
+            return ledger_total + int(rows[0]["cnt"])
+        return ledger_total
     except Exception as exc:
         log.warning("writer: failed to get offense total count for %s — %s", src_ip, exc)
         return 0

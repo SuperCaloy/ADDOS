@@ -111,6 +111,14 @@ def model_info():
     })
 
 
+@bp.get("/api/db_path")
+def db_path():
+    # Lets the benchmark confirm the backend booted onto the benchmark DB
+    # before the timeline starts.
+    from backend.config import DB_PATH as _DB_PATH
+    return jsonify({"db_path": _DB_PATH})
+
+
 @bp.get("/api/system_metrics")
 def system_metrics():
     rows = query("""

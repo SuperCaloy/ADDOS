@@ -27,6 +27,12 @@ PHASE1_DURATION_CRITICAL = 5.0
 MIN_QUARANTINE_CONFIDENCE = 0.70
 CONFIDENCE_LOCK_THRESHOLD = 0.80
 
+# Per-poll decay applied to a stale if_score peak. A continuously elevated
+# live score re-pins the peak every poll, so real attacks hold their score,
+# but a one-off benign transient decays below threshold in a few polls
+# instead of freezing forever.
+IF_SCORE_DECAY = 0.95
+
 PHASE_LABELS = {
     1: "Quarantined",
     2: "Time Ban",
@@ -265,8 +271,7 @@ class StateMachine:
             state = self._states.get(src_ip)
             if state is None or state.phase not in (1, 2, 3):
                 return
-            if if_score > state.if_score:
-                state.if_score = if_score
+            state.if_score = max(if_score, state.if_score * IF_SCORE_DECAY)
             state.recent_pps = recent_pps
 
             if state.phase == 1:
@@ -393,8 +398,7 @@ class StateMachine:
                     writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=0, rescored=1)
                 # Update vector only if new confidence beats prior - best evidence wins
                 _better_evidence = confidence > state.confidence
-                if if_score > state.if_score:
-                    state.if_score = if_score
+                state.if_score = max(if_score, state.if_score * IF_SCORE_DECAY)
                 if _better_evidence:
                     state.attack_vector = attack_class
                     state.confidence     = confidence
@@ -615,19 +619,24 @@ class StateMachine:
         # scoring accumulates, then fully release the IP.
         # Re-detection will route through on_reoffence() via the
         # DB history check in decision_engine.on_result().
-        state.transition_reason = "Time ban expired - offense recorded and released"
-
-        behavioral.record_offense(
-            src_ip         = src_ip,
-            attack_vector  = state.attack_vector,
-            if_score       = state.if_score,
-            confidence     = state.confidence,
-            priority       = state.priority,
-            phase_reached  = state.phase,
-            first_seen     = state.first_seen,
-            unblock_reason = "Ban Expired",
-            ban_level      = state.ban_level,
-        )
+        # A fully clean release (low pps AND decayed score) records
+        # nothing, so a single benign transient cannot accumulate toward
+        # the 10.0 blackhole line.
+        if pps_elevated or score_near:
+            state.transition_reason = "Time ban expired - offense recorded and released"
+            behavioral.record_offense(
+                src_ip         = src_ip,
+                attack_vector  = state.attack_vector,
+                if_score       = state.if_score,
+                confidence     = state.confidence,
+                priority       = state.priority,
+                phase_reached  = state.phase,
+                first_seen     = state.first_seen,
+                unblock_reason = "Ban Expired",
+                ban_level      = state.ban_level,
+            )
+        else:
+            state.transition_reason = "Time ban expired - clean release"
 
         writer.log_mitigation_event({
             "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -662,8 +671,8 @@ class StateMachine:
         self._states.pop(src_ip, None)
         writer.delete_quarantine_state(src_ip)
 
-        log.info("Ban expired: %s (level %d) - offense recorded, released",
-                 src_ip, state.ban_level)
+        log.info("Ban expired: %s (level %d) - released (%s)",
+                 src_ip, state.ban_level, state.transition_reason)
 
     def _advance_to_blackhole(self, state: IpState) -> None:
         # Already in Phase 3 - skip redundant escalation
@@ -921,6 +930,13 @@ class StateMachine:
         if cleared:
             log.info("Cleared %d non-permanent/TTL entries", cleared)
         return cleared
+
+    def clear_states(self) -> None:
+        # Live-reset support: drop every tracked IpState and the tentative
+        # sinkhole history so a new session starts from clean memory.
+        with self._lock:
+            self._states.clear()
+            self._sinkhole_history.clear()
 
     def manual_block(self, src_ip: str) -> bool:
         # Permanent manual blackhole - no TTL

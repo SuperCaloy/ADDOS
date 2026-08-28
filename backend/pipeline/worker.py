@@ -188,11 +188,21 @@ def _emit_feedback(is_anomaly: bool, flow_stats: dict | None) -> None:
         _tea.feedback_if(is_anomaly)
         fs = flow_stats or {}
         if "tea_eval_seq" in fs or "tea_attack_pattern" in fs or "tea_confidence" in fs:
-            _tea.feedback_tea(
-                bool(fs.get("tea_attack_pattern", False)),
-                str(fs.get("tea_confidence", "low")),
-                eval_seq=fs.get("tea_eval_seq"),
+            eval_seq = fs.get("tea_eval_seq")
+            # P6: a malformed seq (bool, non-int, negative) could dedup-out
+            # all later eval intervals; drop the TEA channel, keep IF feedback.
+            seq_ok = (
+                eval_seq is None
+                or (not isinstance(eval_seq, bool)
+                    and isinstance(eval_seq, int)
+                    and eval_seq >= 0)
             )
+            if seq_ok:
+                _tea.feedback_tea(
+                    bool(fs.get("tea_attack_pattern", False)),
+                    str(fs.get("tea_confidence", "low")),
+                    eval_seq=eval_seq,
+                )
     except Exception:
         pass
 

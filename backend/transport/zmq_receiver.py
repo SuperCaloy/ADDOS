@@ -3,7 +3,7 @@ import json
 import time
 import threading
 import logging
-from backend.config import ZMQ_TELEMETRY_ADDR, ML_ENABLED
+from backend.config import ZMQ_TELEMETRY_ADDR, ML_ENABLED, FLOW_FIELD_MAX
 
 # Whitelisted IPs, never flood-filtered or submitted to ML.
 # h20 = victim server, h21 = sinkhole dummy. Without this, baseline
@@ -58,6 +58,35 @@ def _reset_flow_state() -> None:
 
 
 
+
+
+# Numeric flow fields reachable from attacker-side telemetry; clamped
+# so a crafted huge/negative value cannot poison features or baselines.
+_FLOW_NUMERIC_FIELDS = (
+    "packet_count",
+    "byte_count",
+    "packet_count_per_second",
+    "byte_count_per_second",
+    "switch_delta_pps",
+)
+
+
+def _sanitize_flow_stats(flow_stats: dict) -> dict:
+    if not isinstance(flow_stats, dict):
+        return flow_stats
+    for field in _FLOW_NUMERIC_FIELDS:
+        if field not in flow_stats:
+            continue
+        value = flow_stats[field]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            flow_stats[field] = 0.0
+        elif value < 0:
+            flow_stats[field] = 0.0
+        elif value > FLOW_FIELD_MAX:
+            flow_stats[field] = FLOW_FIELD_MAX
+        else:
+            flow_stats[field] = float(value)
+    return flow_stats
 
 
 def _parse_and_route(raw: bytes) -> None:
@@ -145,7 +174,7 @@ def _parse_and_route(raw: bytes) -> None:
     # ------------------------------------------------------------------
     elif msg_type == "flow_stats":
         src_ip       = msg.get("src_ip", "")
-        flow_stats   = msg.get("flow_stats", {})
+        flow_stats   = _sanitize_flow_stats(msg.get("flow_stats", {}))
         switch_stats = msg.get("switch_stats", {})
         dpid         = msg.get("dpid", 0)
 
@@ -215,6 +244,9 @@ def _parse_and_route(raw: bytes) -> None:
             pass
 
         if _skip_tea:
+            # TEA-silent path: never forward an attacker-supplied eval_seq,
+            # or a crafted value could dedup-blackout the global feedback.
+            flow_stats.pop("tea_eval_seq", None)
             flow_stats["tea_attack_pattern"] = False
             flow_stats["tea_flash_crowd"]    = False
             flow_stats["tea_confidence"]     = "low"

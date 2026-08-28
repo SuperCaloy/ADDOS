@@ -15,6 +15,14 @@ from mininet.cli import CLI
 from mininet.log import setLogLevel, info
 from mininet.link import Link
 
+# Make benchmark reliably importable regardless of launch method. When run as
+# `sudo python3 topology/topology.py`, sys.path[0] is already the script dir,
+# so this insert only hardens other launch paths. benchmark.py does not import
+# topology, so there is no circular/namespace trap here.
+import os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import benchmark  # topology/benchmark.py (separate file, no `import topology`)
+
 # Network and backend config
 CONTROLLER_IP    = "127.0.0.1"
 CONTROLLER_PORT  = 6633
@@ -38,6 +46,15 @@ _ATTACKER_NUMS = frozenset(
 # pool = attackers + retired: CLEANUP sweeps cover both so a hand-launched
 # retired host can still be fully stopped; launch paths stay active-only
 _ATTACKER_POOL = _ATTACKER_NUMS | _RETIRED_NUMS
+
+# Teardown hardening for the benchmark runner (R1e): module-level stop
+# Events so the runner can halt these loops FIRST during teardown, before
+# net.stop(), otherwise the poller calls restore_baseline_for_ip against a
+# torn-down hosts list. _WATCHDOG_SUPPRESS blocks the watchdog from
+# resurrecting baseline mid-flash-crowd (R2a: it would corrupt the FP probe).
+_RESTORE_POLLER_STOP   = threading.Event()
+_BASELINE_WATCHDOG_STOP = threading.Event()
+_WATCHDOG_SUPPRESS      = threading.Event()
 
 # 5 SYN, 5 ICMP, 5 UDP (balanced; h16 repurposed to SYN/5432, h22 to
 # SYN/3389). Attack variants: --flood keeps the send dynamics the operator
@@ -128,12 +145,12 @@ _HOST_SLOTS = {
     5: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
 }
 
-# full slot pool used after idle, for random type switch
-_ALL_SLOTS = [
-    ("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3),
-    ("tcp", 80), ("tcp", 443), ("tcp", 8080),
-    ("udp", 53), ("udp", 123), ("udp", 1900),
-]
+def _post_idle_slots(num: int) -> list:
+    # Post-idle slot pool for a host. Must stay inside the host's trained
+    # per-host signature: reassigning h2 (pure TCP) or h5 (pure ICMP) to a
+    # foreign protocol after idle breaches the signature the frozen model
+    # treats as normal and causes false positives.
+    return list(_HOST_SLOTS.get(num, [("icmp_cont", 1)]))
 
 _DEFAULT_DURATIONS = {
     "idle":   (5, 15),
@@ -183,7 +200,7 @@ def _weighted_distribute(n_hosts: int, n_switches: int) -> list[int]:
     return counts
 
 
-def build_star(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
+def build_tree(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
     # 1 core switch, n_edge switches, hosts on flat 10.0.0.x/24.
     # Layout is fixed — not random — so topology is identical every run:
     #   s1–s7 → h1–h19 + h22–h24 evenly spread (2–4 hosts each)
@@ -395,7 +412,7 @@ def _run_slot(host, slot_type: str, slot_key: int) -> None:
 
 def _baseline_loop(host, stop_event: threading.Event, idle_host_ref: list) -> None:
     num   = int(host.name[1:])
-    slots = list(_HOST_SLOTS.get(num, [("icmp_cont", 1)]))
+    slots = _post_idle_slots(num)
 
     while not stop_event.is_set():
         # check if this host is chosen to idle
@@ -406,7 +423,7 @@ def _baseline_loop(host, stop_event: threading.Event, idle_host_ref: list) -> No
             while not stop_event.is_set() and time.time() < end_idle:
                 time.sleep(1)
             # pick a new random slot type after idle
-            slots = [random.choice(_ALL_SLOTS)]
+            slots = _post_idle_slots(num)
             idle_host_ref[0] = -1
             continue
 
@@ -900,13 +917,13 @@ def start_udp_flood_campaign() -> None:
     info("=" * 55 + "\n\n")
 
 
-def start_mixed_campaign() -> None:
+def start_mixed_campaign(stagger_s: float = 10.0) -> None:
     # all 15 attackers launch in staged VECTOR WAVES (2026-08-27): SYN at
-    # t+0, UDP after a randomized 20-30s gap, ICMP after another 20-30s —
-    # mimicking how real multi-vector campaigns ramp up and keeping each
-    # vector's detection window attributable. Within a wave, hosts keep
-    # their own small jitter from _ATTACKER_START_DELAYS on top of the wave
-    # base time. Floods are continuous once started, no rest periods.
+    # t+0, UDP after a random gap in [0.5*stagger_s, stagger_s], then ICMP
+    # after another independent gap, so vectors never drop on the same
+    # second. With the 10s default each gap is 5-10s. Within a wave, hosts
+    # keep their own small jitter from _ATTACKER_START_DELAYS on top of the
+    # wave base time. Floods are continuous once started, no rest periods.
     global _mixed_stop_event, _campaign_threads
     _stop_active_workers()
     _mixed_stop_event.clear()
@@ -916,7 +933,7 @@ def start_mixed_campaign() -> None:
     base = 0.0
     for i, atype in enumerate(("SYN", "UDP", "ICMP")):
         if i:
-            base += random.uniform(20.0, 30.0)
+            base += random.uniform(stagger_s * 0.5, stagger_s)
         waves.append((atype, base))
 
     info("\n" + "=" * 65 + "\n")
@@ -1257,26 +1274,31 @@ def _flash_crowd_run_slot(host, num: int) -> None:
 
 def _flash_crowd_worker(legit: list, duration: int) -> None:
     _stop_baseline_threads()
+    # R2a: hold the watchdog off for the whole probe, restore it no matter
+    # how the worker exits so a crash cannot kill the watchdog forever
+    _WATCHDOG_SUPPRESS.set()
+    try:
+        for h in legit:
+            _kill_baseline_procs(h)
+        time.sleep(0.5)
 
-    for h in legit:
-        _kill_baseline_procs(h)
-    time.sleep(0.5)
+        for h in legit:
+            num = int(h.name[1:])
+            _flash_crowd_run_slot(h, num)
+            info(f"    {h.name} ({h.IP()}): flash crowd -> {SERVER_IP}\n")
 
-    for h in legit:
-        num = int(h.name[1:])
-        _flash_crowd_run_slot(h, num)
-        info(f"    {h.name} ({h.IP()}): flash crowd -> {SERVER_IP}\n")
+        time.sleep(duration)
 
-    time.sleep(duration)
+        for h in legit:
+            _kill_baseline_procs(h)
 
-    for h in legit:
-        _kill_baseline_procs(h)
-
-    info("*** Flash crowd ended, restoring baseline...\n")
-    start_baseline_traffic()
-    import sys
-    sys.stdout.write("mininet> ")
-    sys.stdout.flush()
+        info("*** Flash crowd ended, restoring baseline...\n")
+        start_baseline_traffic()
+        import sys
+        sys.stdout.write("mininet> ")
+        sys.stdout.flush()
+    finally:
+        _WATCHDOG_SUPPRESS.clear()
 
 
 def flash_crowd(duration: int = 30) -> None:
@@ -1461,8 +1483,9 @@ def restore_baseline_for_ip(src_ip: str) -> bool:
 
 def _restore_poller_loop() -> None:
     # poll backend for IPs that need baseline restarted after quarantine release
-    while True:
-        time.sleep(RESTORE_POLL_S)
+    while not _RESTORE_POLLER_STOP.is_set():
+        if _RESTORE_POLLER_STOP.wait(RESTORE_POLL_S):
+            break
         try:
             with urllib.request.urlopen(f"{BACKEND_API}/api/pending_restores", timeout=3) as r:
                 data = _json.loads(r.read())
@@ -1472,19 +1495,30 @@ def _restore_poller_loop() -> None:
             _restore_log.debug("Restore poller error: %s", e)
 
 
+def _watchdog_tick() -> None:
+    # one watchdog pass; suppressed during flash crowd (R2a) so the
+    # baseline watchdog cannot resurrect baseline mid-probe
+    if _WATCHDOG_SUPPRESS.is_set():
+        return
+    for h in hosts:
+        if int(h.name[1:]) not in _LEGIT_NUMS:
+            continue
+        t = _baseline_threads.get(h.name)
+        if t is None or not t.is_alive():
+            restore_baseline_for_ip(h.IP())
+
+
 def _baseline_watchdog_loop() -> None:
     # every 30s, restart any dead baseline threads
-    while True:
-        time.sleep(30)
-        for h in hosts:
-            if int(h.name[1:]) not in _LEGIT_NUMS:
-                continue
-            t = _baseline_threads.get(h.name)
-            if t is None or not t.is_alive():
-                restore_baseline_for_ip(h.IP())
+    while not _BASELINE_WATCHDOG_STOP.is_set():
+        if _BASELINE_WATCHDOG_STOP.wait(30):
+            break
+        _watchdog_tick()
 
 
 def _start_restore_poller() -> None:
+    _RESTORE_POLLER_STOP.clear()
+    _BASELINE_WATCHDOG_STOP.clear()
     threading.Thread(target=_restore_poller_loop, name="restore-poller", daemon=True).start()
     threading.Thread(target=_baseline_watchdog_loop, name="baseline-watchdog", daemon=True).start()
     info("*** Restore poller + watchdog started\n")
@@ -1531,7 +1565,7 @@ def watch_pipeline(interval: float = 2.0, anomaly_only: bool = False, n: int = 2
 
 def _print_banner(distribution: list, edge_switches: list) -> None:
     info("\n" + "=" * 75 + "\n")
-    info("  A-DDoS Star Topology  |  1 core + 8 edge switches  |  20 hosts + h21\n")
+    info("  A-DDoS Tree Topology  |  1 core + 8 edge switches  |  20 hosts + h21\n")
     info(f"  Server:   h20 ({SERVER_IP}) - whitelisted, never ML-scored\n")
     info(f"  Sinkhole: h21 ({SINKHOLE_IP}) - silent dummy, redirected uncertain traffic\n")
     info("=" * 75 + "\n")
@@ -1588,6 +1622,8 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
     info("  ── STOP ──────────────────────────────────────────────────────\n")
     info("  py stop_all_attacks()                  # kill + flush + clear\n")
     info("  py stop_baseline()                     # stop baseline\n\n")
+    info("  ── BENCHMARK ─────────────────────────────────────────────────\n")
+    info("  py run_benchmark()                     # 60-min session, auto-stop + reset + exit\n\n")
     info("  ── OTHER ─────────────────────────────────────────────────────\n")
     info("  py flash_crowd()                       # 30s spike to server\n")
     info("  py flash_crowd(duration=60)            # custom duration\n")
@@ -1603,7 +1639,7 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
 if __name__ == "__main__":
     setLogLevel("info")
 
-    net, hosts, edge_switches, distribution = build_star()
+    net, hosts, edge_switches, distribution = build_tree()
     net.start()
     _speed_up_reconnect(edge_switches, net.get("s0"))
     _assign_attacks()
@@ -1629,6 +1665,19 @@ if __name__ == "__main__":
     for _h in hosts:
         globals()[_h.name] = _h
 
+    # Command, matching your attack workflow:  py run_benchmark()  /  py run_benchmark(60)
+    def run_benchmark(minutes: int = 60):
+        try:
+            benchmark.run(sys.modules[__name__], net, hosts, minutes * 60)
+        except KeyboardInterrupt:
+            info("*** Benchmark interrupted, stopping attacks...\n")
+            try:
+                sys.modules[__name__].stop_all_attacks()
+                benchmark._reset_reputation_keep_offences(sys.modules[__name__])
+            except Exception:
+                pass
+        raise SystemExit(0)
+
     class TopologyCLI(CLI):
         def do_py(self, line):
             try:
@@ -1640,8 +1689,42 @@ if __name__ == "__main__":
                     exec(line, globals())
                 except Exception as e:
                     print(f"Error: {e}")
+            except SystemExit:
+                raise
             except Exception as e:
                 print(f"Error: {e}")
 
-    TopologyCLI(net)
-    net.stop()
+    import argparse
+    _ap = argparse.ArgumentParser(add_help=False)
+    _ap.add_argument("--benchmark", type=int, nargs="?", const=60, default=None,
+                     help="run benchmark mode for N minutes then auto-exit")
+    _args, _rest = _ap.parse_known_args()
+
+    # Last-resort root-namespace survivor sweep (RT1 H1): detached hping3/ping
+    # run in the SHARED root PID namespace with start_new_session=True, so if
+    # net.stop() fails they are reparented to PID 1 and keep flooding. An
+    # atexit + the finally below both run a global pkill backstop.
+    import atexit, subprocess as _sp
+    def _emergency_sweep():
+        try:
+            _sp.run("pkill -9 -x hping3; pkill -9 -x ping; pkill -9 -x mnexec",
+                    shell=True, timeout=10)
+        except Exception:
+            pass
+    atexit.register(_emergency_sweep)
+
+    try:
+        if _args.benchmark is not None:
+            benchmark.run(sys.modules[__name__], net, hosts, _args.benchmark * 60)
+        else:
+            TopologyCLI(net)
+    except SystemExit:
+        pass
+    finally:
+        info("*** Tearing down network...\n")
+        try:
+            net.stop()
+        except Exception as _e:
+            info(f"*** net.stop() error: {_e}\n")
+        # backstop even if net.stop() failed (RT1 H1/M3)
+        _emergency_sweep()

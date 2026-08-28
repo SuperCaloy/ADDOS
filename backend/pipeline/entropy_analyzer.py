@@ -14,6 +14,10 @@ from backend.config import (
     TEA_IP_PROFILE_TTL_S,
 )
 
+# Read-at-call-time constants (dual-feedback E2 guidance): accessed via the
+# config module so runtime/test overrides take effect without reloading.
+from backend import config as _cfg
+
 import logging
 log = logging.getLogger(__name__)
 
@@ -36,7 +40,6 @@ TEA_VARIANCE_STABLE_THRESHOLD = 0.01
 TEA_ROBUST_REJECT_SIGMA = 3.0
 TEA_FEEDBACK_UNLOCK_STREAK = TEA_IF_UNLOCK_STREAK  # legacy alias
 TEA_BASELINE_HISTORY_MAX = 60
-TEA_UNIFORM_SHARE_SIGMA = TEA_CROWD_SIGMA
 
 
 def _shannon_entropy(values: list[float]) -> float:
@@ -84,7 +87,8 @@ class _AdaptiveBaseline:
         var_old  = sum((x - sum(older)  / len(older))  ** 2 for x in older)  / len(older)
         return abs(var_new - var_old) < TEA_VARIANCE_STABLE_THRESHOLD
 
-    def push(self, value: float, force: bool = False) -> None:
+    def push(self, value: float, force: bool = False,
+             max_drift_frac: float | None = None) -> None:
         if not self._learned:
             self._samples.append(value)
             ready = (
@@ -108,16 +112,26 @@ class _AdaptiveBaseline:
             return
 
         if force:
-            # Supervised relearning: pin to min alpha so frozen baselines
-            # drift reliably toward the observed distribution.
-            self._alpha = TEA_EMA_ALPHA_MIN
+            # Supervised relearning: pin the EMA alpha so frozen baselines
+            # drift reliably toward the observed distribution. On the
+            # capped (supervised) path a faster alpha is safe because the
+            # drift cap, not the alpha, bounds per-interval movement.
+            self._alpha = TEA_EMA_ALPHA_MIN if max_drift_frac is None else _cfg.TEA_RELEARN_ALPHA
         else:
             z = abs(value - self._mean) / self._std
             if z >= TEA_ROBUST_REJECT_SIGMA:
                 log.debug("TEA robust reject: value=%.4f  z=%.2f >= %.1f", value, z, TEA_ROBUST_REJECT_SIGMA)
                 return
             self._alpha    = self._compute_alpha()
-        self._mean     = self._alpha * value + (1 - self._alpha) * self._mean
+        new_mean = self._alpha * value + (1 - self._alpha) * self._mean
+        if max_drift_frac is not None and self._mean:
+            # REG-1 hardening: supervised relearn must never walk a frozen
+            # baseline toward attack scale faster than frac of its mean
+            # per interval, even against a sustained mis-scored input.
+            max_step = abs(self._mean) * max_drift_frac
+            if abs(new_mean - self._mean) > max_step:
+                new_mean = self._mean + (max_step if new_mean > self._mean else -max_step)
+        self._mean = new_mean
         err            = (value - self._mean) ** 2
         self._variance = self._alpha * err + (1 - self._alpha) * self._variance
         self._baseline_history.append(self._mean)
@@ -183,16 +197,25 @@ class _GlobalEntropyState:
         self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.proto_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.share_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.pps_base   = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
         self.last_result = {}
 
     def observe(self, snapshot: dict) -> None:
         self.window.append(snapshot)
 
-    def learn(self, snapshot: dict, force: bool = False) -> None:
-        self.size_base.push(snapshot["size_var"], force=force)
-        self.intensity_base.push(snapshot["intensity_var"], force=force)
-        self.proto_base.push(snapshot["proto_entropy"], force=force)
-        self.share_base.push(snapshot["uniform_share"], force=force)
+    def learn(self, snapshot: dict, force: bool = False,
+              capped: bool = False) -> None:
+        self.size_base.push(snapshot["size_var"], force=force,
+                            max_drift_frac=_cfg.TEA_RELEARN_MAX_DRIFT_FRAC if capped else None)
+        self.intensity_base.push(snapshot["intensity_var"], force=force,
+                                 max_drift_frac=_cfg.TEA_RELEARN_MAX_DRIFT_FRAC if capped else None)
+        self.proto_base.push(snapshot["proto_entropy"], force=force,
+                             max_drift_frac=_cfg.TEA_RELEARN_MAX_DRIFT_FRAC if capped else None)
+        self.share_base.push(snapshot["uniform_share"], force=force,
+                             max_drift_frac=_cfg.TEA_RELEARN_MAX_DRIFT_FRAC if capped else None)
+        if "mean_pps" in snapshot:
+            self.pps_base.push(snapshot["mean_pps"], force=force,
+                               max_drift_frac=_cfg.TEA_RELEARN_MAX_DRIFT_FRAC if capped else None)
 
     def push(self, snapshot: dict) -> None:
         self.observe(snapshot)
@@ -214,10 +237,11 @@ class _GlobalEntropyState:
             and self.intensity_base.is_learned
             and self.proto_base.is_learned
             and self.share_base.is_learned
+            and self.pps_base.is_learned
         )
 
 
-IP_PROFILE_MIN_SAMPLES = 5
+IP_PROFILE_MIN_SAMPLES = 3
 IP_PROFILE_WINDOW      = 20
 
 class _IpEntropyProfile:
@@ -323,6 +347,18 @@ class EntropyAnalyzer:
         self._last_attack_event = time.monotonic()
         self._last_if_anomaly_ts = time.monotonic()
         self._last_tea_eval_seq = -1
+        # P2: TEA-side "stable new normal" counter driving supervised
+        # relearn without IF confirmation. Deduped per eval interval.
+        self._relearn_stable_streak = 0
+        # P3: latch age for the bounded max-hold safety valve. The valve
+        # also requires TEA silence in the strict sense: even inert
+        # moderate verdicts (which never refresh _last_attack_event)
+        # keep it blocked via _last_moderate_ts (REG-2).
+        self._latch_set_at = time.monotonic()
+        self._last_moderate_ts = time.monotonic()
+        # P4: per-flow IF anomaly ring buffer for the sustained-rate
+        # idle guard (replaces the single-timestamp IF guard).
+        self._if_rate_buffer: deque = deque(maxlen=_cfg.TEA_IF_RATE_WINDOW)
 
         self._flow_buffer = deque(maxlen=2000)
         self._last_eval_time = 0.0
@@ -362,6 +398,7 @@ class EntropyAnalyzer:
                 and self._global_state.intensity_base.locked
                 and self._global_state.proto_base.locked
                 and self._global_state.share_base.locked
+                and self._global_state.pps_base.locked
             )
 
     def update(self, dpid: int, flows: list[dict]) -> dict:
@@ -391,32 +428,35 @@ class EntropyAnalyzer:
         eps = 1e-9
         sizes = []
         intensities = []
+        ppss = []
         protos = {}
         unique_ips = set()
-        
+
         for f in current_flows:
             src = f.get("src_ip", "")
             if src and src != "0.0.0.0":
                 unique_ips.add(src)
-            
+
             pkt = float(f.get("packet_count", 0))
             byt = float(f.get("byte_count", 0))
             pps = float(f.get("packet_count_per_second", 0))
             bps = float(f.get("byte_count_per_second", 0))
-            
+
             avg_bytes_per_pkt = byt / (pkt + eps)
             pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt, 0))
             flow_intensity = math.log1p(max(pps * bps, 0))
-            
+
             sizes.append(pkt_size_uniformity)
             intensities.append(flow_intensity)
-            
+            ppss.append(max(pps, 0.0))
+
             proto = f.get("ip_proto", 0)
             protos[proto] = protos.get(proto, 0) + 1
 
         size_var = float(np.var(sizes)) if sizes else 0.0
         intensity_var = float(np.var(intensities)) if intensities else 0.0
         proto_entropy = _shannon_entropy(list(protos.values()))
+        mean_pps = sum(ppss) / len(ppss) if ppss else 0.0
 
         if sizes:
             med_size  = float(np.median(sizes))
@@ -439,6 +479,7 @@ class EntropyAnalyzer:
             "proto_entropy": proto_entropy,
             "uniform_share": uniform_share,
             "unique_ips": len(unique_ips),
+            "mean_pps": mean_pps,
         }
 
         with self._lock:
@@ -450,6 +491,7 @@ class EntropyAnalyzer:
             intensity_base   = state.intensity_base
             proto_base   = state.proto_base
             share_base   = state.share_base
+            pps_base     = state.pps_base
 
             if not state.is_ready():
                 state.learn(snapshot)
@@ -470,6 +512,9 @@ class EntropyAnalyzer:
                 size_surge = False
                 intensity_surge = False
                 mechanized_cluster = False
+                pps_surge = False
+                pps_z = 0.0
+                proto_surge = False
             else:
                 size_z  = size_base.z_score(curr["size_var"])
                 intensity_z  = intensity_base.z_score(curr["intensity_var"])
@@ -481,8 +526,16 @@ class EntropyAnalyzer:
                 size_surge = size_base.is_high(curr["size_var"], attack_sigma)
                 intensity_surge = intensity_base.is_high(curr["intensity_var"], attack_sigma)
                 share_z = share_base.z_score(curr["uniform_share"])
-                mechanized_cluster = share_base.is_high(curr["uniform_share"], TEA_UNIFORM_SHARE_SIGMA)
-                proto_surge = proto_base.is_high(curr["proto_entropy"], TEA_UNIFORM_SHARE_SIGMA)
+                # P1: uniformity at sigma 2.0 with an absolute share floor,
+                # so only strongly-uniform traffic is even considered.
+                mechanized_cluster = (
+                    share_base.is_high(curr["uniform_share"], _cfg.TEA_UNIFORM_SHARE_SIGMA)
+                    and curr["uniform_share"] >= _cfg.TEA_MECHANIZED_MIN_UNIFORM_SHARE
+                )
+                proto_surge = proto_base.is_high(curr["proto_entropy"], _cfg.TEA_UNIFORM_SHARE_SIGMA)
+                # P1 volume companion: absolute pps vs the learned normal baseline.
+                pps_z = pps_base.z_score(curr["mean_pps"])
+                pps_surge = pps_base.is_high(curr["mean_pps"], _cfg.TEA_PPS_SURGE_SIGMA)
 
         size_delta  = curr["size_var"]  - prev["size_var"]
         intensity_delta = curr["intensity_var"] - prev["intensity_var"]
@@ -504,35 +557,59 @@ class EntropyAnalyzer:
         degenerate = len(current_flows) < TEA_MIN_FLOWS_PER_INTERVAL
         is_flash_crowd = False
         confidence = "low"
+        # P1: uniformity-only signals (mechanized cluster, variance/proto
+        # collapse) are the legit-uniform signature at normal volume, so they
+        # count as attack ONLY with an attack-scale volume companion. Surges
+        # still stand alone. R1 backstop: very high uniformity from many
+        # sources still flags at moderate even without volume.
+        volume_anomaly = size_surge or intensity_surge or pps_surge
+        collapse_anomaly = size_collapsed or intensity_collapsed or proto_collapsed
+        uniform_backstop = (
+            mechanized_cluster
+            and curr["uniform_share"] >= _cfg.TEA_UNIFORM_BACKSTOP_SHARE
+            and curr["unique_ips"] >= _cfg.TEA_UNIFORM_BACKSTOP_MIN_IPS
+        )
         is_attack_pattern = (
-            mechanized_cluster or proto_surge or proto_collapsed
-            or size_collapsed or intensity_collapsed
-            or size_surge or intensity_surge
+            size_surge or intensity_surge or pps_surge
+            or ((collapse_anomaly or mechanized_cluster) and volume_anomaly)
+            or uniform_backstop
         ) if not degenerate else False
 
         if is_attack_pattern:
-            if ((size_collapsed or size_surge) and (intensity_collapsed or intensity_surge)) or (
+            if uniform_backstop and not volume_anomaly:
+                confidence = "moderate"  # many-source uniform flood, no volume surge
+            elif ((size_collapsed or size_surge) and (intensity_collapsed or intensity_surge)) or (
                 mechanized_cluster and (
                     size_collapsed or size_surge or intensity_collapsed
                     or intensity_surge or proto_collapsed or proto_surge
+                    or pps_surge
                 )
             ):
                 confidence = "high"  # Multi-dimension confirmation
             else:
                 confidence = "moderate"  # Single dimension fired
 
-        # Supervised relearning: while latched, once the IF channel has
-        # seen a normal streak, force-learn the frozen baselines from the
-        # live snapshot so post-attack quiet traffic re-anchors them.
-        with self._lock:
-            supervised = (
-                self._attack_latched
-                and self._if_normal_streak >= TEA_IF_UNLOCK_STREAK
-            )
-
-        if not degenerate and (not is_attack_pattern or supervised):
+        # Supervised relearning (P2): while latched, a stable TEA-side "new
+        # normal" (consecutive non-attack or single-dimension moderate
+        # verdicts, deduped per interval) force-learns the frozen baselines.
+        # No IF confirmation required: IF mis-scoring uniform legit traffic
+        # must not block recovery. REG-1: only HIGH-confidence snapshots
+        # (multi-dimension, attack-scale evidence) are never force-learned,
+        # high confidence halts relearn instantly via the stability reset,
+        # and the force path is drift-capped, so attack-scale data cannot
+        # poison the baselines through the relearn channel. Single-dimension
+        # moderates (e.g. a pps-only volume step) MUST be relearn-learnable:
+        # blocking them froze the pps baseline and deadlocked the latch.
+        if not degenerate:
             with self._lock:
-                state.learn(snapshot, force=supervised)
+                supervised = (
+                    self._attack_latched
+                    and self._relearn_stable_streak >= _cfg.TEA_RELEARN_STABLE_INTERVALS
+                    and confidence != "high"
+                )
+            if not is_attack_pattern or supervised:
+                with self._lock:
+                    state.learn(snapshot, force=supervised, capped=supervised)
 
         result = {
             "size_var":  round(curr["size_var"],  4),
@@ -545,9 +622,14 @@ class EntropyAnalyzer:
             "proto_zscore":  round(proto_z, 4),
             "uniform_share": round(curr["uniform_share"], 4),
             "uniform_share_zscore":  round(share_z, 4),
+            "mean_pps":  round(curr["mean_pps"], 4),
+            "pps_zscore":    round(pps_z, 4),
+            "pps_baseline":  round(pps_base.mean, 4),
             "mechanized_cluster":    mechanized_cluster,
             "size_surge":    size_surge,
             "intensity_surge":   intensity_surge,
+            "pps_surge":     pps_surge,
+            "uniform_backstop":  uniform_backstop,
             "baseline_mean_size":  round(size_base.mean, 4),
             "baseline_mean_intensity":  round(intensity_base.mean, 4),
             "unique_ips":         curr["unique_ips"],
@@ -609,12 +691,14 @@ class EntropyAnalyzer:
         self._global_state.intensity_base.lock()
         self._global_state.proto_base.lock()
         self._global_state.share_base.lock()
+        self._global_state.pps_base.lock()
 
     def _unlock_all(self) -> None:
         self._global_state.size_base.unlock()
         self._global_state.intensity_base.unlock()
         self._global_state.proto_base.unlock()
         self._global_state.share_base.unlock()
+        self._global_state.pps_base.unlock()
 
     def _set_latch(self, latched: bool, reason: str, caller_holds_lock: bool = False) -> None:
         if not caller_holds_lock:
@@ -624,6 +708,7 @@ class EntropyAnalyzer:
             return
         self._attack_latched = latched
         if latched:
+            self._latch_set_at = time.monotonic()
             self._lock_all()
             log.info("TEA latch LOCKED (%s): tea_attack_streak=%d", reason, self._tea_attack_streak)
         else:
@@ -640,13 +725,26 @@ class EntropyAnalyzer:
         ):
             self._set_latch(False, "both streaks satisfied", caller_holds_lock=True)
 
+    def _if_sustained_anomaly(self, now: float) -> bool:
+        """P4: IF is 'sustained anomalous' only when anomalies dominate the
+        recent per-flow window AND the timestamp is still fresh. A single
+        sporadic false positive never blocks recovery."""
+        if now - self._last_if_anomaly_ts >= TEA_IDLE_UNLOCK_S:
+            return False
+        buf = self._if_rate_buffer
+        if not buf:
+            return False
+        return (sum(buf) / len(buf)) >= _cfg.TEA_IF_ANOMALY_RATE_BLOCK
+
     def feedback_if(self, is_anomaly: bool) -> None:
         """Per-flow IF feedback. Streak-only: NEVER locks baselines.
 
         Isolated anomalies halve the streak (decay) instead of zeroing it,
         so occasional IF false positives delay rather than restart recovery.
+        Every call feeds the sustained-rate ring buffer used by idle_tick.
         """
         with self._lock:
+            self._if_rate_buffer.append(1 if is_anomaly else 0)
             if is_anomaly:
                 self._if_normal_streak //= 2
                 self._last_if_anomaly_ts = time.monotonic()
@@ -663,6 +761,15 @@ class EntropyAnalyzer:
         """
         with self._lock:
             if eval_seq is not None:
+                # P6: telemetry-provided seq is attacker-influenceable.
+                # Reject non-int / negative values and absurd forward jumps
+                # that would dedup-blackout every later interval.
+                if isinstance(eval_seq, bool) or not isinstance(eval_seq, int):
+                    return
+                if eval_seq < 0:
+                    return
+                if eval_seq - self._last_tea_eval_seq > _cfg.TEA_EVAL_SEQ_MAX_JUMP:
+                    return
                 if eval_seq <= self._last_tea_eval_seq:
                     return
                 self._last_tea_eval_seq = eval_seq
@@ -671,14 +778,22 @@ class EntropyAnalyzer:
             # here. A moderate attack verdict while latched is presumed
             # to be frozen-baseline noise: leave streaks, the attack
             # streak, and the idle timer untouched so recovery paths
-            # keep working while uniform traffic flows.
+            # keep working while uniform traffic flows. P2 hardening:
+            # it still halts supervised relearn instantly (REG-1).
             if self._attack_latched and is_attack and confidence != "high":
+                # P2 stable-moderate trigger: while latched, inert moderates
+                # are the frozen-baseline FP signature, so they BUILD the
+                # stability counter instead of halting relearn. Streaks,
+                # attack streak, and the idle timer stay untouched (RT-1).
+                self._relearn_stable_streak += 1
+                self._last_moderate_ts = time.monotonic()
                 return
 
             if is_attack or confidence == "high":
                 if not is_attack and confidence == "high":
                     is_attack = True
                 self._tea_normal_streak = 0
+                self._relearn_stable_streak = 0
                 self._last_attack_event = time.monotonic()
                 if TEA_TEA_HIGH_CONF_LOCK and confidence == "high":
                     self._set_latch(True, "high confidence attack", caller_holds_lock=True)
@@ -690,22 +805,61 @@ class EntropyAnalyzer:
 
             self._tea_attack_streak = 0
             self._tea_normal_streak += 1
+            if self._attack_latched:
+                self._relearn_stable_streak += 1
             self._try_unlock()
 
     def idle_tick(self, now: float | None = None) -> None:
         """Zero-traffic recovery path: no flow feedback arrives during
-        silence, so unlock is time-based on the last observed attack signal."""
+        silence, so unlock is time-based on the last observed attack signal.
+
+        P4: the IF guard is a sustained anomaly-rate window, not a single
+        timestamp, so sporadic IF false positives no longer block recovery.
+        P3: a bounded max-hold valve force-unlocks a latch that has outlived
+        TEA_LATCH_MAX_HOLD_S while TEA itself reports sustained silence
+        (normal-verdict streak, not merely "no high-conf event", per REG-2).
+        """
         now = now if now is not None else time.monotonic()
         with self._lock:
             if not self._attack_latched:
                 return
             if (
                 now - self._last_attack_event >= TEA_IDLE_UNLOCK_S
-                and now - self._last_if_anomaly_ts >= TEA_IDLE_UNLOCK_S
+                and not self._if_sustained_anomaly(now)
             ):
                 self._if_normal_streak = 0
                 self._tea_normal_streak = 0
+                self._relearn_stable_streak = 0
                 self._set_latch(False, "idle timeout (no attack signal)", caller_holds_lock=True)
+                return
+            if (
+                now - self._latch_set_at >= _cfg.TEA_LATCH_MAX_HOLD_S
+                and self._tea_normal_streak >= TEA_TEA_UNLOCK_STREAK
+                and now - self._last_attack_event >= _cfg.TEA_LATCH_HOLD_IF_GRACE_S
+                and now - self._last_moderate_ts >= _cfg.TEA_LATCH_HOLD_IF_GRACE_S
+            ):
+                # Sustained TEA silence + hold bound exceeded: re-anchor the
+                # baselines once (drift-capped) and release the latch.
+                if self._global_state.window:
+                    self._global_state.learn(
+                        self._global_state.latest(), force=True, capped=True
+                    )
+                self._set_latch(False, "max-hold exceeded", caller_holds_lock=True)
+
+    def telemetry(self) -> dict:
+        """P5: recovery observability for the expert endpoint and
+        acceptance tests asserting the hold bound."""
+        with self._lock:
+            now = time.monotonic()
+            buf = self._if_rate_buffer
+            return {
+                "attack_latched": self._attack_latched,
+                "latch_age_s": round(now - self._latch_set_at, 3),
+                "last_attack_age_s": round(now - self._last_attack_event, 3),
+                "last_if_anomaly_age_s": round(now - self._last_if_anomaly_ts, 3),
+                "if_anomaly_rate": round(sum(buf) / len(buf), 4) if buf else 0.0,
+                "relearn_stable_streak": self._relearn_stable_streak,
+            }
 
     def mean_size_baseline(self) -> float:
         """Lock-safe read of the size baseline mean for the dynamic low-rate gate."""
@@ -759,9 +913,14 @@ class EntropyAnalyzer:
             "proto_zscore":  0.0,
             "uniform_share": 0.0,
             "uniform_share_zscore":  0.0,
+            "mean_pps":  0.0,
+            "pps_zscore":    0.0,
+            "pps_baseline":  0.0,
             "mechanized_cluster":    False,
             "size_surge":    False,
             "intensity_surge":   False,
+            "pps_surge":     False,
+            "uniform_backstop":  False,
             "baseline_mean_size":  0.0,
             "baseline_mean_intensity":  0.0,
             "unique_ips":         0,

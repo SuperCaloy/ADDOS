@@ -980,7 +980,8 @@ function renderMLPanel(ifData, rfData, teaData) {
 
       // Learning progress
       const learningInterval = teaGlobal.learning_interval;
-      const learningProgress = !isLearned && learningInterval ? `${learningInterval}/15` : '';
+      const learningIntervals = teaGlobal.learning_intervals || 15;
+      const learningProgress = !isLearned && learningInterval ? `${learningInterval}/${learningIntervals}` : '';
 
       // Baseline history for sparklines
       const sizeBaselineHist = teaGlobal.size_baseline_history || [];
