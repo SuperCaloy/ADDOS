@@ -397,7 +397,7 @@ models/
   isolation_forest/     Model, scalers, feature contract (+ threshold)
   random_forest/        Model, scaler, label encoder, feature contract (+ gate)
 topology/
-  topology.py           Mininet star topology, baseline/attack/flash-crowd
+  topology.py           Mininet tree topology, baseline/attack/flash-crowd
                         generators, ground-truth reporting, custom CLI
 logs/                   Runtime SQLite store (ddos.db), created lazily
 test/e2e/               Playwright suite for Expert Mode UI

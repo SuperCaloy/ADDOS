@@ -45,6 +45,14 @@ def _latency_stats():
     }
 
 
+def _tea_telemetry() -> dict:
+    """P5 recovery observability (latch age, signal ages, IF rate)."""
+    try:
+        return entropy_analyzer.telemetry()
+    except Exception:
+        return {}
+
+
 @bp.get("/api/expert/live")
 def expert_live():
     # Pipeline health
@@ -135,8 +143,13 @@ def expert_live():
                 "is_flash_crowd": curr.get("is_flash_crowd", False),
                 "uniform_share": round(curr.get("uniform_share", 0), 4),
                 "mechanized_cluster": curr.get("mechanized_cluster", False),
+                "uniform_backstop": curr.get("uniform_backstop", False),
+                "pps_z": round(curr.get("pps_zscore", 0), 2),
+                "pps_baseline": round(curr.get("pps_baseline", 0), 4),
+                "pps_surge": curr.get("pps_surge", False),
                 "unique_ips": curr.get("unique_ips", 0),
                 "learning_interval": len(size_base._samples) if not size_base.is_learned else None,
+                "learning_intervals": size_base._learn_n,
                 "_locked": entropy_analyzer.is_locked,
                 "_attack_latched": entropy_analyzer.attack_latched,
                 "_fb_normal_streak": entropy_analyzer.fb_normal_streak,
@@ -150,6 +163,8 @@ def expert_live():
                 "intensity_baseline_history": [round(v, 4) for v in int_base.baseline_history],
                 "proto_baseline_history": [round(v, 4) for v in proto_base.baseline_history],
             }
+
+    tea_global.update(_tea_telemetry())
 
     # State machine active states (locked accessor, shallow copies)
     sm_states = {}
