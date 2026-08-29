@@ -29,26 +29,14 @@ COMMAND_ADDR   = "tcp://127.0.0.1:5556"
 # Stats poll interval in seconds
 STATS_INTERVAL = 1.0
 
-# Flow epoch: when a continuously-refreshed entry reaches this age its
-# counters are reset (strict delete, reinstalled on next packet). Without
-# this, cumulative duration/packet/byte growth pushes even perfectly legit
-# hosts over the anomaly threshold after ~25-45 minutes of session time.
+# Flow epoch: when a continuously-refreshed entry reaches this age its counters are reset (strict delete, reinstalled on next packet). Without it, cumulative growth pushes even legit hosts over the anomaly threshold after ~25-45 minutes.
 FLOW_EPOCH_S = 600
 
-# Young-entry scoring suppression (Round 4 F2). Lifetime-average pps/bps on
-# a freshly-installed entry explode (tiny age denominator) and scored
-# transient rows of ~0.608-0.66 for BENIGN hosts after every epoch delete,
-# flush, and reinstall. An entry is not pushed to the ML pipeline until it
-# is FRESH_SKIP_S seconds old OR carries YOUNG_MIN_PKTS packets. Real floods
-# exceed 200 packets in well under a second, so attack detection latency is
-# unchanged; legit bursts reach only ~36 packets in any 10s window.
+# Young-entry scoring suppression: lifetime-average pps/bps on a freshly-installed entry explode (tiny age denominator) and score false positives for benign hosts after every epoch delete/flush/reinstall. An entry is not pushed to ML until it is FRESH_SKIP_S seconds old or carries YOUNG_MIN_PKTS packets; real floods exceed 200 packets in under a second, so detection latency is unchanged.
 FRESH_SKIP_S = 10
 YOUNG_MIN_PKTS = 200
 
-# Over-limit install dedup/cap (P5a/P5b): a packet-in from a src whose
-# forward rule we believe is still live is cheap-dropped instead of paying
-# parse + FlowMod serialization again; new unique-src installs are capped
-# per switch per second during storms.
+# Over-limit install dedup/cap: a packet-in from a src whose forward rule is still live is cheap-dropped instead of paying parse + FlowMod serialization again. New unique-src installs are capped per switch per second during storms.
 INSTALL_DEDUP_TTL_S = 60   # aligned to the 60s idle_timeout so an entry dies with its rule
 INSTALL_MAP_CAP = 20000    # per-switch entries before eviction
 INSTALL_CAP_PER_SEC = 200  # unique-src installs per switch per second
@@ -122,8 +110,7 @@ class FatTreeController(app_manager.RyuApp):
         # IPs currently banned — fast check in the throttled packet-in path
         self._banned_ips: set = set()
 
-        # Last switch that saw each src_ip (diagnostic; mitigation and
-        # clear both target all switches since Round 5 S7)
+# Last switch that saw each src_ip (diagnostic; mitigation and clear both target all switches).
         self._ip_to_dpid: dict[str, int] = {}
 
         # Previous packet counts per drop rule key — used to compute drop deltas.
@@ -152,19 +139,13 @@ class FatTreeController(app_manager.RyuApp):
         self._pkt_in_rate: dict = {}
         self._PKT_IN_RATE_LIMIT = 1000
 
-        # Recently-installed forward rules per switch: dpid -> {src_ip: ts}.
-        # Backs the over-limit dedup (P5a): a packet-in proving the rule is
-        # gone must reinstall, never be swallowed by a stale entry. The TTL
-        # is aligned to the 60s idle_timeout so entries expire the moment
-        # their rule would, and every delete site invalidates explicitly.
+# Recently-installed forward rules per switch: dpid -> {src_ip: ts}, backing the over-limit dedup so a packet-in proving the rule is gone reinstalls rather than being swallowed. The TTL is aligned to the 60s idle_timeout and every delete site invalidates explicitly.
         self._recent_installs: dict = {}
 
-        # Per-second install budget per switch, caps unique-src FlowMod
-        # serialization during packet-in storms (P5a). Instance attribute so
-        # tests can tighten it.
+# Per-second install budget per switch, caps unique-src FlowMod serialization during packet-in storms. Instance attribute so tests can tighten it.
         self._install_budget: dict = {}
 
-        # Rate limiter for OFP error-message logging (M1)
+        # Rate limiter for OFP error-message logging
         self._last_err_log_ts = 0.0
 
     # ── OpenFlow handshake ─────────────────────────────────────────────────
@@ -193,10 +174,7 @@ class FatTreeController(app_manager.RyuApp):
                 out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
                 priority=pri, match=parser.OFPMatch(),
             ))
-        # The flush above is a non-strict wildcard DELETE, so it also wipes
-        # p10 forward rules. Their dedup entries must die with them, or
-        # presumed-live swallows packet-ins for up to INSTALL_DEDUP_TTL_S
-        # against an empty table.
+# The flush above is a non-strict wildcard DELETE, so it also wipes p10 forward rules. Their dedup entries must die with them, or presumed-live swallows packet-ins against an empty table.
         self._recent_installs.pop(dp.id, None)
         self._install_budget.pop(dp.id, None)
 
@@ -208,19 +186,14 @@ class FatTreeController(app_manager.RyuApp):
             match=parser.OFPMatch(), instructions=inst,
         ))
 
-        # Install rate-limit meter on every switch at connect time.
-        # Meter ID=1, KBPS band, DROP excess — used by rate_limit action in Phase 1.
-        # Pre-installing avoids race condition if rate_limit fires before meter exists.
+# Install rate-limit meter on every switch at connect time (Meter ID=1, KBPS band, DROP excess) for the rate_limit action. Pre-installing avoids a race if rate_limit fires before the meter exists.
         self._install_rate_limit_meter(dp, ofp, parser)
 
     @set_ev_cls(ofp_event.EventOFPStateChange, DEAD_DISPATCHER)
     def switch_disconnect_handler(self, ev):
         dp   = ev.datapath
         dpid = dp.id
-        # Stale-connection guard: a DEAD event for an OLD connection can
-        # arrive after a NEW connection for the same dpid has registered.
-        # Popping unconditionally evicted the new datapath, so mitigation
-        # commands silently skipped that switch.
+# Stale-connection guard: a DEAD event for an old connection can arrive after a new connection for the same dpid has registered. Popping unconditionally evicts the new datapath, so mitigation commands would skip that switch.
         if self._datapaths.get(dpid) is not dp:
             return
         self._datapaths.pop(dpid, None)
@@ -327,15 +300,9 @@ class FatTreeController(app_manager.RyuApp):
         if _rate_count <= self._PKT_IN_RATE_LIMIT:
             return False
 
-        # Over limit — drop banned IPs silently, install forward rule for the rest.
-        # Installing a forward rule (instead of flooding) keeps flow_stats flowing
-        # so ML can score/re-score. Flooding bypasses the flow table and starves
-        # telemetry, creating a feedback loop where IPs become invisible to ML.
+# Over limit: drop banned IPs silently and install a forward rule for the rest. A forward rule (not flood) keeps flow_stats flowing so ML can score; flooding bypasses the table and starves telemetry, making IPs invisible.
         self._pkt_in_count[dpid] += 1
-        # Cheap header probe (P5b): fixed-offset reads instead of a full
-        # packet parse. Ethertype at 12-13 (skip one VLAN tag if present),
-        # IPv4 src at +12 into the IP header. Anything unusual falls back
-        # to the full parse below, which also keeps ARP/non-IPv4 flooding.
+# Cheap header probe: fixed-offset reads instead of a full packet parse. Ethertype at 12-13 (skip one VLAN tag if present), IPv4 src at +12 into the IP header; anything unusual falls back to the full parse below, keeping ARP/non-IPv4 flooding.
         src_ip = None
         data = msg.data
         if isinstance(data, (bytes, bytearray)) and len(data) >= 34:
@@ -353,15 +320,10 @@ class FatTreeController(app_manager.RyuApp):
         if src_ip is not None:
             if src_ip in self._banned_ips:
                 return True
-            # Presumed-live rule (P5a): the rule is forwarding this src in
-            # the datapath; a packet-in here is a stale-dedup race, so the
-            # frame is dropped rather than re-serialized. Entries are
-            # invalidated at every delete site, so this cannot blackhole a
-            # released host.
+# Presumed-live rule: the rule is forwarding this src in the datapath, so a packet-in here is a stale-dedup race and the frame is dropped rather than re-serialized. Entries are invalidated at every delete site, so this cannot blackhole a released host.
             if self._install_presumed_live(dpid, src_ip):
                 return True
-            # Unique-src install cap (P5a): above the cap, drop instead of
-            # paying FlowMod serialization per packet during storms.
+# Unique-src install cap: above the cap, drop instead of paying FlowMod serialization per packet during storms.
             if self._install_budget_exceeded(dpid):
                 return True
 
@@ -401,9 +363,7 @@ class FatTreeController(app_manager.RyuApp):
         src_ip = ip4.src
         dst_ip = ip4.dst
 
-        # Banned source (M4): drop before any processing. Without this,
-        # packets that reach the controller during a post-flush/post-TTL
-        # window are forwarded AND pinned with a forward rule.
+# Banned source: drop before any processing. Without this, packets reaching the controller during a post-flush/post-TTL window are forwarded and pinned with a forward rule.
         if src_ip in self._banned_ips:
             return
 
@@ -452,9 +412,7 @@ class FatTreeController(app_manager.RyuApp):
         self._send_packet_out(dp, ofp, parser, msg, in_port, actions)
 
     def _update_proto_cache(self, dpid: int, src_ip: str, proto: int) -> None:
-        # Track dominant protocol per switch and per IP for RF classification.
-        # TCP(6)/UDP(17) take priority over ICMP(1) to avoid warmup pings
-        # overwriting the real attack protocol.
+# Track dominant protocol per switch and per IP for RF classification. TCP(6)/UDP(17) take priority over ICMP(1) to avoid warmup pings overwriting the real attack protocol.
         if not proto:
             return
         self._switch_proto[dpid][proto] += 1
@@ -520,9 +478,7 @@ class FatTreeController(app_manager.RyuApp):
             if "ipv4_dst" in match:
                 dst_ips.add(match["ipv4_dst"])
 
-            # Report drop delta for all drop rules to backend via ZMQ.
-            # priority 80/90/100 — per-IP block rules (quarantine/time ban/blackhole)
-            # priority 50        — proto drop rule installed by resource guard at CRIT
+# Report drop delta for all drop rules to backend via ZMQ (priority 80/90/100 per-IP block rules; priority 50 proto drop from the resource guard).
             self._report_drop_delta(stat, match)
 
             src_ip = match.get("ipv4_src")
@@ -532,15 +488,7 @@ class FatTreeController(app_manager.RyuApp):
                 # Skip zero-packet flows — avoids division blowup in IF features
                 continue
 
-            # Flow epoch reset: strictly delete this src's priority-10 entry
-            # once it ages past FLOW_EPOCH_S so cumulative counters restart.
-            # DELETE_STRICT (not DELETE) so higher-priority mitigation rules
-            # for the same src are never touched. The next packet from this
-            # host table-misses, hits packet_in, and a fresh rule installs.
-            # Mitigation rules (priority 80/90/100) are EXEMPT from the
-            # skip: their counters must keep flowing to the ML pipeline or
-            # release evaluation runs on stale data during long bans; only
-            # the forward rule's lifetime is being bounded here.
+# Flow epoch reset: strictly DELETE_STRICT this src's priority-10 entry once it ages past FLOW_EPOCH_S so cumulative counters restart, while higher-priority mitigation rules are untouched. Mitigation rules (80/90/100) are exempt so their counters keep flowing to ML during long bans; only the forward rule's lifetime is bounded.
             if stat.duration_sec >= FLOW_EPOCH_S:
                 if stat.priority == 10:
                     parser = dp.ofproto_parser
@@ -560,13 +508,7 @@ class FatTreeController(app_manager.RyuApp):
 
             _flow_count_per_src[src_ip] += 1
 
-            # Young-entry scoring suppression (Round 4 F2): skip until the
-            # entry is old enough or massive enough that lifetime averages
-            # are meaningful. Applied unconditionally, first polls after a
-            # (re)connect included: they hit exactly the same tiny-
-            # denominator artifact (documented ~0.645 reconnect monsters).
-            # Mitigation rules are exempt: release evaluation for a freshly
-            # banned slow source must not wait FRESH_SKIP_S for its rows.
+# Young-entry scoring suppression: skip until the entry is old enough or massive enough that lifetime averages are meaningful. Applied unconditionally including first polls after a (re)connect; mitigation rules are exempt so a freshly banned slow source is not delayed.
             if (stat.duration_sec < FRESH_SKIP_S
                     and stat.packet_count < YOUNG_MIN_PKTS
                     and stat.priority not in (80, 90, 100)):
@@ -667,10 +609,7 @@ class FatTreeController(app_manager.RyuApp):
     @set_ev_cls(ofp_event.EventOFPErrorMsg,
                 [CONFIG_DISPATCHER, MAIN_DISPATCHER])
     def error_msg_handler(self, ev):
-        # Surface switch-side rejections (M1): previously there was no
-        # handler at all, so failed FlowMods/MeterMods were invisible.
-        # Rate-limited: during cascades errors can burst hard enough to
-        # become their own load problem.
+# Surface switch-side rejections so failed FlowMods/MeterMods are no longer invisible. Rate-limited so cascades do not turn error bursts into their own load problem.
         msg = ev.msg
         now = time.monotonic()
         if now - self._last_err_log_ts < 5.0:
@@ -726,24 +665,18 @@ class FatTreeController(app_manager.RyuApp):
             self._reset_state()
             return
 
-        # Update banned IP set for the throttled fast-path check
-        # Only drop actions (block/quarantine/redirect) — rate_limit allows traffic
-        # so flow_stats continue and ML can re-score during probation
+# Update banned IP set for the throttled fast-path check. Only drop actions (block/quarantine/redirect) add to it; rate_limit allows traffic so flow_stats continue and ML can re-score during probation.
         if action in ("block", "quarantine", "redirect"):
             self._banned_ips.add(src_ip)
         elif action == "clear":
             self._on_clear(src_ip)
 
-        # Any action that deletes or supersedes the p10 forward rule must
-        # invalidate the install-dedup for this src across all switches
-        # (P5a lifecycle invariant), including when no switch is currently
-        # connected, so the entry cannot outlive the rule.
+# Any action that deletes or supersedes the p10 forward rule must invalidate the install-dedup for this src across all switches, including when no switch is connected, so the entry cannot outlive the rule.
         if action in ("block", "quarantine", "redirect", "clear",
                       "rate_limit"):
             self._forget_install_all(src_ip)
 
-        # Resolve target switches — ALL switches for every action,
-        # mitigation and clear alike (Round 5 S7)
+# Resolve target switches: ALL switches for every action, mitigation and clear alike.
         target_dps = self._resolve_target_switches(src_ip, action)
 
         for dpid, dp in target_dps:
@@ -801,20 +734,13 @@ class FatTreeController(app_manager.RyuApp):
             self._cooldown_intervals[dpid_key] = self._COOLDOWN_INTERVALS
 
     def _resolve_target_switches(self, src_ip: str, action: str = "") -> list:
-        # Mitigation AND clear install on ALL switches (Round 5 S7).
-        # Attacker can enter from any edge switch; scoping to one switch
-        # leaves other switches unprotected. Clearing scoped to the
-        # last-seen switch left stale drop/redirect rules on the other
-        # eight after stop_all_attacks(), so clear is all-switch too.
+# Mitigation and clear install on ALL switches. An attacker can enter from any edge switch, so scoping to one leaves the others unprotected; clearing scoped to the last-seen switch leaves stale rules elsewhere, so clear is all-switch too.
         return list(self._datapaths.items())
 
     def _install_rate_limit_meter(self, dp, ofp, parser) -> None:
         # Install OpenFlow Meter ID=1 on this switch — DROP excess above RATE_LIMIT_PPS.
         # PKTPS band = packets per second, matches research baseline (1000 pps sim).
-        # Delete-then-add (M1): meters persist across controller disconnects,
-        # so a plain ADD on reconnect fails with METER_EXISTS and the error
-        # was previously swallowed (no error handler). Deleting a
-        # non-existent meter is not an error, so this is always safe.
+# Delete-then-add: meters persist across controller disconnects, so a plain ADD on reconnect fails with METER_EXISTS and the error is swallowed without a handler. Deleting a non-existent meter is never an error, so this is always safe.
         dp.send_msg(parser.OFPMeterMod(
             datapath=dp,
             command=ofp.OFPMC_DELETE,
@@ -846,13 +772,7 @@ class FatTreeController(app_manager.RyuApp):
         ))
 
     def _install_drop_rule(self, dp, ofp, parser, match, action: str, ttl) -> None:
-        # Install mitigation rule for a flagged IP.
-        # rate_limit → OpenFlow Meter flow rule (throttle, not full drop).
-        # block/quarantine → DROP rule at respective priority.
-        #
-        # Step 1 — delete stale forward rule (p10), table-miss override (p1),
-        #           and any existing rule at the same drop priority.
-        # Step 2 — install new rule.
+# Install mitigation rule for a flagged IP: rate_limit throttles via a Meter (not full drop) and block/quarantine drops at its priority. Step 1 deletes any stale forward/override/duplicate rule; Step 2 installs the new rule.
         drop_pri     = _DROP_PRIORITY[action]
         hard_timeout = int(ttl) if (action == "block" and ttl is not None) else 0
 
@@ -868,8 +788,7 @@ class FatTreeController(app_manager.RyuApp):
                 out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
                 match=match,
             ))
-        # The p10 forward rule is gone: a stale dedup entry must not swallow
-        # this src's next packet (P5a lifecycle invariant).
+# The p10 forward rule is gone: a stale dedup entry must not swallow this src's next packet.
         _src = match.get("ipv4_src")
         if _src:
             self._forget_install(dp.id, _src)
@@ -898,9 +817,7 @@ class FatTreeController(app_manager.RyuApp):
             ))
 
     def _apply_proto_block(self, dp, ofp, parser, cmd: dict, dpid: int) -> None:
-        # Install or remove a protocol-level drop rule at priority=50.
-        # Catches rand-source floods that rotate IPs too fast for per-IP rules.
-        # Priority 50 — above table-miss (1), below per-IP block rules (80+).
+# Install or remove a protocol-level drop rule at priority 50, above table-miss (1) and below per-IP block rules (80+). It catches rand-source floods that rotate IPs too fast for per-IP rules.
         proto  = cmd.get("proto")
         remove = cmd.get("remove", False)
         if proto is None:
@@ -926,9 +843,7 @@ class FatTreeController(app_manager.RyuApp):
             self.logger.debug("Proto drop installed: nw_proto=%d on dpid=%016x", proto, dpid)
 
     def _install_clear_rules(self, dp, ofp, parser, match) -> None:
-        # Remove all drop rules AND the forward rule for this IP.
-        # Also deletes priority=10 forward rule so next packet hits packet_in.
-        # This forces ML to re-evaluate the IP — critical for probation scoring.
+# Remove all drop rules and the forward rule for this IP, deleting priority=10 so the next packet hits packet_in. This forces ML to re-evaluate the IP, which is critical for probation scoring.
         # Permit at priority=5 lets the released IP forward immediately
         # before the MAC table re-learns naturally (expires in 10s).
         for pri in (100, 90, 85, 80, 10):
@@ -939,8 +854,7 @@ class FatTreeController(app_manager.RyuApp):
                 out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
                 match=match,
             ))
-        # p10 forward rule deleted: invalidate dedup so the released IP's
-        # next packet reinstalls instead of being swallowed (P5a).
+# p10 forward rule deleted: invalidate dedup so the released IP's next packet reinstalls instead of being swallowed.
         _src = match.get("ipv4_src")
         if _src:
             self._forget_install(dp.id, _src)
@@ -956,9 +870,7 @@ class FatTreeController(app_manager.RyuApp):
         ))
 
     def _install_redirect_rule(self, dp, ofp, parser, match, redirect_to: str) -> None:
-        # Install redirect rule: match src_ip, rewrite dst_ip to sinkhole, forward.
-        # Priority 85 — above rate_limit (80), below quarantine (90).
-        # Delete stale forward rule (p10) and any existing redirect rule (p85).
+# Install redirect rule (priority 85, above rate_limit 80 and below quarantine 90): rewrite dst_ip to the sinkhole and forward. Deletes any stale forward (p10) or existing redirect (p85) rule first.
         for pri in (10, 85):
             dp.send_msg(parser.OFPFlowMod(
                 datapath=dp, command=ofp.OFPFC_DELETE_STRICT,

@@ -5,9 +5,7 @@ from backend.database import writer
 log = logging.getLogger(__name__)
 
 # ── Thresholds ─────────────────────────────────────────────────────────────
-# Weighted offense score that triggers direct blackhole (half-life decay, 24h)
-# Score = sum of (2.0 * 0.5^(hours_elapsed/24)) per offense
-# 5 rapid attacks = 10.0 = blackhole (max persistence)
+# Weighted offense score triggering direct blackhole (half-life decay, 24h). 5 rapid attacks accumulate to 10.0.
 BLACKHOLE_OFFENSE_THRESHOLD = 10.0
 
 # Attack vector severity weights (higher = more severe)
@@ -29,8 +27,7 @@ def record_offense(src_ip: str, attack_vector: str, if_score: float,
                    phase_reached: int, first_seen: str,
                    unblock_reason: str = "Auto-Released",
                    ban_level: int = 0, offence_count: int = 1) -> None:
-    # Write completed offense to ip_attack_history.
-    # Called by state_machine._clear() so history persists across restarts.
+    # Writes completed offense to ip_attack_history; called on release so history persists across restarts.
     try:
         writer.log_attack_history(
             src_ip         = src_ip,
@@ -51,9 +48,7 @@ def record_offense(src_ip: str, attack_vector: str, if_score: float,
 
 
 def get_decay_score(src_ip: str) -> float:
-    # Reuses writer.get_offense_count - already implements half-life decay.
-    # Score = sum of (2.0 * 0.5^(hours_elapsed/24)) per offence.
-    # Fresh offence ~2.0, 24h ago ~1.0, 48h ago ~0.5
+    # Reuses writer.get_offense_count (half-life decay). Fresh ~2.0, 24h ago ~1.0, 48h ago ~0.5.
     try:
         return writer.get_offense_count(src_ip)
     except Exception as exc:
@@ -62,7 +57,7 @@ def get_decay_score(src_ip: str) -> float:
 
 
 def get_offence_count(src_ip: str) -> int:
-    # Raw count - literal number of times this IP has offended.
+    # Raw count of how many times this IP has offended.
     try:
         count = writer.get_offense_total_count(src_ip)
         return count if count is not None else 0
@@ -72,8 +67,7 @@ def get_offence_count(src_ip: str) -> int:
 
 
 def get_offences(src_ip: str) -> int:
-    # Query total offense count for this IP from ip_attack_history.
-    # Returns 0 on no history or DB error.
+    # Queries total offense count from ip_attack_history; returns 0 on no history or DB error.
     try:
         count = writer.get_offense_total_count(src_ip)
         return count if count is not None else 0
@@ -83,8 +77,7 @@ def get_offences(src_ip: str) -> int:
 
 
 def get_ban_level(src_ip: str) -> int:
-    # Query last recorded ban level for this IP from DB.
-    # Returns 0 if no history.
+    # Queries last recorded ban level from DB; returns 0 if no history.
     try:
         level = writer.get_ban_level(src_ip)
         return level if level is not None else 0
@@ -94,16 +87,13 @@ def get_ban_level(src_ip: str) -> int:
 
 
 def is_known_offender(src_ip: str) -> bool:
-    # True if IP has any prior offense in DB.
-    # Used by state_machine to route returning attackers via on_reoffence().
+    # True if the IP has any prior offense; used to route returning attackers via on_reoffence().
     return get_offences(src_ip) > 0
 
 
 def should_blackhole(src_ip: str, current_ban_level: int) -> bool:
-    # Returns True if IP should skip ban escalation and go straight to blackhole.
-    # Triggers when:
-    #   - weighted offense score >= BLACKHOLE_OFFENSE_THRESHOLD (persistent offender)
-    #   - score uses half-life decay - needs burst/recent attacks to trigger
+    # Returns True if the IP should skip ban escalation and go straight to blackhole.
+    # Triggers on a persistent offender whose decayed offense score meets the threshold.
     offense_score = get_decay_score(src_ip)
     if offense_score >= BLACKHOLE_OFFENSE_THRESHOLD:
         log.info("Behavioral: %s decay_score=%.2f >= %.1f -> blackhole",

@@ -79,7 +79,7 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     # --- Engineered features ---
     pkt_byte_rate_ratio = math.log1p(max(pps / (bps + eps), 0))
     avg_bytes_per_pkt   = byt / (pkt + eps)
-    flow_intensity      = math.log1p(max(pkt * bps, 0))          # fixed: bps not pps
+    flow_intensity      = math.log1p(max(pkt * bps, 0))          # uses bps, not pps
     port_entropy        = math.log1p(max(tps / (tpd + 1), 0))
     bytes_per_duration  = math.log1p(max(byt / (fds + eps), 0))
     # eps here, not +1 — matches training denominator exactly
@@ -113,10 +113,8 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     if nans.any():
         vec[nans] = _get_medians()[nans]
 
-    # Replace lines 116-119 wholesale: numpy-direct two-stage scaling, no
-    # per-item DataFrame (it was the dominant GIL-held hot-path cost). The
-    # scalers were fitted on float64 DataFrames; numpy input of the same
-    # dtype is byte-identical (verified against the pandas reference in T13).
+    # Two-stage numpy scaling avoids the per-item DataFrame hot path; float64
+    # input matches the fitted scalers byte-for-byte.
     global _last_raw_vec
     _last_raw_vec = vec
 

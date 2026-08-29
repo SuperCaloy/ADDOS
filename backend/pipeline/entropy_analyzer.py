@@ -112,10 +112,8 @@ class _AdaptiveBaseline:
             return
 
         if force:
-            # Supervised relearning: pin the EMA alpha so frozen baselines
-            # drift reliably toward the observed distribution. On the
-            # capped (supervised) path a faster alpha is safe because the
-            # drift cap, not the alpha, bounds per-interval movement.
+            # Supervised relearning: pin the EMA alpha; on the capped path a
+            # faster alpha is safe because the drift cap bounds movement.
             self._alpha = TEA_EMA_ALPHA_MIN if max_drift_frac is None else _cfg.TEA_RELEARN_ALPHA
         else:
             z = abs(value - self._mean) / self._std
@@ -126,8 +124,7 @@ class _AdaptiveBaseline:
         new_mean = self._alpha * value + (1 - self._alpha) * self._mean
         if max_drift_frac is not None and self._mean:
             # REG-1 hardening: supervised relearn must never walk a frozen
-            # baseline toward attack scale faster than frac of its mean
-            # per interval, even against a sustained mis-scored input.
+            # baseline toward attack scale faster than a fraction of its mean.
             max_step = abs(self._mean) * max_drift_frac
             if abs(new_mean - self._mean) > max_step:
                 new_mean = self._mean + (max_step if new_mean > self._mean else -max_step)
@@ -336,10 +333,8 @@ class EntropyAnalyzer:
         self._fb_normal_streak = 0
         self._would_block_count = 0
 
-        # Dual feedback latch (see notes/tasks/tea-dual-feedback-fix.md):
-        # IF feedback only feeds _if_normal_streak; TEA verdicts drive the
-        # latch through AND-ed hysteresis. Baselines lock/unlock on latch
-        # transitions, never from per-flow IF anomalies.
+        # Dual feedback latch: IF feedback feeds only _if_normal_streak, while
+        # TEA verdicts drive the latch via AND-ed hysteresis.
         self._if_normal_streak = 0
         self._tea_normal_streak = 0
         self._tea_attack_streak = 0
@@ -350,14 +345,11 @@ class EntropyAnalyzer:
         # P2: TEA-side "stable new normal" counter driving supervised
         # relearn without IF confirmation. Deduped per eval interval.
         self._relearn_stable_streak = 0
-        # P3: latch age for the bounded max-hold safety valve. The valve
-        # also requires TEA silence in the strict sense: even inert
-        # moderate verdicts (which never refresh _last_attack_event)
-        # keep it blocked via _last_moderate_ts (REG-2).
+        # P3: latch age for the bounded max-hold safety valve. The valve also
+        # requires TEA silence via _last_moderate_ts (REG-2), not just _last_attack_event.
         self._latch_set_at = time.monotonic()
         self._last_moderate_ts = time.monotonic()
-        # P4: per-flow IF anomaly ring buffer for the sustained-rate
-        # idle guard (replaces the single-timestamp IF guard).
+        # P4: per-flow IF anomaly ring buffer for the sustained-rate idle guard.
         self._if_rate_buffer: deque = deque(maxlen=_cfg.TEA_IF_RATE_WINDOW)
 
         self._flow_buffer = deque(maxlen=2000)
@@ -415,9 +407,8 @@ class EntropyAnalyzer:
             self._flow_buffer.clear()
 
         if not current_flows:
-            # Idle gap: never overwrite the verdict with a neutral
-            # learned=False result (that made an idle analyzer display
-            # "Learning"). Preserve the previous result verbatim.
+            # Idle gap: preserve the previous result verbatim rather than
+            # overwriting it with a neutral learned=False verdict.
             prev = self._global_state.last_result
             if prev:
                 res = dict(prev)
@@ -550,18 +541,13 @@ class EntropyAnalyzer:
                 state.last_result = res
             return res
 
-        # Degenerate-interval guard: too few flows for meaningful aggregate
-        # stats (1 flow -> uniform_share=1.0, variance=0 produces false
-        # "mechanized cluster"). Suppress the verdict, keep streaks moving,
-        # protect baselines. Small attackers stay covered by per-IP profiles.
+        # Degenerate-interval guard: too few flows yield meaningless aggregate
+        # stats (e.g. false "mechanized cluster"); suppress the verdict.
         degenerate = len(current_flows) < TEA_MIN_FLOWS_PER_INTERVAL
         is_flash_crowd = False
         confidence = "low"
-        # P1: uniformity-only signals (mechanized cluster, variance/proto
-        # collapse) are the legit-uniform signature at normal volume, so they
-        # count as attack ONLY with an attack-scale volume companion. Surges
-        # still stand alone. R1 backstop: very high uniformity from many
-        # sources still flags at moderate even without volume.
+        # P1: uniformity-only signals count as attack only with an attack-scale
+        # volume companion. R1 backstops very high multi-source uniformity.
         volume_anomaly = size_surge or intensity_surge or pps_surge
         collapse_anomaly = size_collapsed or intensity_collapsed or proto_collapsed
         uniform_backstop = (
@@ -589,17 +575,9 @@ class EntropyAnalyzer:
             else:
                 confidence = "moderate"  # Single dimension fired
 
-        # Supervised relearning (P2): while latched, a stable TEA-side "new
-        # normal" (consecutive non-attack or single-dimension moderate
-        # verdicts, deduped per interval) force-learns the frozen baselines.
-        # No IF confirmation required: IF mis-scoring uniform legit traffic
-        # must not block recovery. REG-1: only HIGH-confidence snapshots
-        # (multi-dimension, attack-scale evidence) are never force-learned,
-        # high confidence halts relearn instantly via the stability reset,
-        # and the force path is drift-capped, so attack-scale data cannot
-        # poison the baselines through the relearn channel. Single-dimension
-        # moderates (e.g. a pps-only volume step) MUST be relearn-learnable:
-        # blocking them froze the pps baseline and deadlocked the latch.
+        # Supervised relearning (P2): a stable TEA-side "new normal" force-learns
+        # the frozen baselines without IF confirmation (REG-1 caps drift and excludes
+        # high-confidence snapshots so attack-scale data can't poison baselines).
         if not degenerate:
             with self._lock:
                 supervised = (
@@ -774,17 +752,11 @@ class EntropyAnalyzer:
                     return
                 self._last_tea_eval_seq = eval_seq
 
-            # RT-1 ordering: the seq above is recorded even when we bail
-            # here. A moderate attack verdict while latched is presumed
-            # to be frozen-baseline noise: leave streaks, the attack
-            # streak, and the idle timer untouched so recovery paths
-            # keep working while uniform traffic flows. P2 hardening:
-            # it still halts supervised relearn instantly (REG-1).
+            # RT-1 ordering: the seq is recorded even when we bail; a moderate
+            # latched verdict is treated as frozen-baseline noise (P2 halts relearn, REG-1).
             if self._attack_latched and is_attack and confidence != "high":
-                # P2 stable-moderate trigger: while latched, inert moderates
-                # are the frozen-baseline FP signature, so they BUILD the
-                # stability counter instead of halting relearn. Streaks,
-                # attack streak, and the idle timer stay untouched (RT-1).
+                # P2 stable-moderate trigger: inert latched moderates are the
+                # frozen-baseline FP signature that builds the stability counter.
                 self._relearn_stable_streak += 1
                 self._last_moderate_ts = time.monotonic()
                 return

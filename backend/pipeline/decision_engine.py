@@ -40,10 +40,8 @@ _LEGIT_HOST_IPS: frozenset = frozenset([
     "10.0.0.5", # h5
 ])
 
-# Ground truth - attacker hosts (15 total, 2026-08-26 reduction):
-# h6-h18 + h22,h23 (h16 repurposed SYN/5432, h22 repurposed SYN/3389;
-# h19,h24-h27 retired and silent), per topology.py.
-# h20 (server) and h21 (sinkhole) are excluded on purpose, not attackers.
+# Attacker hosts: h6-h18, h22, h23 (per topology.py).
+# h20 (server) and h21 (sinkhole) are excluded on purpose.
 _ATTACKER_IPS: frozenset = frozenset(
     [f"10.0.0.{i}" for i in range(6, 19)] +
     ["10.0.0.22", "10.0.0.23"]
@@ -177,10 +175,8 @@ def get_stats() -> dict:
     # normal -- dedicated forwarded counter, incremented per normal flow result
     normal = s["normal_forwarded"]
 
-    # total -- malicious + normal only (industry standard: total analyzed by ML pipeline)
-    # Raw OVS packet counts are excluded -- they recount the same packets every poll
-    # and include ARP/broadcast/control traffic never classified by the ML pipeline.
-    # This ensures total always equals malicious + normal exactly.
+    # total = malicious + normal only; raw OVS counts are excluded since they
+    # recount the same packets every poll and include unclassified control traffic.
     total = real_dropped + normal
 
     return {
@@ -193,7 +189,7 @@ def get_stats() -> dict:
     }
 
 
-# ── FP rate fix ────────────────────────────────────────────────────────────────
+# ── False-positive handling ────────────────────────────────────────────────────
 
 def record_false_positive(src_ip: str) -> None:
     """Manual release of a blocked host, real FP. Buffers into traffic_summary
@@ -250,11 +246,8 @@ def _assign_priority(if_score: float, confidence: float,
 
 
 # ── Detection ledger gate: one 'detected' row per phase entry ────────────
-# Keyed on IpState.phase_entered (monotonic). A phase transition changes the
-# timestamp so the next evidence write logs again; repeats inside one entry
-# are suppressed. Stale entries are pruned once the cache grows past the cap,
-# keeping memory bounded under IP churn without affecting correctness (a
-# returning IP always carries a new, later phase_entered).
+# Keyed on IpState.phase_entered (monotonic); repeats within one entry are
+# suppressed, and stale entries are pruned to bound memory under IP churn.
 _DETECTION_LOGGED_MAX = 128
 _detection_logged: dict[str, float] = {}
 
@@ -290,8 +283,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     with _lock:
         _stats["total_packets"] += 1
 
-    # --- ML OFF - count packet as normal, skip all detection and mitigation ---
-    # ML OFF - show traffic visually but take NO action
+    # ML OFF - count packet as normal, skip all detection and mitigation.
     if not ML_ENABLED:
         _pkt_count = _estimate_pkt_count(flow_stats)
         _pps       = float((flow_stats or {}).get("packet_count_per_second", 0.0))
@@ -336,8 +328,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # update sinkhole PPS so observation window can escalate/release correctly
     deception.update_pps(src_ip, _pps)
-    # feed live score/confidence too, sinkhole can't escalate on resolved
-    # confidence without this, was previously frozen at entry-time values
+    # feed live score/confidence too, so the sinkhole tracks the latest
+    # confidence instead of stale entry-time values
     deception.update_score(src_ip, if_score or 0.0, confidence or 0.0)
 
     _push_debug({
@@ -475,9 +467,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
     ip_state    = state_machine.get_state(src_ip)
     phase_label = ip_state.phase_label() if ip_state else None
 
-    # Skip write for legit hosts, and for flash crowd, no action taken.
-    # One 'detected' row per phase entry: per-flow repeats inside the same
-    # entry are suppressed by the gate (writer dedup remains as safety net).
+    # Skip the write for legit hosts and flash-crowd (no action taken).
+    # The gate allows one 'detected' row per phase entry (writer dedup is a safety net).
     if not is_known_legit and _tea_mitigate and (
         ip_state is None or _should_log_detection(src_ip, ip_state.phase_entered)
     ):
@@ -510,11 +501,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
     from backend.api.stats import get_active_attacks as _get_gt
     _gt = _get_gt()
     _expected_class = _gt.get(src_ip)  # "SYN", "ICMP", "UDP" or None
-    # MIXED is a legacy topology-only label (no variant emits it anymore),
-    # RF's 3-class model was never
-    # trained to predict it. Scoring it as FN/FP either way corrupts the
-    # confusion matrix, so it's excluded from RF ground truth entirely,
-    # same as if the IP had never been registered.
+    # MIXED is a topology-only label RF's 3-class model does not predict;
+    # scoring it as FN/FP would corrupt the confusion matrix, so it is excluded.
     if _expected_class == "MIXED":
         _expected_class = None
 
@@ -589,10 +577,8 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "action":      action_taken,
     })
 
-    # Force-push SSE on phase upgrades (Quarantine→TimeBan, →Blackhole)
-    # so the audit log always reflects the latest phase, bypassing dedup.
-    # Skip entirely on flash-crowd ticks - no real action happened, the
-    # Audit Log should only ever show actual mitigation outcomes.
+    # Force-push SSE on phase upgrades so the audit log reflects the latest
+    # phase; flash-crowd ticks are skipped since no real action occurred.
     if not is_known_legit and _tea_mitigate:
         _phase_upgrade = action_taken in ("Time Ban", "Blackhole")
         _push_sse_event({

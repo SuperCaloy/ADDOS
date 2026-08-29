@@ -259,19 +259,14 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ]))
         return t
 
-    # Left/right inner-table widths must sum to exactly match their outer
-    # container cell (8.7cm / 8.0cm below) — a mismatch here is what caused
-    # the "Report Period" value to overlap the Attack Vector table next to it.
-    # Value column (4.2cm) comfortably fits the longest real value,
-    # "2026-06-23 - 2026-06-30" (measured ~3.76cm at this font/size).
+    # Inner-table widths sum to match their outer container cells (8.7cm/8.0cm),
+    # and the value column (4.2cm) fits the longest real value.
     side_by_side = Table([[_kv_table(sum_left,  [4.5*cm, 4.2*cm]),
                             Spacer(0.3*cm, 1),
                             _kv_table(sum_right, [5.0*cm, 3.0*cm])]],
                          colWidths=[8.7*cm, 0.3*cm, 8*cm])
-    # Zero the outer wrapper's own cell padding — reportlab's 6pt default
-    # padding was silently eating into the 8.7cm/8.0cm allocated to each
-    # inner table, causing it to overflow its cell even though the widths
-    # matched on paper. This was the root cause of the Report Period overlap.
+    # The outer wrapper's cell padding is zeroed so the inner tables keep the
+    # full width allocated to them and do not overflow their cells.
     side_by_side.setStyle(TableStyle([
         ("LEFTPADDING",   (0, 0), (-1, -1), 0),
         ("RIGHTPADDING",  (0, 0), (-1, -1), 0),

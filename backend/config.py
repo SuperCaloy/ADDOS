@@ -17,10 +17,9 @@ RF_CONTRACT_PATH = os.path.join(RF_DIR, "rf_feature_contract.json")
 RF_ENCODER_PATH  = os.path.join(RF_DIR, "label_encoder.pkl")
 
 # --- Database ---
-# Resolution order: DDOS_DB_PATH env var, then the benchmark marker file
-# (benchmark/DB_TARGET, written by run_benchmark and removed at session
-# end), then the default logs/ddos.db. MARKER_PATH is overridable via
-# DDOS_DB_MARKER so tests never touch the real repo marker.
+# DB path resolution: DDOS_DB_PATH env var, else the benchmark marker file
+# (benchmark/DB_TARGET), else the default logs/ddos.db. MARKER_PATH is
+# overridable via DDOS_DB_MARKER so tests never touch the real repo marker.
 MARKER_PATH = (os.environ.get("DDOS_DB_MARKER")
                or os.path.join(_ROOT, "benchmark", "DB_TARGET"))
 
@@ -58,7 +57,7 @@ RF_BATCH_ENABLED  = True
 RF_BATCH_MAX      = 32
 RF_BATCH_WINDOW_MS = 50
 
-# --- IF micro-batching (L1, conservative default off like B1 originally) ---
+# --- IF micro-batching (L1, default off) ---
 IF_BATCH_ENABLED  = True
 IF_BATCH_MAX      = 32
 IF_BATCH_WINDOW_MS = 50
@@ -102,10 +101,9 @@ TEA_WINDOW_SIZE = 10
 # IF side: per-flow, streak-only, NEVER locks baselines by itself.
 # Isolated anomalies halve the streak (decay) instead of zeroing it.
 TEA_IF_UNLOCK_STREAK = 5
-# TEA side: counts eval intervals (~0.5s each), not flows.
-# 60 (~30s) instead of 100: real attacks keep the IF side of the AND-gate
-# suppressed and inert moderates re-latch within 3 intervals, so a shorter
-# normal-verdict streak is safe and halves post-attack recovery time.
+# TEA side counts eval intervals (~0.5s each), not flows. A normal-verdict
+# streak of 60 (~30s) safely re-latches because real attacks keep the IF side
+# of the AND-gate suppressed, halving post-attack recovery time.
 TEA_TEA_LOCK_STREAK = 3               # consecutive attack intervals to latch
 TEA_TEA_UNLOCK_STREAK = 60            # consecutive normal intervals (~30s) to unlatch
 TEA_TEA_HIGH_CONF_LOCK = True         # single "high" confidence interval latches instantly
@@ -119,7 +117,7 @@ TEA_IP_PROFILE_TTL_S = 60
 # --- TEA uniformity gating (P1, notes/tasks/tea-normal-fp-fix-plan.md) ---
 # Uniformity-only signals (mechanized_cluster, variance/proto collapse) need
 # an attack-scale volume companion before they can set an attack verdict.
-TEA_UNIFORM_SHARE_SIGMA = 2.0           # was 1.5 via TEA_CROWD_SIGMA alias
+TEA_UNIFORM_SHARE_SIGMA = 2.0           # uniformity share z-score companion threshold
 TEA_MECHANIZED_MIN_UNIFORM_SHARE = 0.9  # absolute floor for mechanized_cluster
 TEA_UNIFORM_BACKSTOP_SHARE = 0.95       # R1: very high uniformity ...
 TEA_UNIFORM_BACKSTOP_MIN_IPS = 20       # ... from many sources still flags (moderate)

@@ -11,9 +11,8 @@ _pps_counter = 0
 _pps_lock    = threading.Lock()
 
 
-# Cached ryu process list — avoids re-discovering on every call.
-# cpu_percent(interval=None) needs the same object to be called twice
-# with time in between, so we must reuse the same psutil.Process instances.
+# Cached ryu process list, avoids re-discovering on every call.
+# cpu_percent(interval=None) needs the same object called twice with time between, so reuse the same psutil.Process instances.
 _ctrl_procs: list = []
 _ctrl_procs_lock = threading.Lock()
 
@@ -78,18 +77,14 @@ def start() -> None:
         global _pps_counter
         proc = psutil.Process()
 
-        # --- Prime cpu_percent — first call always returns 0.0 ---
+        # --- Prime cpu_percent: first call always returns 0.0 ---
         psutil.cpu_percent(interval=None)
         proc.cpu_percent(interval=None)
         _get_ctrl_metrics()
 
         while True:
-            # --- Poll hping3 across the FULL 1s window, not one instant ---
-            # CPU below is an average over the past 1s (interval=None).
-            # Checking hping3 once, after the fact, misses attack traffic
-            # that ran during the window but stopped by the exact moment
-            # of the check — causing high CPU to log as baseline.
-            # Polling 5x across the same 1s window fixes this mismatch.
+            # Poll hping3 across the full 1s window (CPU is averaged over the past 1s).
+            # Polling 5x avoids missing attack traffic that stopped before a single check.
             attack_seen_in_window = False
             for _ in range(5):
                 time.sleep(0.2)
@@ -120,21 +115,12 @@ def start() -> None:
                         from backend.api.stats import get_active_attacks
                         from backend.mitigation.state_machine import state_machine
                         _active_gt = get_active_attacks()
-                        # Ground truth (topology reports start/stop directly) is
-                        # the primary signal — accurate to the exact attack
-                        # window. hping3 process scan is only a fallback for
-                        # gaps ground truth doesn't cover.
+                        # Topology-reported ground truth is the primary signal; hping3 scan is a fallback for gaps.
                         is_attack = len(_active_gt) > 0 or hping3_running
-                        # Mitigating = state machine currently has IPs under an
-                        # active quarantine/ban response. Distinct from is_attack
-                        # (attack traffic present) — mitigation only starts after
-                        # the state machine actually takes action on an IP.
+                        # Mitigating means the state machine has active IPs under quarantine/ban; distinct from is_attack (traffic present).
                         is_mitigating = len(state_machine.get_active_list()) > 0
                     else:
-                        # ML OFF — no mitigation logic runs, so is_mitigating
-                        # stays False. But ground truth is still reported by
-                        # topology.py regardless of ML state, so use it here
-                        # too for accurate attack labeling.
+                        # ML OFF: no mitigation runs so is_mitigating stays False, but topology ground truth is still used for attack labeling.
                         from backend.api.stats import get_active_attacks
                         _active_gt = get_active_attacks()
                         is_attack = len(_active_gt) > 0 or hping3_running

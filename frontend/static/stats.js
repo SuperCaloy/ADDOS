@@ -1,6 +1,6 @@
 let prev = { t: 0, m: 0, n: 0 };
 
-/* Shared IF threshold — set once by fetchModelInfo, read by quarantine.js */
+/* Shared IF threshold — set once by fetchModelInfo, read by mitigation.js */
 let ifThr = 0;
 
 /* Format cumulative change as +X.X% string */
@@ -56,7 +56,7 @@ async function fetchStats() {
   } catch (_) {}
 }
 
-/* fetchModelInfo — now delegates to pollModelInfo (polled every 1s) */
+/* fetchModelInfo — delegates to pollModelInfo. */
 async function fetchModelInfo() { await pollModelInfo(); }
 /* Poll system metrics (CPU/Memory) every 1s */
 async function fetchSystemMetrics() {

@@ -145,3 +145,15 @@ def test_load_does_not_poison_topology_namespace():
     import topology.benchmark   # must not raise ModuleNotFoundError
     import topology.topology
     assert hasattr(topology.benchmark, "run")
+
+
+def test_udp_icmp_payloads_capped_at_1024():
+    # Aggressiveness bump (2026-08-28): every UDP/ICMP attacker floods with
+    # exactly 1024B payloads. Bigger bytes per packet = higher bandwidth with
+    # NO extra packet rate, so attack CPU/lag is unchanged. 1024 stays inside
+    # the frozen model's training range (<=800B was old; 1024 is the safe cap).
+    for num, (atype, flags, _, _) in topo._ATTACKER_VARIANTS.items():
+        if atype in ("UDP", "ICMP"):
+            assert "--data 1024" in flags, (num, flags)
+        else:
+            assert "--data" not in flags, (num, flags)
