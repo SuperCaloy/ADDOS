@@ -339,7 +339,7 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
   window.MAX_LOG      = {{ max_log }};
   window.EXPERT_MODE  = localStorage.getItem('addos-expert') === '1';
 </script>
-<!-- Load order matters: api → ui → chart → stats → quarantine → log → main -->
+<!-- Load order matters: api → ui → chart → stats → mitigation → log → main -->
 <script src="/static/api.js?v=8"></script>
 <script src="/static/ui.js?v=9"></script>
 <script src="/static/chart.js?v=8"></script>

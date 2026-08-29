@@ -105,9 +105,6 @@ def test_and_unlock_requires_both_sides(ea):
 
 def test_attack_interval_resets_tea_streak(ea):
     # While unlatched, an attack interval resets the normal streak.
-    # (T20 changed moderate-while-LATCHED verdicts to be inert so both
-    # unlock paths survive frozen-baseline noise; see
-    # test/unit/test_t20_latch_deadlock.py for the latched semantics.)
     ea.feedback_tea(False, "low", eval_seq=1)
     ea.feedback_tea(False, "low", eval_seq=2)
     ea.feedback_tea(True, "moderate", eval_seq=3)

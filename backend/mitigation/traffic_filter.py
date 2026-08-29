@@ -5,7 +5,7 @@ from backend.config import SIMULATION_MODE
 log = logging.getLogger(__name__)
 
 # ── Ban durations per level ────────────────────────────────────────────────
-# state_machine calls get_ban_duration(ban_level) — never hardcodes durations
+# state_machine calls get_ban_duration(ban_level) and never hardcodes durations.
 if SIMULATION_MODE:
     BAN_LEVELS = [30, 60, 120, 300, 600, 1200]       # 30s → 20m
 else:
@@ -16,9 +16,7 @@ MAX_BAN_LEVEL      = len(BAN_LEVELS) - 1
 # Phase 3 blackhole TTL
 BLACKHOLE_TTL_SECONDS = 3600  # 1 hour
 
-# Phase 1 rate limit — OpenFlow Meter threshold (packets per second).
-# 1000 pps matches 2021-2026 SDN DDoS research baseline for observation phase.
-# Excess packets dropped by meter; traffic below limit still reaches server.
+# Phase 1 rate limit: OpenFlow Meter threshold (pps). Excess packets are dropped; traffic below the limit still reaches the server.
 RATE_LIMIT_PPS = 1000 if SIMULATION_MODE else 5000
 
 
@@ -44,21 +42,15 @@ ACTION_CLEAR      = "clear"        # removes all rules for this IP
 # IP is sinkholed when confidence is below this threshold
 SINKHOLE_CONFIDENCE_THRESHOLD = 0.70
 
-# After sinkhole observation, escalate to quarantine only once confidence
-# is resolved back up to this level — same bar as the sinkhole trigger,
-# so an IP can't drift below one and above the other.
+# After sinkhole observation, escalate to quarantine only once confidence is resolved to this level, matching the sinkhole trigger.
 SINKHOLE_ESCALATE_CONFIDENCE = 0.70
 
-# Hard ceiling — cumulative time across sinkhole cycles. If an IP keeps
-# retripping and staying active but RF never resolves it, force escalate
-# to quarantine anyway once this total is hit, rather than looping forever.
-# 3 observation cycles worth of time.
+# Hard ceiling on cumulative time across sinkhole cycles. If RF never resolves an active retripping IP, force escalation once this total is hit.
 SINKHOLE_MAX_TOTAL_SECONDS = 90.0
 
 
 def resolve_phase1_actions(priority: str) -> list[str]:
-    # Phase 1 observation: throttle, don't drop.
-    # Lets us watch the IP without fully cutting off possibly-legit traffic.
+    # Phase 1 observation throttles rather than drops, so possibly-legit traffic is still watched.
     return [ACTION_RATE_LIMIT]
 
 
@@ -86,9 +78,7 @@ def resolve_release_action() -> str:
 
 
 def should_sinkhole(attack_vector: str, confidence: float, phase: int) -> bool:
-    # Sinkhole rule (approved):
-    #   attack_vector == "Uncertain" AND confidence < 0.60
-    #   AND not already in Phase 2/3 (never downgrade a banned IP)
+    # Sinkhole rule: vector == "Uncertain" AND confidence < threshold, never downgrading a banned IP.
     if phase >= 2:
         return False
 

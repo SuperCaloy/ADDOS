@@ -52,10 +52,7 @@ _SUMMARY = {}
 
 
 def _default_calibration_gate(topo, cap_s: float):
-    # Exception-safe. Polls /api/expert/live until the model has learned
-    # (R2: explicit key check, never truthiness of the whole dict) and 3
-    # consecutive polls show no quarantine growth, OR until cap_s elapses.
-    # Hard deadline prevents hangs. At least 30s is held (baseline soak).
+# Exception-safe. Polls /api/expert/live until the model has learned (via an explicit key check, not dict truthiness) and 3 consecutive polls show no quarantine growth, or until cap_s elapses. Hard deadline prevents hangs; at least 30s is held for baseline soak.
     import json, urllib.request
     deadline = time.monotonic() + cap_s
     started = time.monotonic()
@@ -108,7 +105,7 @@ def _clean_poll_gate(topo, limit_t: float):
 
 
 def _log_tier_snapshot(topo):
-    # optional telemetry before the second mixed wave (R3a); never fatal
+    # optional telemetry before the second mixed wave; never fatal
     import json, urllib.request
     try:
         with urllib.request.urlopen(f"{topo.BACKEND_API}/api/stats",
@@ -176,10 +173,18 @@ def _remove_db_marker() -> None:
     _marker_path().unlink(missing_ok=True)
 
 
+def cleanup_stale_marker() -> bool:
+    # Remove any marker left by an interrupted session so a normal backend
+    # start returns to the default DB. Returns True if one was removed.
+    marker = _marker_path()
+    if marker.exists():
+        marker.unlink()
+        return True
+    return False
+
+
 def _await_backend_db(topo, cap_s: float) -> None:
-    # Poll until the backend reports it booted onto the benchmark DB, so
-    # the timeline never starts against the wrong database. Bounded: on
-    # timeout proceed with a loud degraded warning.
+# Poll until the backend reports it booted onto the benchmark DB, so the timeline never starts against the wrong database. On timeout it proceeds with a loud degraded warning.
     import urllib.request
     deadline = time.monotonic() + cap_s
     target = str(_resolve_db_path())
@@ -199,9 +204,7 @@ def _await_backend_db(topo, cap_s: float) -> None:
 
 
 def _init_benchmark_db(db_path: Path) -> None:
-    # Create a fresh DB exactly like the backend's own first boot: same
-    # folder autogeneration, WAL pragmas, full schema and migrations, by
-    # calling backend.database.db's own schema code (no drift).
+# Create a fresh DB like the backend's own first boot (same folder autogeneration, WAL pragmas, full schema and migrations) via backend.database.db's schema code. This keeps the schema in sync, avoiding drift.
     db_path.parent.mkdir(parents=True, exist_ok=True)
     import sys
     root = str(Path(__file__).resolve().parents[1])
@@ -235,16 +238,14 @@ def _reset_reputation_keep_offences(topo):
               (set(topo._ATTACKER_NUMS)
                | set(getattr(topo, "_RETIRED_NUMS", ()))
                | set(topo._LEGIT_NUMS))}
-    # Absolute path anchored to project root: backend's DB is resolved the
-    # same way, and a relative "logs/ddos.db" silently no-ops if CWD differs
-    # (V2/RT2 H2).
+# Absolute path anchored to project root: the backend resolves its DB the same way, and a relative "logs/ddos.db" silently no-ops if CWD differs.
     db_path = _resolve_db_path()
     if not db_path.exists():
         print(f"BENCHMARK: no ddos.db at {db_path}; creating one with the "
               "backend schema (same as system first boot).")
         _init_benchmark_db(db_path)
     conn = sqlite3.connect(str(db_path)); conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")   # fewer write-lock contentions (RT2 MED-2)
+    conn.execute("PRAGMA journal_mode=WAL")   # fewer write-lock contentions
     conn.execute("PRAGMA busy_timeout=5000")  # backend writer may hold the db
     try:
         conn.execute(f"""CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
@@ -260,20 +261,16 @@ def _reset_reputation_keep_offences(topo):
                 "VALUES(?,?,?,datetime('now')) ON CONFLICT(src_ip) DO UPDATE SET "
                 "total_offences=total_offences+?, last_ban_level=MAX(last_ban_level,?), updated_at=datetime('now')",
                 (r["src_ip"], r["n"], r["mb"], r["n"], r["mb"]))
-        conn.commit()  # ledger committed BEFORE deletes (RT2 MED-2)
+        conn.commit()  # ledger committed BEFORE deletes
         conn.execute("DELETE FROM ip_attack_history WHERE src_ip IN (%s)"
                      % ",".join("?"*len(scoped)), list(scoped))
-        # scoped: only reset our session's IPs, don't wipe unrelated state (RT2 MED-3)
+        # scoped: only reset our session's IPs, don't wipe unrelated state
         conn.execute("DELETE FROM quarantine_state WHERE src_ip IN (%s)"
                      % ",".join("?"*len(scoped)), list(scoped))
         conn.commit()  # incremental commit so a later failure keeps the ledger
     finally:
         conn.close()
-    # Option B (RT2 HIGH-1): /api/cache/invalidate ONLY clears the flow
-    # inference cache, NOT writer._reputation_cache / state_machine._states /
-    # _sinkhole_history. The real reset must hit a dedicated endpoint that
-    # clears those in-memory structures so the next session is ground truth
-    # WITHOUT a backend restart.
+# /api/cache/invalidate only clears the flow inference cache, not the writer/state_machine/sinkhole in-memory structures. The real reset must hit a dedicated endpoint that clears those so the next session is ground truth without a backend restart.
     _post_json(f"{topo.BACKEND_API}/api/admin/reset_reputation", {})
     print("BENCHMARK: reputation reset (DB rows + live backend caches); "
           "offences persisted in 'offence_totals'.")
@@ -311,16 +308,12 @@ def _status_print(msg: str) -> None:
 def run(topo, net, hosts, duration_s: int = 3600,
         calibration_gate=None, reset_fn=None, db_gate=None) -> None:
     if duration_s < 600 and calibration_gate is None and reset_fn is None:
-        # Mixed-wave vector staging is fixed at ~10s, so shorter runs overlap
-        # and the ICMP wave never gets its turn (RT3 H2). Require a sane floor
-        # unless the caller injects test doubles.
+# Mixed-wave vector staging is fixed at ~10s, so shorter runs overlap and the ICMP wave never gets its turn. Require a sane floor unless the caller injects test doubles.
         raise ValueError("benchmark needs duration_s >= 600s")
     calibration_gate = calibration_gate or _default_calibration_gate
     reset_fn = reset_fn or _reset_reputation_keep_offences
     db_gate = db_gate or _await_backend_db
-    # DB switch: write the marker the backend reads at boot, then wait for
-    # the operator to restart the backend onto the benchmark DB before any
-    # counted traffic flows.
+# DB switch: write the marker the backend reads at boot, then wait for the operator to restart the backend onto the benchmark DB before any counted traffic flows.
     _write_db_marker()
     _status_print("BENCHMARK: Restart the backend now so it boots onto "
                   "benchmark/benchmark.db; this run waits for confirmation.")
@@ -364,7 +357,7 @@ def run(topo, net, hosts, duration_s: int = 3600,
                     finally:
                         t = threading.Timer((2/60) * duration_s + 5,
                                             topo._WATCHDOG_SUPPRESS.clear)
-                        t.daemon = True  # never block process exit (RT1 H4)
+                        t.daemon = True  # never block process exit
                         t.start()
                 elif kind == "wave":
                     getattr(topo, _WAVES[action])()
@@ -378,21 +371,16 @@ def run(topo, net, hosts, duration_s: int = 3600,
                         _clean_poll_gate(topo, at(9/60))
                 # soak: nothing to start (baseline already running)
             except Exception as e:
-                # one bad wave must not abort the whole run (RT1 M1)
+                # one bad wave must not abort the whole run
                 _status_print(f"BENCHMARK: phase {kind}/{action} error ({e}); continuing")
             finally:
-                # Re-echo the current status AFTER the phase (noisy actions
-                # like stop_all_attacks bury it) so the newest line always
-                # shows where the session is and what comes next.
+# Re-echo the current status after the phase (noisy actions like stop_all_attacks bury it) so the newest line always shows where the session is.
                 nxt_frac = _PHASES[i + 1][0] if i + 1 < len(_PHASES) else 1.0
                 nm, ns = divmod(int(round(nxt_frac * duration_s)), 60)
                 _status_print(f"BENCHMARK: (still on) step {i + 1}/{len(_PHASES)}: "
                               f"{label} - next step at T+{nm:02d}:{ns:02d}")
     finally:
-        # UNCONDITIONAL final stop + reset on EVERY exit path.
-        # Stop the restore-poller / baseline-watchdog loops FIRST (they poll
-        # these Events) so they don't touch the hosts list while it is being
-        # torn down by net.stop() (R1e from the old runner).
+# UNCONDITIONAL final stop + reset on EVERY exit path. Stop the restore-poller / baseline-watchdog loops first (they poll these Events) so they don't touch the hosts list while net.stop() tears it down.
         tick_stop.set()
         _status_print("BENCHMARK: all steps done; stopping attacks, resetting "
                       "reputation, then auto-exit.")

@@ -5,9 +5,7 @@ import threading
 import logging
 from backend.config import ZMQ_TELEMETRY_ADDR, ML_ENABLED, FLOW_FIELD_MAX
 
-# Whitelisted IPs, never flood-filtered or submitted to ML.
-# h20 = victim server, h21 = sinkhole dummy. Without this, baseline
-# pings to h20 trip the burst window and flag it as attacker.
+# Whitelisted IPs are never flood-filtered or submitted to ML (h20 = victim server, h21 = sinkhole). Without this, baseline pings to h20 trip the burst window and flag it as an attacker.
 _WHITELIST_IPS = {"10.0.0.20", "10.0.0.21"}
 from backend.pipeline import worker
 from backend.pipeline.flood_prefilter import flood_filter
@@ -148,8 +146,7 @@ def _parse_and_route(raw: bytes) -> None:
                 state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
 
         elif proto == "UDP":
-            # UDP flood tracking - this is the key fix for slow UDP detection
-            # Previously UDP had no prefilter so had to wait for stats poll
+        # UDP flood tracking - the key path for slow UDP detection.
             tripped = flood_filter.on_packet(src_ip, "UDP")
             if tripped:
                 log.info("FloodPreFilter UDP tripped: %s - awaiting real flow_stats", src_ip)

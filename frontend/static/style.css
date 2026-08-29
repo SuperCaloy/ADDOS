@@ -1,5 +1,4 @@
-/* Self-hosted fonts (latin subset, OFL). Replaces the former Google Fonts
-   @import, which blocked rendering and script execution when offline. */
+/* Self-hosted fonts (latin subset, OFL) so rendering works offline. */
 @font-face {
   font-family: 'Fira Code';
   font-style: normal;
@@ -375,7 +374,7 @@ td.ip   { font-family: var(--mono); color: var(--text); font-weight: 600; font-s
 .cal-legend { display: flex; align-items: center; gap: 7px; margin-top: 12px; font-size: 11px; color: var(--sub); font-family: var(--mono); }
 .cal-legend-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
 
-/* Light mode calendar fix — was showing white text on white */
+/* Light mode calendar contrast. */
 body.light .cal-popup { background: var(--card); border-color: var(--border2); }
 body.light .cal-day { color: var(--text); }
 body.light .cal-month-label { color: var(--text); }

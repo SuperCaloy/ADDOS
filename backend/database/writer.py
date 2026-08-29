@@ -499,13 +499,9 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
         duration_s = 0
 
     try:
-        # The INSERT, its seq bump, and the cache append form ONE atomic
-        # section under _reputation_lock: a concurrent first-load either
-        # SELECTed before the commit (and then reloads via the seq check or
-        # receives the append) or entirely after it (and loads the row), so
-        # an offense can be neither omitted nor double-counted. Nesting
-        # direction is always reputation-lock then db-lock, never reversed,
-        # so this cannot deadlock against unlocked-reader loads.
+        # The INSERT, its seq bump, and the cache append run as one atomic
+        # section under _reputation_lock so an offense is never omitted or
+        # double-counted, and the lock ordering avoids deadlock with readers.
         with _reputation_lock:
             execute("""
                 INSERT INTO ip_attack_history
@@ -536,15 +532,11 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
 
 
 # ---------------------------------------------------------------------------
-# Reputation timestamp-list cache (detection-time optimization, A1)
-# get_offense_count ran a SELECT per call from the detection hot path. The
-# cache stores the RAW unblocked_at strings per src_ip; log_attack_history
-# atomically appends its just-committed row and bumps a sequence counter.
-# A miss-path load reads the counter around its (unlocked) SELECT and retries
-# if an offense landed mid-query, so a served value can never omit a
-# committed offense. No lock is ever held across database I/O, and appends
-# never block behind loads. Counts stay byte-identical: same strings,
-# insertion order, formula, and round-before-clamp order as a direct SQL read.
+# Reputation timestamp-list cache (detection-time optimization).
+# It stores raw unblocked_at strings per src_ip and is updated atomically with
+# a sequence counter by log_attack_history.
+# A miss-path load reads the counter around its unlocked SELECT and retries on
+# a mid-query commit, so served counts never omit a committed offense.
 # ---------------------------------------------------------------------------
 
 _reputation_lock = threading.Lock()
@@ -561,8 +553,8 @@ def clear_reputation_cache() -> None:
 
 def get_offense_count(src_ip: str) -> float:
     # Returns weighted offense score using half-life decay (24h half-life).
-    # Each offense adds +2.0, then decays: score = 2.0 * (0.5 ^ (hours_elapsed / 24))
-    # All offenses for this IP are summed — recent ones weigh more than old ones.
+    # Each offense adds +2.0 and decays over time; all offenses are summed so
+    # recent ones weigh more than old ones.
     try:
         from backend.database.db import query
 

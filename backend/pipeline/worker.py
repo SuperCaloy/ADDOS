@@ -102,9 +102,8 @@ def get_admission_counters() -> dict:
 
 
 # --- Service-time EMA (S7) ---
-# Per-origin EMA over samples that ran FULL inference. Skip/cached/low-rate
-# branches never update it, so the value tracks real inference occupancy
-# instead of being diluted toward microseconds. Feeds deadline admission.
+# Per-origin EMA over full-inference samples only; skip/cached/low-rate
+# branches never update it, so it tracks real occupancy for deadline admission.
 _svc_ema_lock = threading.Lock()
 _svc_ema = {"full": None}
 
@@ -209,15 +208,14 @@ def _emit_feedback(is_anomaly: bool, flow_stats: dict | None) -> None:
 
 def submit(src_ip: str, flow_stats: dict, switch_stats: dict) -> None:
     # priority=1 normal, priority=0 goes first. seq keeps FIFO order per priority.
-    # Flagged IPs (already under quarantine/sinkhole observation) jump the
-    # queue — they were waiting FIFO behind ordinary background flows,
-    # which is what made live telemetry lag 10-20s behind actual detection.
+    # Flagged IPs (under quarantine/sinkhole observation) jump the queue so
+    # their live telemetry stays current instead of lagging behind new flows.
     _priority = 0 if flood_filter.is_flagged_any(src_ip) else 1
     if (ADMISSION_CONTROL_ENABLED and _priority == 1
             and not _is_exempt_ip(src_ip)):
         if DEADLINE_ADMISSION_ENABLED:
             # Deadline admission (R3b): refuse when the queue cannot drain
-            # inside the freshness budget. Replaces the static depth check.
+            # inside the freshness budget.
             drain_s = (_queue.qsize() * (get_svc_ema_ms() / 1000.0)
                        / _effective_workers())
             if drain_s > WORKER_ITEM_TIMEOUT_S - DEADLINE_ADMISSION_MARGIN_S:
@@ -283,9 +281,7 @@ def _infer_rf(rf_vec):
 def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                   switch_stats: dict, enqueued_at: float, retry_count: int) -> None:
 
-    # --- Skip all inference when ML is OFF ---
-    # decision_engine.on_result() already handles ML OFF path.
-    # No point running IF+RF — result is discarded anyway.
+    # ML OFF: skip all inference; on_result() handles the ML OFF path.
     if not ML_ENABLED:
         return
 
@@ -303,17 +299,12 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         return
 
     # --- Flood prefilter check — was this IP flagged by burst/limit detection ---
-    # is_flood_switch removed — it stamped switch-wide delta on every per-host flow
-    # causing innocent hosts on the same switch to be submitted and timeout-blocked.
-    # IF handles per-host anomaly correctly on its own. Only flood_filter flag matters.
+    # IF handles per-host anomaly on its own; only the flood_filter flag matters.
     is_flagged = flood_filter.is_flagged_any(src_ip)
 
-    # --- Drop stale queue items ---
-    # Must run BEFORE the young-flow and low-rate gates: those fire callbacks
-    # carrying enqueued_at, which would record uncapped queue age as
-    # detection_ms for backlog-drained items (metric contamination bug).
-    # Only timeout-block IPs already flagged by flood prefilter.
-    # Innocent hosts (not flagged) are silently dropped — IF never confirmed them.
+    # Drop stale items before the young-flow/low-rate gates so backlog-drained
+    # items don't record uncapped queue age as detection_ms; only flagged IPs
+    # are timeout-blocked, unflagged hosts are dropped silently.
     if time.monotonic() - enqueued_at > WORKER_ITEM_TIMEOUT_S:
         if is_flagged:
             if retry_count < _MAX_PRIORITY_RETRIES:
@@ -340,9 +331,8 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
             tracker.invalidate_cache(src_ip)
             return
 
-    # --- Dynamic low-rate gate using TEA baseline ---
-    # Skip flows well below learned normal baseline — too slow to be an attack.
-    # Falls back to pps < 0.05 floor when TEA has not learned yet.
+    # Dynamic low-rate gate using TEA baseline: skip flows far below the
+    # learned normal baseline; falls back to a 0.05 pps floor when unlearned.
     if not is_flagged:
         try:
             from backend.pipeline.entropy_analyzer import entropy_analyzer
@@ -352,9 +342,8 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
             _dynamic_min = 0.05
         if pps < _dynamic_min:
             # Too slow to be an attack — count as normal without IF scoring.
-            # Feed the IF streak here too: this is exactly the quiet legit
-            # traffic that arrives after an attack stops, and skipping it
-            # starves the unlock hysteresis (see tea-dual-feedback-fix).
+            # Feed the IF streak too, so quiet post-attack traffic doesn't
+            # starve the unlock hysteresis.
             _emit_feedback(False, flow_stats)
             if _result_callback:
                 try:
@@ -396,10 +385,8 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
             # moving during cache-heavy periods.
             _emit_feedback(bool(cached.is_anomaly), flow_stats)
             if _result_callback:
-                # Wrapped — an uncaught exception here previously killed the
-                # entire worker thread permanently (e.g. bad downstream call
-                # in decision_engine.on_result), silently shrinking the pool
-                # down to zero live workers over time.
+                # Wrapped so an uncaught exception here can never kill the
+                # worker thread and silently shrink the live pool to zero.
                 try:
                     _result_callback(
                         src_ip,
@@ -544,10 +531,8 @@ def _worker_loop() -> None:
     while True:
         try:
             item = _queue.get(timeout=1.0)
-            # Outer guard — any uncaught exception anywhere in _process_item
-            # (including inside callbacks it fires) used to propagate here
-            # and kill the thread permanently. Now it is always caught,
-            # logged, and the thread keeps consuming the queue.
+            # Outer guard — any uncaught exception in _process_item (including
+            # callbacks it fires) is caught, logged, and the thread keeps running.
             try:
                 _process_item_with_metrics(*item)
             except Exception:

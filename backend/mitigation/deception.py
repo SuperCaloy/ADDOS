@@ -13,7 +13,7 @@ from backend.mitigation.traffic_filter import (
 log = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────────────
-# Silent dummy host — must match h21 in topology.py
+# Silent dummy host, must match h21 in topology.py.
 SINKHOLE_IP = "10.0.0.21"
 
 # Observation window before escalate/release decision
@@ -47,9 +47,7 @@ class DeceptionModule:
     def __init__(self):
         self._lock              = threading.Lock()
         self._entries: dict[str, SinkholeEntry] = {}
-        # Cumulative seconds spent in sinkhole across cycles, per IP.
-        # Survives release/retrip so a repeat offender can't loop forever
-        # on unresolved confidence. Reset once it actually escalates.
+        # Cumulative sinkhole seconds across cycles per IP. Survives release/retrip so a repeat offender can't loop forever.
         self._cumulative_time: dict[str, float] = {}
         self._commander         = None
         self._escalate_callback = None
@@ -59,8 +57,7 @@ class DeceptionModule:
         self._commander = commander
 
     def set_callbacks(self, escalate_fn, release_fn) -> None:
-        # escalate_fn(src_ip, if_score, attack_vector, confidence) → Phase 1
-        # release_fn(src_ip) → clear rules
+        # escalate_fn(src_ip, if_score, attack_vector, confidence) -> Phase 1; release_fn(src_ip) -> clear rules.
         self._escalate_callback = escalate_fn
         self._release_callback  = release_fn
 
@@ -68,8 +65,7 @@ class DeceptionModule:
 
     def enter_sinkhole(self, src_ip: str, attack_vector: str,
                        if_score: float, confidence: float) -> bool:
-        # Place IP into sinkhole observation and send redirect FlowMod.
-        # Returns False if IP is already in sinkhole.
+        # Places IP into sinkhole observation and sends redirect FlowMod; returns False if already present.
         with self._lock:
             if src_ip in self._entries:
                 log.debug("Deception: %s already in sinkhole", src_ip)
@@ -105,17 +101,13 @@ class DeceptionModule:
         return True
 
     def update_pps(self, src_ip: str, pps: float) -> None:
-        # Update recent PPS for a sinkholes IP.
-        # Called by decision_engine on each flow result.
+        # Updates recent PPS for a sinkholed IP; called by decision_engine on each flow result.
         with self._lock:
             if src_ip in self._entries:
                 self._entries[src_ip].recent_pps = pps
 
     def update_score(self, src_ip: str, if_score: float, confidence: float) -> None:
-        # Update live IF score and confidence for a sinkholed IP.
-        # Called by decision_engine on each flow result, same as update_pps.
-        # Without this, if_score/confidence stay frozen at entry-time values
-        # and escalation can never react to RF resolving the vector.
+        # Updates live IF score and confidence for a sinkholed IP. Without it, escalation can't react to RF resolving the vector.
         with self._lock:
             if src_ip in self._entries:
                 if if_score > self._entries[src_ip].if_score:
@@ -144,8 +136,7 @@ class DeceptionModule:
             ]
 
     def emergency_clear_one(self, src_ip: str) -> bool:
-        # Remove a single IP from sinkhole and clear its flow rule.
-        # Used by manual release from the UI.
+        # Removes a single IP from sinkhole and clears its flow rule; used by manual UI release.
         with self._lock:
             entry = self._entries.pop(src_ip, None)
             self._cumulative_time.pop(src_ip, None)
@@ -170,8 +161,7 @@ class DeceptionModule:
         return False
 
     def emergency_clear(self) -> int:
-        # Public method for resource_guard — clears all sinkhole entries.
-        # Returns count of cleared IPs.
+        # Public method for resource_guard: clears all sinkhole entries and returns the count.
         # resource_guard must never access private _lock/_entries directly.
         with self._lock:
             sinkhole_ips = list(self._entries.keys())
@@ -202,8 +192,7 @@ class DeceptionModule:
     # ── Tick ───────────────────────────────────────────────────────────
 
     def tick(self) -> None:
-        # Called every second by the tick thread.
-        # Processes entries whose observation window has completed.
+        # Called every second by the tick thread; processes entries whose observation window completed.
         with self._lock:
             to_process = [e for e in self._entries.values() if e.observation_complete()]
 
@@ -211,10 +200,8 @@ class DeceptionModule:
             self._evaluate(entry)
 
     def _evaluate(self, entry: SinkholeEntry) -> None:
-        # After observation window: escalate to Phase 1 or release.
-        # Escalates if pps AND confidence are both resolved, OR if pps is
-        # still elevated and cumulative time across cycles hits the ceiling,
-        # sustained-but-unclassifiable traffic still needs to be contained.
+        # After the observation window: escalate to Phase 1 or release.
+        # Escalates when pps and confidence are resolved, or when sustained-but-unclassifiable traffic hits the cumulative time ceiling.
         src_ip = entry.src_ip
         elapsed_this_cycle = entry.elapsed()
 

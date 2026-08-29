@@ -114,6 +114,19 @@ def test_run_prints_restart_instruction(capsys, monkeypatch, tmp_path):
     assert "benchmark/benchmark.db" in out
 
 
+def test_cleanup_stale_marker_removes_and_reports(tmp_path, monkeypatch):
+    # Stale-marker sweep: any marker present when a session starts must be
+    # removed so the backend boots onto the default DB for normal operation.
+    import topology.benchmark as b
+    marker = tmp_path / "DB_TARGET"
+    marker.write_text(str(tmp_path / "benchmark.db"))
+    monkeypatch.setattr(b, "_marker_path", lambda: marker)
+    assert b.cleanup_stale_marker() is True
+    assert not marker.exists()
+    # no marker -> no-op, reports False
+    assert b.cleanup_stale_marker() is False
+
+
 def test_run_still_works_with_env_override_set(capsys, monkeypatch, tmp_path):
     import topology.benchmark as b
     monkeypatch.setenv("DDOS_DB_PATH", str(tmp_path_fixture() / "bench.db"))

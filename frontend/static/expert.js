@@ -1011,9 +1011,8 @@ function renderMLPanel(ifData, rfData, teaData) {
         const min = Math.min(...data);
         const range = max - min || 1;
         const w = 120, h = 30;
-        // Vertical padding keeps the line in a band centered on its row so
-        // the trace stays visually aligned with the baseline label instead
-        // of riding the top/bottom edge when the data trends.
+        // Vertical padding keeps the trace centered on its row instead of
+        // riding the top/bottom edge when the data trends.
         const pad = h * 0.2;
         const usable = h - pad * 2;
         const points = data.map((v, i) => {

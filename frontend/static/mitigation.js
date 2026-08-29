@@ -1,4 +1,4 @@
-/* quarantine.js — polls /api/quarantine_list, DOM-diffs watchlist table,
+/* mitigation.js — polls /api/quarantine_list, DOM-diffs watchlist table,
  * handles release and blackhole button actions. */
 
 /* Row map — src_ip → <tr> — used for in-place DOM updates (no flicker) */

@@ -34,9 +34,8 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
         titleFont: { family: "'Fira Code', monospace", size: 10 },
         bodyFont:  { family: "'Fira Code', monospace", size: 11 },
         callbacks: {
-          /* Fix: datasets use near-transparent backgroundColor for area fill,
-             which renders as white in the tooltip swatch. Override with the
-             solid borderColor so swatches are clearly blue / red / green. */
+          /* Area fill uses a near-transparent backgroundColor; override the
+             tooltip swatch with the solid borderColor for clear colors. */
           labelColor: function (context) {
             const clr = context.dataset.borderColor || '#5c6080';
             return { borderColor: clr, backgroundColor: clr, borderWidth: 2, borderRadius: 2 };

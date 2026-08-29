@@ -11,10 +11,9 @@ bp = Blueprint("stats", __name__)
 
 # Ground truth store — populated by topology when attacks start/stop
 _gt_lock:  threading.Lock = threading.Lock()
-# ip -> (attack_type, started_wall_clock). S6/Round 5: entries carry their
-# start time so a TTL can expire them if the stop notification is lost
-# (backend crash-recovery, saturated stop path) and a cutoff can make the
-# batched stop_all race-safe against a campaign started moments later.
+# ip -> (attack_type, started_wall_clock). Entries carry their start time so a
+# TTL can expire them if the stop notification is lost, and a cutoff keeps a
+# batched stop_all race-safe against a newer campaign for the same IP.
 _active_attacks: dict[str, tuple[str, float]] = {}
 
 GT_TTL_S = 3600  # stale-after-crash backstop; must exceed the LONGEST
