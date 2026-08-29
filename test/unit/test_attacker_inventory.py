@@ -44,8 +44,8 @@ topo = _load_topology()
 
 def test_set_sizes_and_membership():
     assert set(topo._ATTACKER_NUMS) == {
-        6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 22, 23}
-    assert set(topo._RETIRED_NUMS) == {19, 24, 25, 26, 27}
+        6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 22}
+    assert set(topo._RETIRED_NUMS) == {23, 24, 25, 26, 27}
     assert set(topo._ATTACKER_POOL) == topo._ATTACKER_NUMS | topo._RETIRED_NUMS
 
 
@@ -63,8 +63,10 @@ def test_variants_in_lockstep_with_active_set():
 
 def test_repurposed_variants():
     atype16, flags16 = topo._ATTACKER_VARIANTS[16][0], topo._ATTACKER_VARIANTS[16][1]
+    atype19, flags19 = topo._ATTACKER_VARIANTS[19][0], topo._ATTACKER_VARIANTS[19][1]
     atype22, flags22 = topo._ATTACKER_VARIANTS[22][0], topo._ATTACKER_VARIANTS[22][1]
     assert atype16 == "SYN" and "-S -p 5432" in flags16
+    assert atype19 == "SYN" and "-S -p 25" in flags19   # h19 attacks like h23
     assert atype22 == "SYN" and "-S -p 3389" in flags22
 
 
@@ -79,7 +81,7 @@ def test_campaign_rosters_are_active():
     # Full-roster guardrail (2026-08-27): single-vector campaigns must launch
     # EVERY attacker assigned to that type, not a hardcoded subset.
     full = {
-        "SYN": {10, 16, 18, 22, 23},
+        "SYN": {10, 16, 18, 19, 22},
         "ICMP": {11, 12, 13, 14, 15},
         "UDP": {6, 7, 8, 9, 17},
     }
@@ -133,3 +135,14 @@ def test_cleanup_sweeps_cover_pool():
         body = open("topology/topology.py").read()[i:]
         body = body[:body.find("\ndef ", 5)]
         assert "_ATTACKER_POOL" in body
+
+
+def test_load_does_not_poison_topology_namespace():
+    # Regression (2026-08-28): loading topology.py under a foreign module
+    # name used to leave a broken 'topology' namespace in sys.modules, so
+    # every later `import topology.*` failed with "topology is not a
+    # package". Loading must stay side-effect free for the namespace.
+    _load_topology()
+    import topology.benchmark   # must not raise ModuleNotFoundError
+    import topology.topology
+    assert hasattr(topology.benchmark, "run")

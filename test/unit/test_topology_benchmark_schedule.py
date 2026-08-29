@@ -5,8 +5,8 @@ def test_schedule_fires_expected_campaigns_in_order(tmp_path, monkeypatch):
     import topology.benchmark as b
     monkeypatch.setattr(b, "_marker_path", lambda: tmp_path / "DB_TARGET")
     topo = mock.MagicMock()
-    topo._ATTACKER_NUMS = set(range(6, 19)) | {22, 23}
-    topo._RETIRED_NUMS = {19, 24, 25, 26, 27}
+    topo._ATTACKER_NUMS = set(range(6, 20)) | {22}
+    topo._RETIRED_NUMS = {23, 24, 25, 26, 27}
     topo._LEGIT_NUMS = set(range(1, 6))
     calls = []
     topo.start_syn_flood_campaign.side_effect = lambda: calls.append("syn")

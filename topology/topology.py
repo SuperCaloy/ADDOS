@@ -1,6 +1,7 @@
 import time
 import random
 import subprocess
+import sys
 import threading
 import urllib.request
 import json as _json
@@ -18,10 +19,11 @@ from mininet.link import Link
 # Make benchmark reliably importable regardless of launch method. When run as
 # `sudo python3 topology/topology.py`, sys.path[0] is already the script dir,
 # so this insert only hardens other launch paths. benchmark.py does not import
-# topology, so there is no circular/namespace trap here.
-import os, sys
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import benchmark  # topology/benchmark.py (separate file, no `import topology`)
+# topology, so there is no circular/namespace trap here. The insert + import
+# happen ONLY in the __main__ block: at module top they would put the
+# topology/ dir on sys.path, making the name "topology" resolve to this very
+# file and shadow the real package for every later import (test isolation
+# breaks with "topology is not a package").
 
 # Network and backend config
 CONTROLLER_IP    = "127.0.0.1"
@@ -35,12 +37,12 @@ SINKHOLE_IP      = "10.0.0.21"   # h21, dummy sinkhole host
 ATTACK_PKT_COUNT = 5000
 WHITELIST_IPS    = {SERVER_IP, SINKHOLE_IP}
 
-# h1 to h5 legit; 15 attackers (h6-h18 + h22,h23; h16/h22 repurposed SYN,
-# 2026-08-26); h20 server; h21 sinkhole; retired silent hosts h19,h24-h27
-# (built but never launch, never baseline). Rollback to 20 attackers =
-# set _RETIRED_NUMS to empty.
+# h1 to h5 legit; 16 attackers (h6-h19 + h22; h16/h19/h22 repurposed SYN,
+# 2026-08-28 h19 now attacks like h23's old SYN/25 role); h20 server; h21
+# sinkhole; retired silent hosts h23-h27 (built but never launch, never
+# baseline). Rollback to 20 attackers = set _RETIRED_NUMS to empty.
 _LEGIT_NUMS    = frozenset({1, 2, 3, 4, 5})
-_RETIRED_NUMS  = frozenset({19, 24, 25, 26, 27})
+_RETIRED_NUMS  = frozenset({23, 24, 25, 26, 27})
 _ATTACKER_NUMS = frozenset(
     n for n in (*range(6, 20), *range(22, 28)) if n not in _RETIRED_NUMS)
 # pool = attackers + retired: CLEANUP sweeps cover both so a hand-launched
@@ -56,11 +58,11 @@ _RESTORE_POLLER_STOP   = threading.Event()
 _BASELINE_WATCHDOG_STOP = threading.Event()
 _WATCHDOG_SUPPRESS      = threading.Event()
 
-# 5 SYN, 5 ICMP, 5 UDP (balanced; h16 repurposed to SYN/5432, h22 to
-# SYN/3389). Attack variants: --flood keeps the send dynamics the operator
-# wants; payload sizes are capped at 512-800 data bytes so flood bandwidth
-# stays at or below the original smooth baseline while every attack row
-# still sits outside the normal 70-300B size band (wire >= 540B).
+# 5 SYN, 5 ICMP, 5 UDP (balanced; h16/h19 repurposed to SYN/5432 + SYN/25,
+# h22 to SYN/3389). Attack variants: --flood keeps the send dynamics the
+# operator wants; payload sizes are capped at 512-800 data bytes so flood
+# bandwidth stays at or below the original smooth baseline while every
+# attack row still sits outside the normal 70-300B size band (wire >= 540B).
 _ALL_VARIANTS = {
     6:  ("UDP",  "--udp -p 53    --flood --data 512",  0, 0),
     7:  ("UDP",  "--udp -p 123   --flood --data 512",  0, 0),
@@ -75,10 +77,10 @@ _ALL_VARIANTS = {
     16: ("SYN",  "-S -p 5432 --flood",                 0, 0),
     17: ("UDP",  "--udp -p 123   --flood --data 800",  0, 0),
     18: ("SYN",  "-S -p 1900   --flood",               0, 0),
-    19: ("SYN",  "-S -p 1900   --flood",               0, 0),  # retired
-    22: ("SYN",  "-S -p 3389 --flood",                 0, 0),
-    23: ("SYN",  "-S -p 25   --flood",                 0, 0),
-    24: ("SYN",  "-S -p 3389 --flood",                 0, 0),  # retired
+    19: ("SYN",  "-S -p 25   --flood",               0, 0),
+    22: ("SYN",  "-S -p 3389 --flood",               0, 0),
+    23: ("SYN",  "-S -p 25   --flood",               0, 0),  # retired
+    24: ("SYN",  "-S -p 3389 --flood",               0, 0),  # retired
     25: ("SYN",  "-S -p 5432 --flood",                 0, 0),  # retired
     26: ("ICMP", "--icmp --flood --data 512",          0, 0),  # retired
     27: ("ICMP", "--icmp --flood --data 800",          0, 0),  # retired
@@ -110,6 +112,15 @@ _ATTACKER_START_DELAYS = {
 
 _mixed_stop_event = threading.Event()
 _campaign_threads: list = []
+
+# Attack-detection fallback (survey safety net). After a wave starts, an
+# attacker can keep flooding while the backend sees nothing because the
+# post-stop flush left the switch without a forward rule and packet-ins
+# are throttled. The watchdog re-pokes unseen hosts so a fresh table-miss
+# reinstalls the rule and flow_stats resume.
+_WATCHDOG_INTERVAL_S = 15.0
+_WATCHDOG_WINDOW_S   = 90.0
+_STOP_SETTLE_S       = 3.0
 
 # size_min, size_max, sleep_min, sleep_max
 _ICMP_CONTINUOUS = {
@@ -222,7 +233,7 @@ def build_tree(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
 
     # Fixed host-to-switch mapping — deterministic every run.
     # h1-h19 + h22-h27 spread across s1-s7 (3-4 per switch). Note: hosts
-    # h19,h24-h27 are RETIRED (built, silent) since the 15-attacker cut.
+    # h23-h27 are RETIRED (built, silent) since the 16-attacker cut.
     # h20 server on s8 only — dedicated, no attacker on same switch.
     # h21 is the sinkhole, added separately below, skipped in this loop.
     _HOST_TO_SWITCH = {
@@ -836,6 +847,121 @@ def _attackers_of_type(atype: str) -> list:
     return sorted(n for n, v in _ATTACKER_VARIANTS.items() if v[0] == atype)
 
 
+# === ATTACK-DETECTION FALLBACK ===
+
+
+def _needs_poke(ip: str, alive, seen: set, active: set) -> bool:
+    # Only poke a host that is actively flooding, whose hping3 is confirmed
+    # alive, and that the backend still has not shown in any live evidence.
+    return ip in active and alive is True and ip not in seen
+
+
+def _evidence_ips(payload) -> set:
+    # Live detection evidence = every IP the backend is tracking right now
+    # (state machine phases + sinkhole registry).
+    ips = set()
+    for ip in (payload or {}).get("state_machine", {}):
+        ips.add(ip)
+    for entry in (payload or {}).get("deception", {}).get("active_sinkholes", []):
+        ips.add(entry.get("src_ip"))
+    return ips
+
+
+def _fetch_live_evidence():
+    # None means backend unreachable: the watchdog then cannot verify and
+    # must not poke (avoid thrashing when the backend is simply down).
+    try:
+        with urllib.request.urlopen(f"{BACKEND_API}/api/expert/live",
+                                    timeout=2) as r:
+            return _json.loads(r.read())
+    except Exception:
+        return None
+
+
+def _poke_attacker(num: int) -> None:
+    # Kill hping3; the attacker worker's restart loop relaunches it within a
+    # second, forcing a fresh table-miss so the controller reinstalls the
+    # forward rule and flow_stats reach the backend again.
+    h = net.get(f"h{num}")
+    _nsrun(h, "pkill -9 -x hping3 2>/dev/null; true", wait=True)
+    info(f"    WATCHDOG: poked h{num} ({h.IP()}) to force re-registration\n")
+
+
+def _attack_watchdog_loop(active_ips, stop, interval_s, window_s,
+                          evidence_fn=None, alive_fn=None, poke_fn=None,
+                          now_fn=None) -> None:
+    # Bounded detection watch: for up to window_s after a wave start, poll
+    # backend evidence and poke any unseen-but-alive attacker so the attack
+    # cannot run invisible (survey safety net).
+    evidence_fn = evidence_fn or _fetch_live_evidence
+    alive_fn    = alive_fn or (lambda ip: _hping_state(
+        net.get(f"h{ip.rsplit('.', 1)[1]}")))
+    poke_fn     = poke_fn or (lambda ip: _poke_attacker(
+        int(ip.rsplit(".", 1)[1])))
+    now_fn      = now_fn or time.monotonic
+    start = now_fn()
+    while not stop.is_set() and now_fn() - start < window_s:
+        payload = evidence_fn()
+        if payload is not None:
+            seen = _evidence_ips(payload)
+            for ip in sorted(active_ips):
+                if _needs_poke(ip, alive_fn(ip), seen, active_ips):
+                    info(f"    WATCHDOG: {ip} flooding but unseen; poking\n")
+                    try:
+                        poke_fn(ip)
+                    except Exception as e:
+                        info(f"    WATCHDOG: poke failed for {ip}: {e}\n")
+        if interval_s:
+            time.sleep(interval_s)
+
+
+def _start_attack_watchdog(nums, stop_event) -> None:
+    # Spawned by every campaign starter; runs the bounded detection watch.
+    active = {f"10.0.0.{n}" for n in nums}
+    threading.Thread(
+        target=_attack_watchdog_loop,
+        args=(active, stop_event),
+        kwargs={"interval_s": _WATCHDOG_INTERVAL_S,
+                "window_s":   _WATCHDOG_WINDOW_S},
+        name="attack-watchdog", daemon=True,
+    ).start()
+
+
+def _post_stop_settle() -> None:
+    # Back off after a stop so the controller clears any packet-in throttle
+    # before the next wave starts (the stop->start window is where survey
+    # attacks silently fail to register).
+    time.sleep(_STOP_SETTLE_S)
+
+
+def _active_attackers_ip_to_num() -> list:
+    return [n for n in _ATTACKER_NUMS if f"10.0.0.{n}" in _active_attackers]
+
+
+def verify_attacks() -> None:
+    # One-shot diagnostic: report per active attacker whether it is alive
+    # and whether the backend currently shows any evidence of it.
+    payload = _fetch_live_evidence()
+    if payload is None:
+        info("*** WATCHDOG: backend offline; cannot verify attacks.\n")
+        return
+    seen = _evidence_ips(payload)
+    info("\n" + "=" * 70 + "\n")
+    info("  ATTACK VERIFICATION\n")
+    info("=" * 70 + "\n")
+    for num in sorted(_active_attackers_ip_to_num()):
+        ip   = f"10.0.0.{num}"
+        alive = _hping_state(net.get(f"h{num}"))
+        if alive is not True:
+            status = "WARNING: hping3 not running"
+        elif ip not in seen:
+            status = "WARNING: NOT-FLOWING (flooding but no backend evidence)"
+        else:
+            status = "OK (flowing + detected)"
+        info(f"  h{num:<5} {ip:<14} {status}\n")
+    info("=" * 70 + "\n")
+
+
 def start_syn_flood_campaign() -> None:
     # SYN flood — every SYN-assigned attacker, continuous, watchdog
     # auto-restarts if killed
@@ -858,6 +984,7 @@ def start_syn_flood_campaign() -> None:
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
         # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
+    _start_attack_watchdog(nums, _mixed_stop_event)
     info("=" * 55 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 55 + "\n\n")
@@ -885,6 +1012,7 @@ def start_icmp_flood_campaign() -> None:
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
         # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
+    _start_attack_watchdog(nums, _mixed_stop_event)
     info("=" * 55 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 55 + "\n\n")
@@ -912,6 +1040,7 @@ def start_udp_flood_campaign() -> None:
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
         # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
+    _start_attack_watchdog(nums, _mixed_stop_event)
     info("=" * 55 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 55 + "\n\n")
@@ -965,6 +1094,7 @@ def start_mixed_campaign(stagger_s: float = 10.0) -> None:
         _campaign_threads.append(thread)
         thread.start()
 
+    _start_attack_watchdog(list(_ATTACKER_NUMS), _mixed_stop_event)
     info("=" * 65 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 65 + "\n\n")
@@ -1218,6 +1348,9 @@ def stop_all_attacks() -> None:
              f"verify loop (possible dirty criminal records; run the wipe "
              f"runbook before the next session)\n")
 
+    # Let the controller exit any packet-in throttle before the next wave
+    # starts; this window is where survey attacks silently fail to register.
+    _post_stop_settle()
     info("*** Attack stopped, forwarding restored.\n")
 
 
@@ -1628,6 +1761,7 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
     info("  py flash_crowd()                       # 30s spike to server\n")
     info("  py flash_crowd(duration=60)            # custom duration\n")
     info("  py check_traffic()                     # live host status\n")
+    info("  py verify_attacks()                    # attacker detection fallback check\n")
     info("  py reset_flow_epochs()                 # fresh flow counters\n")
     info("  py watch_pipeline()                    # live ML scores\n")
     info("  py start_baseline_traffic()            # restart baseline\n")
@@ -1637,6 +1771,11 @@ def _print_banner(distribution: list, edge_switches: list) -> None:
 # === ENTRY POINT ===
 
 if __name__ == "__main__":
+    # Lazy, main-only: keeps benchmark importable when run as the script
+    # while never mutating sys.path / the topology namespace on plain import.
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import benchmark  # topology/benchmark.py (separate file, no `import topology`)
     setLogLevel("info")
 
     net, hosts, edge_switches, distribution = build_tree()
