@@ -937,10 +937,15 @@ function renderMLPanel(ifData, rfData, teaData) {
   const normalPct = (dist['Normal'] || 0) / total * 100;
   const attackTotal = synPct + icmpPct + udpPct + uncertainPct;
 
+  // Frontend-only: when IF says normal, show green Normal regardless of RF's stale Uncertain
+  const showNormalIdle = !isAnom;
+
   let rfHtml = `<div class="ml-section">
     <div class="ml-section-title"><span class="accent-dot rf-dot"></span>Random Forest (RF) Composition</div>
     <div class="rf-segmented-bar">
-      ${attackTotal > 0 ? `
+      ${showNormalIdle ? `
+      <div class="rf-segment normal" style="width:100%">100%</div>
+      ` : attackTotal > 0 ? `
       ${synPct > 0 ? `<div class="rf-segment syn"    style="width: ${synPct}%">${synPct > 10 ? synPct.toFixed(0) + '%' : ''}</div>` : ''}
       ${icmpPct > 0 ? `<div class="rf-segment icmp"   style="width: ${icmpPct}%">${icmpPct > 10 ? icmpPct.toFixed(0) + '%' : ''}</div>` : ''}
       ${udpPct > 0 ? `<div class="rf-segment udp"    style="width: ${udpPct}%">${udpPct > 10 ? udpPct.toFixed(0) + '%' : ''}</div>` : ''}

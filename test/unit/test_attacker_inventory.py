@@ -45,14 +45,13 @@ topo = _load_topology()
 def test_set_sizes_and_membership():
     assert set(topo._ATTACKER_NUMS) == {
         6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 22}
-    assert set(topo._RETIRED_NUMS) == {23, 24, 25, 26, 27}
-    assert set(topo._ATTACKER_POOL) == topo._ATTACKER_NUMS | topo._RETIRED_NUMS
+    assert set(topo._ATTACKER_POOL) == set(topo._ATTACKER_NUMS)
 
 
 def test_pairwise_disjoint_full_coverage():
-    a, l, r = topo._ATTACKER_NUMS, topo._LEGIT_NUMS, topo._RETIRED_NUMS
-    assert not (a & l) and not (a & r) and not (l & r)
-    assert set(a | l | r | {20, 21}) == set(range(1, 28))
+    a, l = topo._ATTACKER_NUMS, topo._LEGIT_NUMS
+    assert not (a & l)
+    assert set(a | l | {20, 21}) == set(range(1, 23))
 
 
 def test_variants_in_lockstep_with_active_set():

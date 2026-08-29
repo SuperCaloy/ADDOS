@@ -232,7 +232,8 @@ def _reset_reputation_keep_offences(topo):
     # Roster sets hold host NUMBERS (hN); the backend schema keys rows by
     # src_ip strings, so convert via the topology's fixed 10.0.0.N mapping.
     scoped = {f"10.0.0.{n}" for n in
-              (set(topo._ATTACKER_NUMS) | set(topo._RETIRED_NUMS)
+              (set(topo._ATTACKER_NUMS)
+               | set(getattr(topo, "_RETIRED_NUMS", ()))
                | set(topo._LEGIT_NUMS))}
     # Absolute path anchored to project root: backend's DB is resolved the
     # same way, and a relative "logs/ddos.db" silently no-ops if CWD differs
