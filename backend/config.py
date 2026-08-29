@@ -96,6 +96,11 @@ FLOOD_UDP_WINDOW_S  = 1.0
 # --- Temporal Entropy Analysis (TEA) ---
 # Rolling window size per switch — adaptive thresholds learned from traffic
 TEA_WINDOW_SIZE = 10
+# Hard floor on samples before a baseline may lock in. At n=10-15 the sample
+# variance carries ~40-47% relative error (NIST chi-square); 30 is the
+# practical floor at the 0.5s snapshot cadence. See
+# notes/tasks/tea-sample-size-tuning-plan.md.
+TEA_LEARN_MIN_SAMPLES = 30
 
 # --- TEA dual feedback hysteresis ---
 # IF side: per-flow, streak-only, NEVER locks baselines by itself.

@@ -5,6 +5,7 @@ import numpy as np
 from collections import deque
 from backend.config import (
     TEA_WINDOW_SIZE,
+    TEA_LEARN_MIN_SAMPLES,
     TEA_IF_UNLOCK_STREAK,
     TEA_TEA_LOCK_STREAK,
     TEA_TEA_UNLOCK_STREAK,
@@ -30,7 +31,7 @@ def _push_expert_event(payload: dict) -> None:
         pass
 
 # === ADAPTIVE TEA CONSTANTS ===
-TEA_LEARN_INTERVALS   = 15
+TEA_LEARN_INTERVALS   = 60
 TEA_ATTACK_SIGMA      = 2.5
 TEA_CROWD_SIGMA       = 1.5
 TEA_MIN_CROWD_DIVERSITY = 1.0
@@ -79,7 +80,7 @@ class _AdaptiveBaseline:
 
     def _variance_stable(self) -> bool:
         n = len(self._samples)
-        if n < 10:
+        if n < TEA_LEARN_MIN_SAMPLES:
             return False
         recent   = self._samples[-5:]
         older    = self._samples[-10:-5]
@@ -90,12 +91,24 @@ class _AdaptiveBaseline:
     def push(self, value: float, force: bool = False,
              max_drift_frac: float | None = None) -> None:
         if not self._learned:
+            # Learning-phase robust rejection: the steady-state EMA already
+            # drops |z| >= 3 samples so an attack cannot pull the baseline
+            # toward itself. The warmup must not be a back door: once enough
+            # samples give a provisional scale, the same rule applies here so
+            # an attack during the (longer) learning window is never absorbed.
+            if len(self._samples) >= TEA_LEARN_MIN_SAMPLES // 2:
+                prov_mean = sum(self._samples) / len(self._samples)
+                prov_var  = sum((x - prov_mean) ** 2 for x in self._samples) / len(self._samples)
+                prov_std  = math.sqrt(max(prov_var, 1e-9))
+                if prov_std > 0 and abs(value - prov_mean) / prov_std >= TEA_ROBUST_REJECT_SIGMA:
+                    log.debug("TEA learning reject: value=%.4f z>=%.1f (warmup)", value, TEA_ROBUST_REJECT_SIGMA)
+                    return
             self._samples.append(value)
             ready = (
                 len(self._samples) >= self._learn_n or
                 self._variance_stable()
             )
-            if ready and len(self._samples) >= 10:
+            if ready and len(self._samples) >= TEA_LEARN_MIN_SAMPLES:
                 self._mean     = sum(self._samples) / len(self._samples)
                 variance_vals  = [(x - self._mean) ** 2 for x in self._samples]
                 self._variance = sum(variance_vals) / len(variance_vals)
@@ -238,8 +251,8 @@ class _GlobalEntropyState:
         )
 
 
-IP_PROFILE_MIN_SAMPLES = 3
-IP_PROFILE_WINDOW      = 20
+IP_PROFILE_MIN_SAMPLES = 10
+IP_PROFILE_WINDOW      = 40
 
 class _IpEntropyProfile:
     def __init__(self):

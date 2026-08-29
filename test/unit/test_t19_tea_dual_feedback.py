@@ -33,7 +33,7 @@ def _legit_flow(seed: int) -> dict:
     }
 
 
-def _learn(ea: EntropyAnalyzer, intervals: int = 16) -> None:
+def _learn(ea: EntropyAnalyzer, intervals: int = 65) -> None:
     """Push enough legit intervals for all four baselines to learn."""
     for i in range(intervals):
         ea._last_eval_time = 0.0
