@@ -76,7 +76,7 @@ def _uniform_flow(i: int) -> dict:
     return f
 
 
-def _learn_legit(ea: EntropyAnalyzer, intervals: int = 16) -> None:
+def _learn_legit(ea: EntropyAnalyzer, intervals: int = 65) -> None:
     """Push enough diverse legit intervals through real update() calls."""
     res = {}
     for i in range(intervals):

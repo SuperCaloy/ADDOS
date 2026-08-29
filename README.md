@@ -121,7 +121,7 @@ Every 0.5 seconds (buffered up to 2000 flows) it builds a snapshot with four agg
 
 Each metric gets its own adaptive EMA baseline (`_AdaptiveBaseline`, lines 46-163):
 
-- During the learning phase, samples accumulate until n >= 15 or variance stabilizes (variance of the last 5 vs prior 5 samples differing by less than 0.01), with a minimum of 10 samples.
+- During the learning phase, samples accumulate until n >= 60 or variance stabilizes (variance of the last 5 vs prior 5 samples differing by less than 0.01), with a minimum of 30 samples. The minimum was raised from 10 because at n=10-15 the sample variance carries ~40-47% relative error, too loose for the dynamic sigmas to be trustworthy (see `notes/tasks/tea-sample-size-tuning-plan.md`). The learning phase also applies the same `|z| >= 3.0` robust rejection as steady state once enough samples exist, so an attack during the warmup cannot be absorbed into the baseline.
 - Afterwards the mean and variance track traffic with an exponentially weighted moving average whose step size adapts to noise: `alpha = ALPHA_MAX - cv x (ALPHA_MAX - ALPHA_MIN)` clamped to `[0.02, 0.10]`, where `cv` is the coefficient of variation. Noisy baselines get a small step size and adapt slowly; stable baselines get a larger one.
 - Updates with `|z| >= 3.0` are rejected, so an ongoing attack cannot pull the baseline toward itself.
 - During a confirmed attack the baselines lock (freeze); ten consecutive IF-normal evaluations unlock them again.
@@ -137,7 +137,7 @@ How TEA affects outcomes:
 
 - A high-confidence TEA attack fast-tracks priority: Low/Medium detections are upgraded to High, skipping quarantine observation (see [priority](#severity-and-priority-classification)).
 - When TEA judges the deviation consistent with a flash crowd rather than an attack, the decision engine logs the event but takes no mitigation action ("Logged (flash crowd, no mitigation)").
-- Per-IP profiles (`_IpEntropyProfile`) additionally classify individual senders as `attack` / `normal` / `uncertain` from 20-sample windows of pps/bps using normalized Shannon entropy of the rate samples (repetitive, low-entropy sending reads as attack), trend analysis, and adaptive thresholds derived from the coefficient of variation.
+- Per-IP profiles (`_IpEntropyProfile`) additionally classify individual senders as `attack` / `normal` / `uncertain` from 40-sample windows of pps/bps (minimum 10 samples before classifying) using normalized Shannon entropy of the rate samples (repetitive, low-entropy sending reads as attack), trend analysis, and adaptive thresholds derived from the coefficient of variation.
 - The formal mitigation gate currently passes everything through and only counts "would-block" advisories, so this behavior can be monitored without affecting live mitigation.
 
 ### Isolation Forest anomaly scoring

@@ -81,7 +81,7 @@ def _mixed_flow(seed: int) -> dict:
     }
 
 
-def _learn_diverse(ea: EntropyAnalyzer, intervals: int = 16) -> None:
+def _learn_diverse(ea: EntropyAnalyzer, intervals: int = 65) -> None:
     res = {}
     for i in range(intervals):
         ea._last_eval_time = 0.0
