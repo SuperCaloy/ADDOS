@@ -170,7 +170,7 @@ var ExpertStages = {
       title: 'Mininet Network Topology',
       file: 'topology/topology.py',
       desc: 'Emulated network environment providing OpenFlow-capable virtual switches and hosts. Generates both legitimate IP/TCP/UDP traffic and high-volume SYN/UDP/ICMP flood patterns from designated attacker hosts, enabling safe pipeline testing without production network exposure.',
-      input: '1 core switch (s0) plus 8 edge switches\n27 hosts (h1 to h27) plus sinkhole h21\nh1 to h5: legit TCP/UDP/ICMP traffic\nh6 to h18 + h22 to h23: 15 attackers, SYN/ICMP/UDP (h16 SYN/5432, h22 SYN/3389 repurposed; h19,h24-h27 retired silent)\nh20: server (10.0.0.20), whitelisted, never scored',
+      input: '1 core switch (s0) plus 8 edge switches\n22 hosts in play (5 legit + 15 attackers + h20 server + h21 sinkhole)\nh1 to h5: legit TCP/UDP/ICMP traffic\nh6 to h19 + h22: 15 attackers, SYN/ICMP/UDP\nh20: server (10.0.0.20), whitelisted, never scored',
       output: 'Raw packets crossing\nOpenFlow switches toward h20'
     },
     ryu: {
@@ -927,27 +927,34 @@ function renderMLPanel(ifData, rfData, teaData) {
   if (ifWrap) ifWrap.innerHTML = ifHtml;
 
   // RF Traffic Composition Bar
-  const dist = rfData.class_distribution || { 'SYN Flood': 0, 'ICMP Flood': 0, 'UDP Flood': 0, 'Normal': 0 };
+  const dist = rfData.class_distribution || { 'SYN Flood': 0, 'ICMP Flood': 0, 'UDP Flood': 0, 'Uncertain': 0 };
   const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
 
   const synPct = (dist['SYN Flood'] || 0) / total * 100;
   const icmpPct = (dist['ICMP Flood'] || 0) / total * 100;
   const udpPct = (dist['UDP Flood'] || 0) / total * 100;
+  const uncertainPct = (dist['Uncertain'] || 0) / total * 100;
   const normalPct = (dist['Normal'] || 0) / total * 100;
+  const attackTotal = synPct + icmpPct + udpPct + uncertainPct;
 
   let rfHtml = `<div class="ml-section">
     <div class="ml-section-title"><span class="accent-dot rf-dot"></span>Random Forest (RF) Composition</div>
     <div class="rf-segmented-bar">
-      ${normalPct > 0 ? `<div class="rf-segment normal" style="width: ${normalPct}%">${normalPct > 10 ? normalPct.toFixed(0) + '%' : ''}</div>` : ''}
+      ${attackTotal > 0 ? `
       ${synPct > 0 ? `<div class="rf-segment syn"    style="width: ${synPct}%">${synPct > 10 ? synPct.toFixed(0) + '%' : ''}</div>` : ''}
       ${icmpPct > 0 ? `<div class="rf-segment icmp"   style="width: ${icmpPct}%">${icmpPct > 10 ? icmpPct.toFixed(0) + '%' : ''}</div>` : ''}
       ${udpPct > 0 ? `<div class="rf-segment udp"    style="width: ${udpPct}%">${udpPct > 10 ? udpPct.toFixed(0) + '%' : ''}</div>` : ''}
+      ${uncertainPct > 0 ? `<div class="rf-segment uncertain" style="width: ${uncertainPct}%">${uncertainPct > 10 ? uncertainPct.toFixed(0) + '%' : ''}</div>` : ''}
+      ` : `
+      <div class="rf-segment normal" style="width:100%">${normalPct > 0 ? 'Normal' : 'No data'}</div>
+      `}
     </div>
     <div class="rf-legend">
-      <div class="rf-legend-item"><span class="rf-legend-dot" style="background:var(--green)"></span>Normal</div>
       <div class="rf-legend-item"><span class="rf-legend-dot" style="background:var(--amber)"></span>SYN</div>
       <div class="rf-legend-item"><span class="rf-legend-dot" style="background:#f472b6"></span>ICMP</div>
       <div class="rf-legend-item"><span class="rf-legend-dot" style="background:#60b4ff"></span>UDP</div>
+      <div class="rf-legend-item"><span class="rf-legend-dot" style="background:var(--sub2,#6b7280)"></span>Uncertain</div>
+      <div class="rf-legend-item"><span class="rf-legend-dot" style="background:#2f9e6e"></span>Normal</div>
     </div>
   </div>`;
   if (rfWrap) rfWrap.innerHTML = rfHtml;
