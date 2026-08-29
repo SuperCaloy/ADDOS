@@ -347,7 +347,6 @@ var ExpertPipeline = {
     { from: 'if_node', to: 'rf' },
     { from: 'rf', to: 'decision' },
     { from: 'decision', to: 'ryu', kind: 'enforce' },
-    { from: 'if_node', to: 'entropy', feedback: true, kind: 'learn', curve: -60 },
     { from: 'decision', to: 'deception', kind: 'redirect' },
     { from: 'decision', to: 'resource_guard' }
   ],
@@ -361,8 +360,7 @@ var ExpertPipeline = {
     this.container = this.canvas.parentElement;
 
     this.reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    this.isLightMode = document.body.classList.contains('light') ||
-      window.matchMedia('(prefers-color-scheme: light)').matches;
+    this.isLightMode = document.body.classList.contains('light');
 
     for (var key in this.nodes) {
       this.nodes[key].colorHex = ExpertStages.data[key].color;
@@ -546,6 +544,7 @@ var ExpertPipeline = {
 
   drawScene: function(timestamp) {
     if (!timestamp) timestamp = performance.now();
+    this.isLightMode = document.body.classList.contains('light');
     var elapsed = timestamp - this._lastFrameTime;
     if (elapsed < this._frameInterval) {
       this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
@@ -581,8 +580,6 @@ var ExpertPipeline = {
           ctx.strokeStyle = redirectActive
             ? (this.isLightMode ? 'rgba(139,92,246,0.7)' : 'rgba(139,92,246,0.6)')
             : (this.isLightMode ? 'rgba(139,92,246,0.45)' : 'rgba(139,92,246,0.4)');
-        } else if (path.kind === 'learn') {
-          ctx.strokeStyle = this.isLightMode ? 'rgba(13,148,136,0.5)' : 'rgba(20,184,166,0.4)';
         } else {
           ctx.strokeStyle = this.isLightMode ? 'rgba(180,83,9,0.5)' : 'rgba(245,158,11,0.4)';
         }
@@ -617,10 +614,8 @@ var ExpertPipeline = {
         ctx.font = '600 11px "Fira Code", monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        var label = path.kind === 'learn' ? 'learns baseline' : path.kind === 'redirect' ? 'redirects to sinkhole' : 'Sends decisions';
-        var color = path.kind === 'learn'
-          ? (this.isLightMode ? 'rgba(13,148,136,0.8)' : 'rgba(20,184,166,0.6)')
-          : path.kind === 'redirect'
+        var label = path.kind === 'redirect' ? 'redirects to sinkhole' : 'Sends decisions';
+        var color = path.kind === 'redirect'
           ? (this.isLightMode ? 'rgba(139,92,246,0.8)' : 'rgba(139,92,246,0.6)')
           : (this.isLightMode ? 'rgba(180,83,9,0.8)' : 'rgba(245,158,11,0.6)');
         ctx.fillStyle = color;
