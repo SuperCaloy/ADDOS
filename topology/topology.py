@@ -77,6 +77,18 @@ _ATTACKER_START_DELAYS = {
     num: round(random.uniform(0.1, 0.6), 2) for num in _ATTACKER_NUMS
 }
 
+# Attack type flags for randomized mixed campaigns
+_ATTACK_TYPE_FLAGS = {
+    "SYN":  "-S -p {port} --flood",
+    "UDP":  "--udp -p {port} --flood --data 1024",
+    "ICMP": "--icmp --flood --data 1024",
+}
+_ATTACK_TYPE_PORTS = {
+    "SYN":  [80, 443, 8080, 5432, 3389, 25, 1900],
+    "UDP":  [53, 123, 1900, 11211, 161, 514],
+    "ICMP": [0],
+}
+
 # Attackers run pure continuous --flood with no rest cycling.
 
 _mixed_stop_event = threading.Event()
@@ -632,29 +644,34 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event,
 
 
 def launch_attack(sustained: bool = True) -> None:
-# Launch all attackers via worker threads that monitor hping3 and keep the flood running until stop_all_attacks(). The sustained flag is kept for API compatibility but always runs a continuous flood.
+# Launch all attackers with randomized types via worker threads that monitor hping3 and keep the flood running until stop_all_attacks().
     global _mixed_stop_event, _campaign_threads
     _stop_active_workers()
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
-    info(f"*** Sustained DDoS (thread-managed), all attackers -> {SERVER_IP}\n\n")
+    # Randomly assign attack types: 5 SYN, 5 UDP, 5 ICMP
+    assignments = _randomize_mixed_attacks()
 
-    for num in sorted(_ATTACKER_VARIANTS.keys()):
-        atype, flags, _, _ = _ATTACKER_VARIANTS[num]
+    info(f"*** Sustained DDoS (randomized), all attackers -> {SERVER_IP}\n\n")
+
+    for num in sorted(assignments.keys()):
+        atype = assignments[num]
+        flags = _ATTACK_TYPE_FLAGS[atype].format(
+            port=random.choice(_ATTACK_TYPE_PORTS[atype])
+        )
         info(f"    h{num} [{atype}] {flags}\n")
 
-        # Thread watches hping3 — restarts if it dies unexpectedly
         t = threading.Thread(
-            target=_attacker_cycle_worker,
-            args=(num, _mixed_stop_event),
+            target=_attacker_cycle_worker_randomized,
+            args=(num, _mixed_stop_event, atype),
             name=f"attacker-h{num}",
             daemon=True,
         )
         _campaign_threads.append(t)
         t.start()
 
-        # 100ms stagger — prevents OVS from being hit simultaneously
+        # 100ms stagger
         time.sleep(0.1)
 
     info("\n    -> Use  py stop_all_attacks()  to stop.\n")
@@ -930,41 +947,44 @@ def start_udp_flood_campaign() -> None:
 
 
 def start_mixed_campaign(stagger_s: float = 10.0) -> None:
-# Launch all attackers in staged vector waves: SYN at t+0, then UDP and ICMP each after an independent random gap, so vectors never start on the same second. Within a wave, hosts keep their own start jitter; floods are continuous with no rest.
+# Launch all attackers with randomized types, no two same at a time. Each attacker gets a random type (SYN/UDP/ICMP) with balanced distribution. Staggered start prevents simultaneous launches.
     global _mixed_stop_event, _campaign_threads
     _stop_active_workers()
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
-    waves = []            # (attack_type, wave start offset in seconds)
+    # Randomly assign attack types: 5 SYN, 5 UDP, 5 ICMP
+    assignments = _randomize_mixed_attacks()
+
+    info("\n" + "=" * 65 + "\n")
+    info("  [MIXED CAMPAIGN]  All 15 attackers  |  Randomized vectors\n")
+    info("=" * 65 + "\n")
+    info(f"  {'HOST':<8} {'IP':<16} {'TYPE':<6} {'FLAGS'}\n")
+    info("  " + "-" * 60 + "\n")
+
+    # Build schedule with staggered delays per type group
+    schedule = {}
     base = 0.0
     for i, atype in enumerate(("SYN", "UDP", "ICMP")):
         if i:
             base += random.uniform(stagger_s * 0.5, stagger_s)
-        waves.append((atype, base))
+        for num, assigned_type in assignments.items():
+            if assigned_type == atype:
+                schedule[num] = base + _ATTACKER_START_DELAYS.get(num, 0)
 
-    info("\n" + "=" * 65 + "\n")
-    info("  [MIXED CAMPAIGN]  All 16 attackers  |  Staged vector waves\n")
-    info("=" * 65 + "\n")
-    info(f"  {'WAVE':<6} {'HOSTS':<28} FLOOD START\n")
-    info("  " + "-" * 66 + "\n")
-
-    schedule = {}         # attacker num -> absolute flood-start delay
-    for atype, t_start in waves:
-        nums = _attackers_of_type(atype)
-        hosts = " ".join(f"h{n}" for n in nums)
-        info(f"  {atype:<6} {hosts:<28} t+{t_start:.1f}s\n")
-        for n in nums:
-            schedule[n] = t_start + _ATTACKER_START_DELAYS.get(n, 0)
-
+    # Launch threads
     for num in sorted(schedule):
         h = net.get(f"h{num}")
-        atype, flags, _, _ = _ATTACKER_VARIANTS[num]
+        atype = assignments[num]
+        flags = _ATTACK_TYPE_FLAGS[atype].format(
+            port=random.choice(_ATTACK_TYPE_PORTS[atype])
+        )
         delay = schedule[num]
-        info(f"  h{num:<5} ({h.IP()})  {atype:<8} {flags:<40} +{delay:.1f}s\n")
+        info(f"  h{num:<5} ({h.IP()})  {atype:<6} {flags}  +{delay:.1f}s\n")
+
         thread = threading.Thread(
-            target=_attacker_cycle_worker,
-            args=(num, _mixed_stop_event),
+            target=_attacker_cycle_worker_randomized,
+            args=(num, _mixed_stop_event, atype),
             kwargs={"delay": delay},
             name=f"attacker-h{num}",
             daemon=True,
@@ -976,6 +996,66 @@ def start_mixed_campaign(stagger_s: float = 10.0) -> None:
     info("=" * 65 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 65 + "\n\n")
+
+
+def _randomize_mixed_attacks() -> dict[int, str]:
+    """Randomly assign attack types to attackers, no two same at a time.
+
+    Returns dict mapping attacker num -> attack type (SYN/UDP/ICMP).
+    Constraint: at most ceil(N/3) attackers per type, evenly distributed.
+    """
+    nums = sorted(_ATTACKER_NUMS)
+    n = len(nums)
+    per_type = (n + 2) // 3  # ceil division: 15 attackers -> 5 per type
+
+    # Create pool: 5 SYN, 5 UDP, 5 ICMP
+    pool = ["SYN"] * per_type + ["UDP"] * per_type + ["ICMP"] * per_type
+    pool = pool[:n]  # trim to exact count
+    random.shuffle(pool)
+
+    return dict(zip(nums, pool))
+
+
+def _hping_cmd_randomized(attacker_num: int, target: str, atype: str,
+                          count: int = None) -> str:
+    """Build hping3 command for a given attack type (randomized campaigns)."""
+    port = random.choice(_ATTACK_TYPE_PORTS[atype])
+    flags = _ATTACK_TYPE_FLAGS[atype].format(port=port)
+
+    if count:
+        return f"hping3 {flags} -c {count} {target}"
+    return f"hping3 {flags} {target} > /dev/null 2>&1"
+
+
+def _attacker_cycle_worker_randomized(num: int, stop_event: threading.Event,
+                                       atype: str, delay: float = 0.0) -> None:
+    """Continuous flood with randomized attack type override."""
+    h  = net.get(f"h{num}")
+    ip = h.IP()
+
+    # Wait for the stagger delay
+    waited = 0.0
+    while waited < delay:
+        if stop_event.is_set():
+            return
+        time.sleep(0.1)
+        waited += 0.1
+
+    cmd = _hping_cmd_randomized(num, SERVER_IP, atype)
+
+    _notify_attack_start(ip, atype)
+    _active_attackers.add(ip)
+
+    # Restart loop
+    while not stop_event.is_set():
+        _nsrun(h, cmd)
+        while not stop_event.is_set():
+            time.sleep(1)
+            if _hping_state(h) is False:
+                break
+
+    _nsrun(h, "pkill -9 -x hping3 2>/dev/null; true", wait=True)
+    _notify_attack_stop(ip)
 
 
 
@@ -1576,13 +1656,13 @@ def _print_banner(edge_switches: list) -> None:
     info("  py launch_icmp_flood_sustained()       # h11\n")
     info("  py launch_udp_flood_sustained()        # h7\n\n")
     info("  ── ALL ATTACKERS ─────────────────────────────────────────────\n")
-    info("  py launch_attack()                     # all 15, sustained\n")
+    info("  py launch_attack()                     # all 15, randomized types\n")
     info("  py launch_attack(sustained=False)      # all 15, burst\n\n")
     info("  ── CAMPAIGNS ─────────────────────────────────────────────────\n")
     info("  py start_syn_flood_campaign()          # all SYN attackers\n")
     info("  py start_icmp_flood_campaign()         # all ICMP attackers\n")
     info("  py start_udp_flood_campaign()          # all UDP attackers\n")
-    info("  py start_mixed_campaign()              # all 15, staged vector waves\n")
+    info("  py start_mixed_campaign()              # all 15, randomized types\n")
     info("  py start_stress_test()                 # all 15, rand-source, memory stress\n\n")
     info("  ── STOP ──────────────────────────────────────────────────────\n")
     info("  py stop_all_attacks()                  # kill + flush + clear\n")

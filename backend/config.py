@@ -95,12 +95,13 @@ FLOOD_UDP_WINDOW_S  = 1.0
 
 # --- Temporal Entropy Analysis (TEA) ---
 # Rolling window size per switch — adaptive thresholds learned from traffic
-TEA_WINDOW_SIZE = 10
+TEA_WINDOW_SIZE = 500
+
+TEA_LEARN_INTERVALS = 360
 # Hard floor on samples before a baseline may lock in. At n=10-15 the sample
 # variance carries ~40-47% relative error (NIST chi-square); 30 is the
 # practical floor at the 0.5s snapshot cadence. See
-# notes/tasks/tea-sample-size-tuning-plan.md.
-TEA_LEARN_MIN_SAMPLES = 30
+TEA_LEARN_MIN_SAMPLES = 100
 
 # --- TEA dual feedback hysteresis ---
 # IF side: per-flow, streak-only, NEVER locks baselines by itself.
@@ -130,10 +131,14 @@ TEA_PPS_SURGE_SIGMA = 2.0               # absolute pps z-score vs learned baseli
                                         # (2.0: real floods are orders above baseline;
                                         # a 1-sigma legit traffic ramp must not latch)
 # --- TEA supervised relearn (P2) ---
-TEA_RELEARN_STABLE_INTERVALS = 6       # stable verdicts while latched before relearn (~3s)
-TEA_RELEARN_MAX_DRIFT_FRAC = 0.10      # max per-interval baseline mean movement (10%)
-TEA_RELEARN_ALPHA = 0.10               # relearn EMA alpha; the drift cap is the safety,
+TEA_RELEARN_STABLE_INTERVALS = 8       # stable verdicts while latched before relearn (~4s)
+TEA_RELEARN_MAX_DRIFT_FRAC = 0.01      # max per-interval baseline mean movement (1%)
+TEA_RELEARN_ALPHA = 0.15               # relearn EMA alpha; the drift cap is the safety,
                                        # alpha only removes the slow EMA tail
+TEA_RELEARN_MIN_CONFIDENCE = "moderate" # only relearn on moderate-confidence (not high/low)
+TEA_RELEARN_MAX_IF_ANOMALY_RATE = 0.3   # block relearn if IF anomaly rate > 30%
+TEA_RELEARN_MAX_CUMULATIVE_DRIFT = 0.20 # max total drift per relearn session (20%)
+TEA_RELEARN_BASELINE_DISTANCE_MAX = 2.0 # reject relearn if new baseline > 2x original
 # --- TEA latch max-hold valve (P3) ---
 TEA_LATCH_MAX_HOLD_S = 90.0
 TEA_LATCH_HOLD_IF_GRACE_S = 30.0
@@ -142,6 +147,26 @@ TEA_IF_RATE_WINDOW = 20
 TEA_IF_ANOMALY_RATE_BLOCK = 0.3
 # --- TEA telemetry validation (P6) ---
 TEA_EVAL_SEQ_MAX_JUMP = 1000            # reject absurd dedup-blackout seq jumps
+
+# --- TEA detection thresholds (moved from entropy_analyzer.py for single source of truth) ---
+# z-score for attack variance collapse detection
+TEA_ATTACK_SIGMA = 2.5
+# z-score for flash-crowd/volume surge detection
+TEA_CROWD_SIGMA = 1.5
+# EMA learning rate range for baseline adaptation
+TEA_EMA_ALPHA_MIN = 0.02
+TEA_EMA_ALPHA_MAX = 0.10
+# Robust scale estimator rejection threshold (MAD-based, 3.0-3.5; literature Apply)
+TEA_ROBUST_REJECT_SIGMA = 3.5
+
+# --- TEA supervised relearn / hysteresis (moved from entropy_analyzer.py) ---
+# Idle time to force-unlock latch (literature Apply: 30-60s)
+TEA_IDLE_UNLOCK_S = 45.0
+# Per-IP profile TTL (literature Apply: 60-120s)
+TEA_IP_PROFILE_TTL_S = 90
+# Bounded max-hold safety valve (literature Apply: 90-120s)
+TEA_LATCH_MAX_HOLD_S = 105.0
+
 FLOW_FIELD_MAX = 1e9                    # clamp ceiling for pps/bps/count fields
 
 # --- API ---

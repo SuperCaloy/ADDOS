@@ -96,18 +96,18 @@ def test_no_hardcoded_campaign_rosters_in_source():
         assert lit not in src
 
 
-def test_mixed_campaign_launches_type_waves():
-    # Staged-wave realism (2026-08-27): the mixed campaign must launch vector
-    # WAVES derived from _attackers_of_type (one per attack type, staggered
-    # start times) instead of spawning all 15 hosts simultaneously.
+def test_mixed_campaign_launches_randomized():
+    # Randomized realism (2026-08-29): the mixed campaign must randomly assign
+    # attack types (SYN/UDP/ICMP) to attackers with no two same at a time.
     import re
     src = open("topology/topology.py").read()
     i = src.find("def start_mixed_campaign")
     body = src[i:src.find("\ndef ", i)]
-    # all three vectors enumerated as waves, rosters via the helper
-    assert '("SYN", "UDP", "ICMP")' in body
-    assert re.search(r"\w+\s*=\s*_attackers_of_type\(", body)
+    # randomized type assignment
+    assert "_randomize_mixed_attacks()" in body
     assert "_ATTACKER_START_DELAYS" in body
+    # uses randomized worker
+    assert "_attacker_cycle_worker_randomized" in body
 
 
 def test_attacker_worker_accepts_delay_override():

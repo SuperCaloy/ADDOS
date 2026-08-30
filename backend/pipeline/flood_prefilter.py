@@ -10,6 +10,27 @@ from backend.config import (
 import logging
 log = logging.getLogger(__name__)
 
+
+class DynamicThreshold:
+    """EWMA-based dynamic threshold for DDoS detection."""
+
+    def __init__(self, alpha: float = 0.1, multiplier: float = 3.0,
+                 initial: float = 50.0, floor: float = 25.0):
+        self.alpha = alpha
+        self.multiplier = multiplier
+        self.ewma = initial
+        self.floor = floor
+
+    def update(self, current_pps: float) -> None:
+        self.ewma = (1 - self.alpha) * self.ewma + self.alpha * current_pps
+
+    def threshold(self) -> float:
+        return max(self.ewma * self.multiplier, self.floor)
+
+    def tripped(self, current_pps: float) -> bool:
+        return current_pps > self.threshold()
+
+
 # proto_key → (limit, window_seconds)
 _PROTO_CONFIG = {
     "SYN":  (FLOOD_SYN_LIMIT,  FLOOD_SYN_WINDOW_S),

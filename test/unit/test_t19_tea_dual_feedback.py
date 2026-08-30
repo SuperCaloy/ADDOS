@@ -33,8 +33,15 @@ def _legit_flow(seed: int) -> dict:
     }
 
 
-def _learn(ea: EntropyAnalyzer, intervals: int = 65) -> None:
-    """Push enough legit intervals for all four baselines to learn."""
+def _learn(ea: EntropyAnalyzer, intervals: int = 450) -> None:
+    """Push enough legit intervals for all five baselines to learn.
+
+    Need more than TEA_LEARN_INTERVALS (360) because:
+    1. is_learned is checked at START of update(), so interval N reflects N-1 state
+    2. Learning-phase robust rejection drops outlier samples, so actual
+       sample count < interval count. Push 450 to ensure all baselines
+       reach 360 accepted samples.
+    """
     for i in range(intervals):
         ea._last_eval_time = 0.0
         flows = [_legit_flow(i * 8 + j) for j in range(9)]
@@ -403,9 +410,10 @@ class TestAttackStopRecovery:
         ea = EntropyAnalyzer()
         ea.feedback_tea(True, "high", eval_seq=1)
         assert ea.is_locked is True
-        # ZMQ receiver calls idle_tick() every second; simulate 31 silent ones.
+        # ZMQ receiver calls idle_tick() every second; simulate past the configured idle unlock threshold.
+        from backend import config as cfg
         base = time.monotonic()
-        for s in range(31):
+        for s in range(int(cfg.TEA_IDLE_UNLOCK_S) + 2):
             ea.idle_tick(now=base + float(s))
         assert ea.attack_latched is False
         assert ea.is_locked is False

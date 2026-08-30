@@ -33,7 +33,7 @@ STATS_INTERVAL = 1.0
 FLOW_EPOCH_S = 600
 
 # Young-entry scoring suppression: lifetime-average pps/bps on a freshly-installed entry explode (tiny age denominator) and score false positives for benign hosts after every epoch delete/flush/reinstall. An entry is not pushed to ML until it is FRESH_SKIP_S seconds old or carries YOUNG_MIN_PKTS packets; real floods exceed 200 packets in under a second, so detection latency is unchanged.
-FRESH_SKIP_S = 10
+FRESH_SKIP_S = 2
 YOUNG_MIN_PKTS = 200
 
 # Over-limit install dedup/cap: a packet-in from a src whose forward rule is still live is cheap-dropped instead of paying parse + FlowMod serialization again. New unique-src installs are capped per switch per second during storms.
