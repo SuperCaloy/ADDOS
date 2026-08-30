@@ -412,7 +412,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     _tea_attack = _tea_result.get("is_attack_pattern", False)
 
     # High confidence attack -> ensure High priority (fast-track)
-    if _tea_attack and _tea_confidence == "high":
+    if _tea_attack and _tea_confidence == "high" and if_score >= loader.if_threshold:
         if priority in ("Low", "Medium"):
             priority = "High"
             log.info("TEA high-confidence fast-track: %s -> High priority", src_ip)

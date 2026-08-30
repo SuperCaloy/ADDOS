@@ -81,3 +81,4 @@ ENV/
 # Cache / temp
 .cache/
 tmp/
+.claude
