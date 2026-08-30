@@ -79,6 +79,11 @@ class FloodPreFilter:
             lambda: defaultdict(_ProtoWindow)
         )
 
+        # src_ip → proto_key → DynamicThreshold
+        self._dyn_thresh: dict[str, dict[str, DynamicThreshold]] = defaultdict(
+            lambda: defaultdict(DynamicThreshold)
+        )
+
         # (src_ip, proto_key) → trigger reason string
         self._flagged: dict[tuple, str] = {}
 
@@ -91,13 +96,17 @@ class FloodPreFilter:
         if proto not in _PROTO_CONFIG:
             return False
 
-        limit, window_s = _PROTO_CONFIG[proto]
+        base_limit, window_s = _PROTO_CONFIG[proto]
         now = time.monotonic()
 
         with self._lock:
             win   = self._windows[src_ip][proto]
+            dt    = self._dyn_thresh[src_ip][proto]
             win.record(now)
             count = win.count_recent(now, window_s)
+            
+            dt.update(count / window_s)
+            limit = dt.threshold()
             key   = (src_ip, proto)
 
             # Already flagged — update correlation silently
@@ -176,6 +185,7 @@ class FloodPreFilter:
             for proto in _PROTO_CONFIG:
                 self._flagged.pop((src_ip, proto), None)
             self._windows.pop(src_ip, None)
+            self._dyn_thresh.pop(src_ip, None)
             self._ack_pop_ts.pop(src_ip, None)
             self._correlated.discard(src_ip)
 
@@ -192,6 +202,7 @@ class FloodPreFilter:
             ]
             for ip in stale:
                 self._windows.pop(ip, None)
+                self._dyn_thresh.pop(ip, None)
                 self._ack_pop_ts.pop(ip, None)
                 self._correlated.discard(ip)
                 for proto in _PROTO_CONFIG:

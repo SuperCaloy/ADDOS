@@ -449,7 +449,7 @@ class StateMachine:
 
         recent_pps     = getattr(state, "recent_pps", None)
         score_elevated = state.if_score >= thr
-        pps_elevated   = (recent_pps is not None) and (recent_pps > 1.0)
+        pps_elevated   = (recent_pps is not None) and (recent_pps > 5.0)
 
         if score_elevated and pps_elevated:
             if state.attack_vector == "Uncertain" and state.confidence < SINKHOLE_CONFIDENCE_THRESHOLD:
