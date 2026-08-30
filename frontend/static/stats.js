@@ -27,13 +27,13 @@ async function fetchStats() {
     set('c-norm',    cn.toLocaleString());
     set('c-norm-s',  `+${((cn / tot) * 100).toFixed(1)}%`);
     set('c-thr',     (s.active_threats || 0).toString());
-    set('p-rt',      `${s.avg_latency_ms || 0} ms`);
+    set('p-rt',      `${(s.mitigation_ms || 0).toFixed(1)} ms`);
 
     /* FP rate card — color-coded by severity */
     const fpRate = typeof s.fp_rate === 'number' ? s.fp_rate : 0;
     const fpEl   = document.getElementById('p-fp');
     if (fpEl) {
-      fpEl.textContent = `${fpRate.toFixed(1)} %`;
+      fpEl.textContent = `${fpRate.toFixed(2)} %`;
       fpEl.style.color = fpRate < 1 ? 'var(--green)'
                        : fpRate < 5 ? 'var(--amber)'
                        : 'var(--red)';
@@ -86,8 +86,8 @@ async function fetchSystemMetrics() {
 async function pollModelInfo() {
   try {
     const info = await apiFetch('/api/model_info');
-    if (info.if_accuracy != null) set('p-if', `Anomaly detection accuracy: ${info.if_accuracy.toFixed(1)}%`);
-    if (info.rf_accuracy != null) set('p-rf', `Classification accuracy: ${info.rf_accuracy.toFixed(1)}%`);
+    if (info.if_accuracy != null) set('p-if', `Anomaly detection accuracy: ${info.if_accuracy.toFixed(2)}%`);
+    if (info.rf_accuracy != null) set('p-rf', `Classification Accuracy: ${info.rf_accuracy.toFixed(2)}%`);
     if (info.if_threshold) ifThr = info.if_threshold;
   } catch (_) {}
 }

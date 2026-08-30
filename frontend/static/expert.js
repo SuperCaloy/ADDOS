@@ -195,11 +195,7 @@ var ExpertStages = {
       file: 'backend/pipeline/flood_prefilter.py',
       desc: 'Rate-based prefilter operating before ML analysis. Monitors per-IP, per-protocol packet timing (SYN, ICMP, UDP) against configured thresholds, flagging sources that exceed rate limits or exhibit sub-second burst behavior.',
       input: 'Per-packet protocol plus\nsource IP, as flows arrive',
-      output: 'Flag: exceeded or not, per\nsource IP and protocol',
-      formula: [
-        { f: 'trip if count(proto, 1.0s) >= limit', note: 'SYN 100, ICMP 50, UDP 50 per 1s window' },
-        { f: 'burst if count(proto, 0.1s or 0.5s) >= 0.4 * limit', note: 'catches fast opening spike before full window' }
-      ]
+      output: 'Flag: exceeded or not, per\nsource IP and protocol'
     },
     entropy: {
       num: 5, color: '#F59E0B',
@@ -252,11 +248,7 @@ var ExpertStages = {
       file: 'backend/mitigation/deception.py',
       desc: 'Redirects suspicious traffic to a designated sinkhole host for controlled observation. Measures attack persistence and classifier confidence over a 30-second observation window. Escalates to Phase 1 if traffic persists with high confidence, otherwise releases the source.',
       input: 'Quarantined IPs with unresolved\nattack vector / low confidence',
-      output: 'OpenFlow redirect to sinkhole,\nescalation to Phase 1 or release',
-      formula: [
-        { f: 'escalate if pps > 1.0 AND (conf >= 0.70 OR cumulative_time >= 90s)', note: 'persistent attack with resolved confidence or time ceiling' },
-        { f: 'release if pps <= 1.0 OR conf < 0.70', note: 'traffic stopped or confidence unresolved' }
-      ]
+      output: 'OpenFlow redirect to sinkhole,\nescalation to Phase 1 or release'
     },
     resource_guard: {
       num: 10, color: '#EC4899',
@@ -264,11 +256,7 @@ var ExpertStages = {
       file: 'backend/mitigation/resource_guard.py',
       desc: 'Monitors Ryu controller resource utilization (CPU, memory). At HIGH tier: throttles detection rate with 20ms delay. At CRIT tier: installs OVS proto_block rules to shed excess Packet-In load. Auto-recovers when resources normalize.',
       input: 'Ryu CPU/memory metrics (polled every 2s)',
-      output: 'Throttle delay (20ms/50ms) + proto_block rules on attack protocol',
-      formula: [
-        { f: 'tier = CRIT if CPU>=99% or MEM>=95% else HIGH if CPU>=95% or MEM>=85% else WARN if CPU>=85% or MEM>=70% else NORMAL', note: 'tier determines response' },
-        { f: 'HIGH: throttle_delay=20ms (after 2 consecutive HIGH). CRIT: throttle_delay=50ms + proto_block on attack proto', note: 'progressive response' }
-      ]
+      output: 'Throttle delay (20ms/50ms) + proto_block rules on attack protocol'
     }
   },
 

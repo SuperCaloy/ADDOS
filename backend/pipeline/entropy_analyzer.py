@@ -5,14 +5,27 @@ import numpy as np
 from collections import deque
 from backend.config import (
     TEA_WINDOW_SIZE,
+    TEA_LEARN_INTERVALS,
     TEA_LEARN_MIN_SAMPLES,
+    TEA_ATTACK_SIGMA,
+    TEA_CROWD_SIGMA,
+    TEA_EMA_ALPHA_MIN,
+    TEA_EMA_ALPHA_MAX,
+    TEA_ROBUST_REJECT_SIGMA,
+    TEA_RELEARN_ALPHA,
+    TEA_RELEARN_STABLE_INTERVALS,
+    TEA_RELEARN_MIN_CONFIDENCE,
+    TEA_RELEARN_MAX_IF_ANOMALY_RATE,
+    TEA_RELEARN_MAX_CUMULATIVE_DRIFT,
+    TEA_RELEARN_BASELINE_DISTANCE_MAX,
+    TEA_IDLE_UNLOCK_S,
+    TEA_IP_PROFILE_TTL_S,
+    TEA_LATCH_MAX_HOLD_S,
     TEA_IF_UNLOCK_STREAK,
     TEA_TEA_LOCK_STREAK,
     TEA_TEA_UNLOCK_STREAK,
     TEA_TEA_HIGH_CONF_LOCK,
-    TEA_IDLE_UNLOCK_S,
     TEA_MIN_FLOWS_PER_INTERVAL,
-    TEA_IP_PROFILE_TTL_S,
 )
 
 # Read-at-call-time constants (dual-feedback E2 guidance): accessed via the
@@ -30,16 +43,7 @@ def _push_expert_event(payload: dict) -> None:
     except Exception:
         pass
 
-# === ADAPTIVE TEA CONSTANTS ===
-TEA_LEARN_INTERVALS   = 60
-TEA_ATTACK_SIGMA      = 2.5
-TEA_CROWD_SIGMA       = 1.5
-TEA_MIN_CROWD_DIVERSITY = 1.0
-TEA_EMA_ALPHA_MIN     = 0.02
-TEA_EMA_ALPHA_MAX     = 0.10
 TEA_VARIANCE_STABLE_THRESHOLD = 0.01
-TEA_ROBUST_REJECT_SIGMA = 3.0
-TEA_FEEDBACK_UNLOCK_STREAK = TEA_IF_UNLOCK_STREAK  # legacy alias
 TEA_BASELINE_HISTORY_MAX = 60
 
 
@@ -79,14 +83,10 @@ class _AdaptiveBaseline:
         return max(TEA_EMA_ALPHA_MIN, min(TEA_EMA_ALPHA_MAX, alpha))
 
     def _variance_stable(self) -> bool:
-        n = len(self._samples)
-        if n < TEA_LEARN_MIN_SAMPLES:
-            return False
-        recent   = self._samples[-5:]
-        older    = self._samples[-10:-5]
-        var_new  = sum((x - sum(recent) / len(recent)) ** 2 for x in recent) / len(recent)
-        var_old  = sum((x - sum(older)  / len(older))  ** 2 for x in older)  / len(older)
-        return abs(var_new - var_old) < TEA_VARIANCE_STABLE_THRESHOLD
+        # REMOVED: statistically unsound (biased estimator, CLT fails at n=5).
+        # Learning now requires full TEA_LEARN_INTERVALS (360 intervals = 180s).
+        # Ref: tea-flash-crowd-assessment.md §15, RT1-RT3 findings.
+        return False
 
     def push(self, value: float, force: bool = False,
              max_drift_frac: float | None = None) -> None:
@@ -127,7 +127,7 @@ class _AdaptiveBaseline:
         if force:
             # Supervised relearning: pin the EMA alpha; on the capped path a
             # faster alpha is safe because the drift cap bounds movement.
-            self._alpha = TEA_EMA_ALPHA_MIN if max_drift_frac is None else _cfg.TEA_RELEARN_ALPHA
+            self._alpha = TEA_EMA_ALPHA_MIN if max_drift_frac is None else TEA_RELEARN_ALPHA
         else:
             z = abs(value - self._mean) / self._std
             if z >= TEA_ROBUST_REJECT_SIGMA:
@@ -591,12 +591,15 @@ class EntropyAnalyzer:
         # Supervised relearning (P2): a stable TEA-side "new normal" force-learns
         # the frozen baselines without IF confirmation (REG-1 caps drift and excludes
         # high-confidence snapshots so attack-scale data can't poison baselines).
+        # Contamination guard: require moderate confidence + low IF anomaly rate.
         if not degenerate:
             with self._lock:
+                if_anomaly_rate = self._if_anomaly_rate()
                 supervised = (
                     self._attack_latched
-                    and self._relearn_stable_streak >= _cfg.TEA_RELEARN_STABLE_INTERVALS
-                    and confidence != "high"
+                    and self._relearn_stable_streak >= TEA_RELEARN_STABLE_INTERVALS
+                    and confidence == TEA_RELEARN_MIN_CONFIDENCE
+                    and if_anomaly_rate < TEA_RELEARN_MAX_IF_ANOMALY_RATE
                 )
             if not is_attack_pattern or supervised:
                 with self._lock:
@@ -727,6 +730,13 @@ class EntropyAnalyzer:
             return False
         return (sum(buf) / len(buf)) >= _cfg.TEA_IF_ANOMALY_RATE_BLOCK
 
+    def _if_anomaly_rate(self) -> float:
+        """Return the current IF anomaly rate (0.0-1.0) from the ring buffer."""
+        buf = self._if_rate_buffer
+        if not buf:
+            return 0.0
+        return sum(buf) / len(buf)
+
     def feedback_if(self, is_anomaly: bool) -> None:
         """Per-flow IF feedback. Streak-only: NEVER locks baselines.
 
@@ -818,7 +828,7 @@ class EntropyAnalyzer:
                 self._set_latch(False, "idle timeout (no attack signal)", caller_holds_lock=True)
                 return
             if (
-                now - self._latch_set_at >= _cfg.TEA_LATCH_MAX_HOLD_S
+                now - self._latch_set_at >= TEA_LATCH_MAX_HOLD_S
                 and self._tea_normal_streak >= TEA_TEA_UNLOCK_STREAK
                 and now - self._last_attack_event >= _cfg.TEA_LATCH_HOLD_IF_GRACE_S
                 and now - self._last_moderate_ts >= _cfg.TEA_LATCH_HOLD_IF_GRACE_S

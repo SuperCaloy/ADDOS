@@ -41,6 +41,19 @@ def stats():
     malicious = session["malicious_dropped"]
     normal   = session["normal_packets"]
 
+    # Historical latency from mitigation_events (all-time, like other cards)
+    try:
+        lat_rows = query("""
+            SELECT AVG(detection_ms) as avg_detect, AVG(mitigation_ms) as avg_mitigate
+            FROM mitigation_events
+            WHERE detection_ms IS NOT NULL OR mitigation_ms IS NOT NULL
+        """)
+        lr = lat_rows[0] if lat_rows else {}
+        hist_detect_ms  = round(float(lr.get("avg_detect")   or 0), 2)
+        hist_mitig_ms   = round(float(lr.get("avg_mitigate") or 0), 2)
+    except Exception:
+        hist_detect_ms, hist_mitig_ms = 0, 0
+
     return jsonify({
         # Summary cards
         "total_packets":     total,
@@ -56,6 +69,11 @@ def stats():
         "active_threats":    session.get("active_threats", 0),
         "avg_latency_ms":    session.get("avg_latency_ms", 0),
         "fp_rate":           session.get("fp_rate", 0.0),
+
+        # Historical latency (all-time from DB, persistent across sessions)
+        # Fall back to session-based avg_latency_ms if DB has no data yet
+        "detection_ms":      hist_detect_ms or session.get("avg_latency_ms", 0),
+        "mitigation_ms":     hist_mitig_ms or session.get("avg_latency_ms", 0),
     })
 
 
