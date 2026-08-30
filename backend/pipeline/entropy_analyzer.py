@@ -91,18 +91,6 @@ class _AdaptiveBaseline:
     def push(self, value: float, force: bool = False,
              max_drift_frac: float | None = None) -> None:
         if not self._learned:
-            # Learning-phase robust rejection: the steady-state EMA already
-            # drops |z| >= 3 samples so an attack cannot pull the baseline
-            # toward itself. The warmup must not be a back door: once enough
-            # samples give a provisional scale, the same rule applies here so
-            # an attack during the (longer) learning window is never absorbed.
-            if len(self._samples) >= TEA_LEARN_MIN_SAMPLES // 2:
-                prov_mean = sum(self._samples) / len(self._samples)
-                prov_var  = sum((x - prov_mean) ** 2 for x in self._samples) / len(self._samples)
-                prov_std  = math.sqrt(max(prov_var, 1e-9))
-                if prov_std > 0 and abs(value - prov_mean) / prov_std >= TEA_ROBUST_REJECT_SIGMA:
-                    log.debug("TEA learning reject: value=%.4f z>=%.1f (warmup)", value, TEA_ROBUST_REJECT_SIGMA)
-                    return
             self._samples.append(value)
             ready = (
                 len(self._samples) >= self._learn_n or
