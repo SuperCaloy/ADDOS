@@ -7,6 +7,7 @@
 **/*.pyc
 **/__pycache__/
 
+
 # Logs (thesis database - kept local)
 logs/*
 !logs/.gitkeep
@@ -74,9 +75,6 @@ ENV/
 
 # Logs (stray, outside logs/)
 *.log
-
-# Broad PDF ignore (keep source .py tracked)
-
 # Cache / temp
 .cache/
 tmp/
