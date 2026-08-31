@@ -32,9 +32,12 @@ STATS_INTERVAL = 1.0
 # Flow epoch: when a continuously-refreshed entry reaches this age its counters are reset (strict delete, reinstalled on next packet). Without it, cumulative growth pushes even legit hosts over the anomaly threshold after ~25-45 minutes.
 FLOW_EPOCH_S = 600
 
-# Young-entry scoring suppression: lifetime-average pps/bps on a freshly-installed entry explode (tiny age denominator) and score false positives for benign hosts after every epoch delete/flush/reinstall. An entry is not pushed to ML until it is FRESH_SKIP_S seconds old or carries YOUNG_MIN_PKTS packets; real floods exceed 200 packets in under a second, so detection latency is unchanged.
-FRESH_SKIP_S = 2
+# Young-entry scoring suppression: lifetime-average pps/bps on a freshly-installed entry explode (tiny age denominator) and score false positives for benign hosts after every epoch delete/flush/reinstall. An entry is not pushed to ML until it is FRESH_SKIP_S seconds old (total age, sec+nsec: the integer-only comparison let 2-4s flows through and they scored 0.62-0.65 on the frozen IF) or carries YOUNG_MIN_PKTS packets; real floods exceed 500 packets in under a second, so flood detection latency is unchanged. Slow legitimate flows are simply not scored during their first 10s, which is where the young-flow FP zone lives.
+FRESH_SKIP_S = 10
 YOUNG_MIN_PKTS = 500
+
+# Mitigation-rule telemetry floor: p80/90/100 rules are exempt from the age gate so a freshly banned slow source is not delayed, but a just-installed rule reporting 1-2 dropped packets is install noise (it previously sustained legit-host FPs by scoring 0.63-0.65 for the whole campaign). Real floods report hundreds of dropped packets per interval.
+_MITIGATION_MIN_PKTS = 3
 
 # Over-limit install dedup/cap: a packet-in from a src whose forward rule is still live is cheap-dropped instead of paying parse + FlowMod serialization again. New unique-src installs are capped per switch per second during storms.
 INSTALL_DEDUP_TTL_S = 60   # aligned to the 60s idle_timeout so an entry dies with its rule
@@ -508,10 +511,13 @@ class FatTreeController(app_manager.RyuApp):
 
             _flow_count_per_src[src_ip] += 1
 
-# Young-entry scoring suppression: skip until the entry is old enough or massive enough that lifetime averages are meaningful. Applied unconditionally including first polls after a (re)connect; mitigation rules are exempt so a freshly banned slow source is not delayed.
-            if (stat.duration_sec < FRESH_SKIP_S
-                    and stat.packet_count < YOUNG_MIN_PKTS
-                    and stat.priority not in (80, 90, 100)):
+# Young-entry scoring suppression: skip until the entry is old enough or massive enough that lifetime averages are meaningful. Age uses sec+nsec, not the integer duration_sec. Mitigation rules bypass the age gate (a freshly banned slow source is not delayed) but are floored at _MITIGATION_MIN_PKTS so a just-installed rule's 1-2 dropped packets never reach ML.
+            _total_age = stat.duration_sec + stat.duration_nsec / 1e9
+            if stat.priority in (80, 90, 100):
+                if stat.packet_count < _MITIGATION_MIN_PKTS:
+                    continue
+            elif (_total_age < FRESH_SKIP_S
+                    and stat.packet_count < YOUNG_MIN_PKTS):
                 continue
 
             self._push_flow_stats(dpid, src_ip, stat, match, _flow_count_per_src)

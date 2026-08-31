@@ -263,7 +263,8 @@ class StateMachine:
             )
 
     def on_detection(self, src_ip: str, if_score: float,
-                     attack_class: str, confidence: float) -> str:
+                     attack_class: str, confidence: float,
+                     recent_pps: float = 0.0) -> str:
         # Local variables for post-lock re-offence routing.
         _prior_offense = 0
         _prior_ban     = 0
@@ -280,7 +281,7 @@ class StateMachine:
                 _prio          = behavioral.assign_priority(
                     if_score, confidence, src_ip,
                     attack_class=attack_class,
-                    recent_pps=0.0,
+                    recent_pps=recent_pps,
                 )
                 _prior_offense = behavioral.get_offences(src_ip)
                 _prior_ban     = behavioral.get_ban_level(src_ip)
@@ -297,6 +298,7 @@ class StateMachine:
                         action_taken  = "Blackhole",
                         ban_level     = 0,
                         offence_count = 0,
+                        recent_pps    = recent_pps,
                     )
                     self._states[src_ip] = state
                     self._advance_to_blackhole(state)
@@ -323,6 +325,7 @@ class StateMachine:
                             ban_level     = ban_lvl,
                             permanent     = True,
                             ttl_expires_at= time.monotonic() + ban_secs,
+                            recent_pps    = recent_pps,
                         )
                         self._states[src_ip] = state
                         _ban_action, _ban_ttl = resolve_ban_action(ban_secs)
@@ -356,6 +359,7 @@ class StateMachine:
                             action_taken  = "Quarantined",
                             priority      = _prio,
                             offence_count = 0,
+                            recent_pps    = recent_pps,
                         )
                         self._states[src_ip] = state
                         for _action in resolve_phase1_actions(_prio):
@@ -398,6 +402,7 @@ class StateMachine:
                 confidence         = confidence,
                 prev_ban_level     = _prior_ban,
                 prev_offence_count = _prior_offense,
+                recent_pps         = recent_pps,
             )
             with self._lock:
                 s = self._states.get(src_ip)
@@ -760,13 +765,15 @@ class StateMachine:
 
     def on_reoffence(self, src_ip: str, if_score: float,
                      attack_class: str, confidence: float,
-                     prev_ban_level: int, prev_offence_count: int) -> None:
+                     prev_ban_level: int, prev_offence_count: int,
+                     recent_pps: float = 0.0) -> None:
         # Previously banned IP detected again.
         # Routes to blackhole if the weighted offense score meets the threshold, else escalates the ban level.
         with self._lock:
             _prio       = behavioral.assign_priority(
                 if_score, confidence, src_ip,
                 attack_class=attack_class,
+                recent_pps=recent_pps,
             )
             new_ban_lvl = min(prev_ban_level + 1, MAX_BAN_LEVEL)
 
@@ -782,6 +789,7 @@ class StateMachine:
                     action_taken  = "Blackhole",
                     ban_level     = new_ban_lvl,
                     offence_count = prev_offence_count,
+                    recent_pps    = recent_pps,
                 )
                 self._states[src_ip] = state
                 self._advance_to_blackhole(state)
@@ -799,6 +807,7 @@ class StateMachine:
                     action_taken  = "Blackhole",
                     ban_level     = new_ban_lvl,
                     offence_count = prev_offence_count,
+                    recent_pps    = recent_pps,
                 )
                 self._states[src_ip] = state
                 self._advance_to_blackhole(state)
@@ -816,6 +825,7 @@ class StateMachine:
                     action_taken  = "Quarantined",
                     ban_level     = prev_ban_level,
                     offence_count = prev_offence_count + 1,
+                    recent_pps    = recent_pps,
                 )
                 self._states[src_ip] = state
                 self._push_command(src_ip, "rate_limit")

@@ -277,12 +277,17 @@ def _parse_and_route(raw: bytes) -> None:
         # cached verdict shared by every flow inside one eval window.
         flow_stats["tea_eval_seq"]       = tea_result.get("eval_seq")
 
-        # Check per-IP verdict for small attackers
+        # Check per-IP verdict for small attackers. Only once the global
+        # baseline is learned: during warmup a per-IP 'attack' is shadow-logged
+        # but never acts, so no verdict exists without a calibrated baseline.
         ip_verdict = entropy_analyzer.get_ip_verdict(src_ip)
         if ip_verdict == "attack":
-            flow_stats["tea_attack_pattern"] = True
-            flow_stats["tea_confidence"] = "moderate"
-            log.info("TEA per-IP attack detected: %s", src_ip)
+            if tea_result["is_learned"]:
+                flow_stats["tea_attack_pattern"] = True
+                flow_stats["tea_confidence"] = "moderate"
+                log.info("TEA per-IP attack detected: %s", src_ip)
+            else:
+                log.debug("TEA per-IP shadow observation (learning): %s", src_ip)
 
         # Pass dpid so decision_engine can feed IF result back to TEA
         switch_stats["dpid"] = dpid

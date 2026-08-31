@@ -482,6 +482,102 @@ def scenario_error_msg_handler_exists_and_is_rate_limited():
     assert len(records) == 2
 
 
+def scenario_young_flow_total_age_skipped():
+    # A 2.5s-old, 3-packet p10 flow must be suppressed: integer duration_sec
+    # (2.0) alone passed the old check and scored 0.63 on the frozen IF
+    # (epoch-reset legit FP loop, notes/bugs/epoch-reset-young-flow-legit-fp-loop.md).
+    c = make_controller()
+    pushed = []
+    c._push = lambda msg: pushed.append(msg)
+    dp = FakeDP(1)
+    stat = SimpleNamespace(packet_count=3, byte_count=222, duration_sec=2,
+                           duration_nsec=500_000_000, priority=10,
+                           match={{"ipv4_src": "10.0.0.66"}},
+                           idle_timeout=60, hard_timeout=0, flags=0)
+    c._switch_agg[1].update({{"last_reply_ts": time.time() - 1.0,
+                              "disp_interval": 1.0}})
+    c.flow_stats_reply_handler(SimpleNamespace(
+        msg=SimpleNamespace(datapath=dp, body=[stat])))
+
+    assert pushed == []
+
+
+def scenario_fresh_mitigation_rule_noise_skipped():
+    # A freshly installed block rule reporting its first dropped packet is
+    # noise (duration 0, 1 pkt) that kept legit FPs alive during campaigns.
+    c = make_controller()
+    pushed = []
+    c._push = lambda msg: pushed.append(msg)
+    dp = FakeDP(1)
+    stat = SimpleNamespace(packet_count=1, byte_count=74, duration_sec=0,
+                           duration_nsec=0, priority=90,
+                           match={{"ipv4_src": "10.0.0.66"}},
+                           idle_timeout=0, hard_timeout=30, flags=0)
+    c._switch_agg[1].update({{"last_reply_ts": time.time() - 1.0,
+                              "disp_interval": 1.0}})
+    c.flow_stats_reply_handler(SimpleNamespace(
+        msg=SimpleNamespace(datapath=dp, body=[stat])))
+
+    # p90 rules also emit a dropped_delta event through _push; count only
+    # flow_stats telemetry.
+    assert not [m for m in pushed if m.get("type") == "flow_stats"]
+
+
+def scenario_mitigation_rule_real_traffic_pushed():
+    # Real banned-source volume must keep flowing to ML during probation.
+    c = make_controller()
+    pushed = []
+    c._push = lambda msg: pushed.append(msg)
+    dp = FakeDP(1)
+    stat = SimpleNamespace(packet_count=600, byte_count=60000, duration_sec=5,
+                           duration_nsec=0, priority=90,
+                           match={{"ipv4_src": "10.0.0.66"}},
+                           idle_timeout=0, hard_timeout=30, flags=0)
+    c._switch_agg[1].update({{"last_reply_ts": time.time() - 1.0,
+                              "disp_interval": 1.0}})
+    c.flow_stats_reply_handler(SimpleNamespace(
+        msg=SimpleNamespace(datapath=dp, body=[stat])))
+
+    assert len([m for m in pushed if m.get("type") == "flow_stats"]) == 1
+
+
+def scenario_young_massive_flood_pushed():
+    # Floods bypass the time gate via the packet branch: 5000 pkts in 0.1s.
+    c = make_controller()
+    pushed = []
+    c._push = lambda msg: pushed.append(msg)
+    dp = FakeDP(1)
+    stat = SimpleNamespace(packet_count=5000, byte_count=500000,
+                           duration_sec=0, duration_nsec=100_000_000,
+                           priority=10,
+                           match={{"ipv4_src": "10.0.0.66"}},
+                           idle_timeout=60, hard_timeout=0, flags=0)
+    c._switch_agg[1].update({{"last_reply_ts": time.time() - 1.0,
+                              "disp_interval": 1.0}})
+    c.flow_stats_reply_handler(SimpleNamespace(
+        msg=SimpleNamespace(datapath=dp, body=[stat])))
+
+    assert len(pushed) == 1
+
+
+def scenario_aged_p10_pushed():
+    # Old-enough steady flow keeps being scored: suppression never ages out.
+    c = make_controller()
+    pushed = []
+    c._push = lambda msg: pushed.append(msg)
+    dp = FakeDP(1)
+    stat = SimpleNamespace(packet_count=40, byte_count=4000, duration_sec=60,
+                           duration_nsec=0, priority=10,
+                           match={{"ipv4_src": "10.0.0.66"}},
+                           idle_timeout=60, hard_timeout=0, flags=0)
+    c._switch_agg[1].update({{"last_reply_ts": time.time() - 1.0,
+                              "disp_interval": 1.0}})
+    c.flow_stats_reply_handler(SimpleNamespace(
+        msg=SimpleNamespace(datapath=dp, body=[stat])))
+
+    assert len(pushed) == 1
+
+
 SCENARIOS = {{
     name[len("scenario_"):]: fn
     for name, fn in sorted(globals().items())
@@ -533,6 +629,11 @@ _SCENARIO_NAMES = [
     "reconnect_flush_invalidates_dedup",
     "meter_install_deletes_before_add",
     "error_msg_handler_exists_and_is_rate_limited",
+    "young_flow_total_age_skipped",
+    "fresh_mitigation_rule_noise_skipped",
+    "mitigation_rule_real_traffic_pushed",
+    "young_massive_flood_pushed",
+    "aged_p10_pushed",
 ]
 
 _RESULTS = None
