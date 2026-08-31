@@ -106,6 +106,18 @@ TEA_LEARN_MIN_SAMPLES = 300
 # traffic; sparse traffic extends the phase until the floor is met.
 # Ref: notes/bugs/tea-learning-phase-duration.md.
 TEA_LEARN_MIN_DURATION_S = 300.0
+# Calibration validity gate (option A): the pps baseline may only finalize
+# when the warmup saw real traffic. If the all-sample mean pps stays below
+# this floor, the analyzer remains in shadow mode instead of calibrating
+# "normal" on a near-idle window (observed: baseline learned at 0.47 pps/flow
+# during a benchmark cold start, real traffic then read +170 sigma).
+# Tuned to this testbed: idle ~0.5 pps/flow, active host traffic >= 1.
+TEA_LEARN_MIN_MEAN_PPS = 1.0
+# Absolute flood scale for the warmup volume guard: per-flow pps above this
+# is rejected during warmup regardless of the provisional mean, so an attack
+# cannot poison an idle-seeded or validly-seeded baseline. The relative
+# factor rule only arms once the provisional mean crosses the validity gate.
+TEA_WARMUP_MAX_PPS = 50.0
 # Warmup volume guard: while learning, the pps baseline rejects interval
 # means deviating more than this factor from the provisional mean, so an
 # attack that starts mid-warmup cannot be absorbed (verified +38.9% baseline
@@ -153,6 +165,17 @@ TEA_RELEARN_MAX_CUMULATIVE_DRIFT = 0.20 # max total drift per relearn session (2
 TEA_RELEARN_BASELINE_DISTANCE_MAX = 2.0 # reject relearn if new baseline > 2x original
 # --- TEA latch max-hold valve (P3) ---
 TEA_LATCH_MAX_HOLD_S = 90.0
+
+# Extreme-z restart (option C): if a latched baseline is astronomically
+# wrong (|z| >= TEA_EXTREME_Z_SIGMA sustained for TEA_EXTREME_Z_RESTART_
+# INTERVALS eval intervals), wipe the baselines and restart learning from
+# current traffic instead of crawling there via the 1%-per-interval drift
+# cap. A correct baseline never produces 50-sigma readings even during a
+# real flood; only a miscalibrated one does. An attack that sustains the
+# trigger cannot poison the fresh baseline: the warmup volume guard rejects
+# attack-scale samples, so calibration waits for clean traffic.
+TEA_EXTREME_Z_SIGMA = 50.0
+TEA_EXTREME_Z_RESTART_INTERVALS = 60
 TEA_LATCH_HOLD_IF_GRACE_S = 30.0
 # --- TEA idle IF-rate window (P4) ---
 TEA_IF_RATE_WINDOW = 20

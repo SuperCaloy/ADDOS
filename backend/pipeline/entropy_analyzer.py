@@ -7,7 +7,10 @@ from backend.config import (
     TEA_WINDOW_SIZE,
     TEA_LEARN_MIN_SAMPLES,
     TEA_LEARN_MIN_DURATION_S,
+    TEA_LEARN_MIN_MEAN_PPS,
     TEA_WARMUP_REJECT_FACTOR,
+    TEA_EXTREME_Z_SIGMA,
+    TEA_EXTREME_Z_RESTART_INTERVALS,
     TEA_ATTACK_SIGMA,
     TEA_CROWD_SIGMA,
     TEA_EMA_ALPHA_MIN,
@@ -68,7 +71,8 @@ def _shannon_entropy(values: list[float]) -> float:
 
 
 class _AdaptiveBaseline:
-    def __init__(self, learn_samples: int, warmup_guard: bool = False):
+    def __init__(self, learn_samples: int, warmup_guard: bool = False,
+                 min_learn_mean: float | None = None):
         self._learn_n      = learn_samples
         self._samples      = []
         self._mean         = None
@@ -81,6 +85,8 @@ class _AdaptiveBaseline:
         self._learn_started_at: float | None = None
         # Volume guard (pps only): reject attack-scale warmup samples.
         self._warmup_guard = warmup_guard
+        # Validity gate (pps only): refuse to finalize below this mean.
+        self._min_learn_mean = min_learn_mean
         # Provisional running sum for the warmup guard.
         self._psum = 0.0
 
@@ -101,18 +107,28 @@ class _AdaptiveBaseline:
     def _warmup_reject(self, value: float) -> bool:
         """Provisional volume guard during the learning phase (pps only).
 
-        Rejects interval means deviating more than TEA_WARMUP_REJECT_FACTOR
-        from the provisional mean, so an attack that begins after the seed
-        window cannot be absorbed into the baseline. A sustained attack
-        simply delays learning until it stops, which is the conservative
-        outcome: no calibration under fire. An attack present from the very
-        first packets can still seed the provisional window; the flood
-        prefilter and IF cover that case.
+        Two rules:
+        - absolute: per-flow pps above TEA_WARMUP_MAX_PPS is flood scale,
+          rejected regardless of the provisional mean;
+        - relative: once the provisional mean has crossed the validity gate
+          (a calibrated regime exists), values deviating more than
+          TEA_WARMUP_REJECT_FACTOR are rejected. Below the gate the baseline
+          is not yet calibrated, so only the absolute cap applies and a
+          legitimate idle-to-active transition is not stalled.
+
+        A sustained attack simply delays learning until it stops, which is
+        the conservative outcome: no calibration under fire. An attack
+        present from the very first packets can still seed the provisional
+        window; the flood prefilter and IF cover that case.
         """
         if not self._warmup_guard or len(self._samples) < TEA_WARMUP_REJECT_AFTER:
             return False
+        if value > _cfg.TEA_WARMUP_MAX_PPS:
+            return True
+        if self._min_learn_mean is None:
+            return False
         mean = self._psum / len(self._samples)
-        if mean <= 0:
+        if mean < self._min_learn_mean:
             return False
         ratio = value / mean
         return ratio > _cfg.TEA_WARMUP_REJECT_FACTOR or ratio < 1 / _cfg.TEA_WARMUP_REJECT_FACTOR
@@ -131,6 +147,10 @@ class _AdaptiveBaseline:
             ready = (
                 len(self._samples) >= self._learn_n
                 and now - self._learn_started_at >= _cfg.TEA_LEARN_MIN_DURATION_S
+                and (
+                    self._min_learn_mean is None
+                    or self._psum / len(self._samples) >= self._min_learn_mean
+                )
             )
             if ready:
                 self._mean     = sum(self._samples) / len(self._samples)
@@ -231,7 +251,8 @@ class _GlobalEntropyState:
         self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
         self.proto_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
         self.share_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
-        self.pps_base   = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True)
+        self.pps_base   = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True,
+                                            min_learn_mean=TEA_LEARN_MIN_MEAN_PPS)
         self.last_result = {}
 
     def observe(self, snapshot: dict) -> None:
@@ -388,6 +409,10 @@ class EntropyAnalyzer:
         self._last_moderate_ts = time.monotonic()
         # P4: per-flow IF anomaly ring buffer for the sustained-rate idle guard.
         self._if_rate_buffer: deque = deque(maxlen=_cfg.TEA_IF_RATE_WINDOW)
+        # Option C: sustained extreme-z counter while latched. A correct
+        # baseline never reads |z| >= 50 even in a real flood; only a
+        # miscalibrated one does. Reaching the bound wipes the baselines.
+        self._extreme_z_streak = 0
 
         self._flow_buffer = deque(maxlen=2000)
         self._last_eval_time = 0.0
@@ -565,6 +590,36 @@ class EntropyAnalyzer:
                 # P1 volume companion: absolute pps vs the learned normal baseline.
                 pps_z = pps_base.z_score(curr["mean_pps"])
                 pps_surge = pps_base.is_high(curr["mean_pps"], _cfg.TEA_PPS_SURGE_SIGMA)
+
+                # Option C: sustained extreme-z while latched means the
+                # baseline itself is wrong (idle cold start, regime change),
+                # not that traffic is anomalous. Wipe and recalibrate.
+                if self._attack_latched:
+                    extreme_now = max(
+                        abs(size_z), abs(intensity_z), abs(proto_z),
+                        abs(share_z), abs(pps_z),
+                    ) >= _cfg.TEA_EXTREME_Z_SIGMA
+                    if extreme_now:
+                        self._extreme_z_streak += 1
+                    else:
+                        self._extreme_z_streak = 0
+                    if self._extreme_z_streak >= _cfg.TEA_EXTREME_Z_RESTART_INTERVALS:
+                        log.warning(
+                            "TEA extreme-z restart: |z| >= %.0f for %d intervals - "
+                            "baseline miscalibrated, wiping and relearning",
+                            _cfg.TEA_EXTREME_Z_SIGMA, self._extreme_z_streak,
+                        )
+                        self._global_state = _GlobalEntropyState(TEA_WINDOW_SIZE)
+                        self._extreme_z_streak = 0
+                        self._tea_attack_streak = 0
+                        self._relearn_stable_streak = 0
+                        self._set_latch(False, "extreme-z baseline restart",
+                                        caller_holds_lock=True)
+                        res = self._neutral(size_var, intensity_var, learned=False)
+                        res["eval_seq"] = self._eval_seq
+                        res["baseline_restart"] = True
+                        state.last_result = res
+                        return res
 
         size_delta  = curr["size_var"]  - prev["size_var"]
         intensity_delta = curr["intensity_var"] - prev["intensity_var"]
