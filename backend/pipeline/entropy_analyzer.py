@@ -593,12 +593,18 @@ class EntropyAnalyzer:
 
                 # Option C: sustained extreme-z while latched means the
                 # baseline itself is wrong (idle cold start, regime change),
-                # not that traffic is anomalous. Wipe and recalibrate.
+                # not that traffic is anomalous. Wipe and recalibrate. The
+                # IF anomaly-rate gate blocks the restart during a real
+                # flood: otherwise a sustained low-rate attack could get the
+                # fresh baseline calibrated at attack scale.
                 if self._attack_latched:
-                    extreme_now = max(
-                        abs(size_z), abs(intensity_z), abs(proto_z),
-                        abs(share_z), abs(pps_z),
-                    ) >= _cfg.TEA_EXTREME_Z_SIGMA
+                    extreme_now = (
+                        max(
+                            abs(size_z), abs(intensity_z), abs(proto_z),
+                            abs(share_z), abs(pps_z),
+                        ) >= _cfg.TEA_EXTREME_Z_SIGMA
+                        and self._if_anomaly_rate() < _cfg.TEA_RELEARN_MAX_IF_ANOMALY_RATE
+                    )
                     if extreme_now:
                         self._extreme_z_streak += 1
                     else:
