@@ -32,19 +32,14 @@ _lock = threading.Lock()
 _conf_lock: dict[str, tuple[float, str]] = {}
 _conf_lock_mutex = threading.Lock()
 
-_LEGIT_HOST_IPS: frozenset = frozenset([
-    "10.0.0.1",  # h1
-    "10.0.0.2",  # h2
-    "10.0.0.3",  # h3
-    "10.0.0.4",  # h4
-    "10.0.0.5", # h5
-])
+_LEGIT_HOST_IPS: frozenset = frozenset(
+    f"10.0.0.{i}" for i in range(1, 16)
+)
 
-# Attacker hosts: h6-h18, h22, h23 (per topology.py).
-# h20 (server) and h21 (sinkhole) are excluded on purpose.
+# Attacker hosts: h16-h25 (per topology.py).
+# h26 (server) and h27 (sinkhole) are excluded on purpose.
 _ATTACKER_IPS: frozenset = frozenset(
-    [f"10.0.0.{i}" for i in range(6, 19)] +
-    ["10.0.0.22", "10.0.0.23"]
+    f"10.0.0.{i}" for i in range(16, 26)
 )
 
 _stats = {
@@ -102,7 +97,7 @@ def latency_percentiles_by_origin() -> dict:
                 for origin, buf in _latency_by_origin.items()}
 
 _sse_lock   = threading.Lock()
-_sse_buffer: collections.deque = collections.deque(maxlen=200)
+_sse_buffer: collections.deque = collections.deque(maxlen=500)
 
 _sse_dedup: dict = {}
 _SSE_DEDUP_TTL = 5.0
@@ -209,6 +204,14 @@ def drain_pending_restores() -> list[str]:
         ips = list(_pending_restores)
         _pending_restores.clear()
     return ips
+
+
+def clear_confidence_lock() -> None:
+    """Reset the per-IP confidence lock so stale campaign classifications
+    cannot ratchet over fresh RF results in the next campaign."""
+    with _conf_lock_mutex:
+        _conf_lock.clear()
+    log.info("Confidence lock cleared")
 
 
 def drain_sse_events() -> list[dict]:
@@ -577,10 +580,9 @@ def on_result(src_ip: str, if_score, is_anomaly,
         "action":      action_taken,
     })
 
-    # Force-push SSE on phase upgrades so the audit log reflects the latest
-    # phase; flash-crowd ticks are skipped since no real action occurred.
+    # Push SSE for every detection so the audit log reflects live activity.
+    # All detections bypass dedup to ensure the audit log is never stale.
     if not is_known_legit and _tea_mitigate:
-        _phase_upgrade = action_taken in ("Time Ban", "Blackhole")
         _push_sse_event({
             "timestamp":       ts,
             "src_ip":          src_ip,
@@ -591,7 +593,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
             "action_taken":    action_taken,
             "event_type":      "released" if action_taken == "Released" else "transition",
             "session_id":      ip_state.session_id if ip_state else None,
-        }, force=_phase_upgrade)
+        }, force=True)
 
 
 def start() -> None:

@@ -21,7 +21,7 @@ def client(temp_db):
 
 
 def test_reset_endpoint_clears_writer_cache_and_state_machine(client):
-    writer._reputation_cache["10.9.9.1"] = ["2026-08-25 10:00:00"]
+    writer._reputation_cache["10.9.9.1"] = [("2026-08-25 10:00:00", 0.9)]
     state_machine._states["10.9.9.1"] = IpState(src_ip="10.9.9.1")
     state_machine._sinkhole_history["10.9.9.1"] = 2
 

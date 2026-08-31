@@ -293,8 +293,8 @@ def _build_db_features(src_ip: str) -> dict | None:
             "action_taken":     ev.get("action_taken") or "—",
 
             "ban_level":        h.get("ban_level", 0),
-            "reputation_score": behavioral.get_decay_score(src_ip),
-            "offence_count":    behavioral.get_offence_count(src_ip),
+            "reputation_score": h.get("reputation_score", 0.0),
+            "offence_count":    h.get("offence_count", 0),
             "first_seen":       h.get("first_seen"),
             "last_seen":        h.get("last_seen"),
         },

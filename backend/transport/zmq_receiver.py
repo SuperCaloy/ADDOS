@@ -5,8 +5,8 @@ import threading
 import logging
 from backend.config import ZMQ_TELEMETRY_ADDR, ML_ENABLED, FLOW_FIELD_MAX
 
-# Whitelisted IPs are never flood-filtered or submitted to ML (h20 = victim server, h21 = sinkhole). Without this, baseline pings to h20 trip the burst window and flag it as an attacker.
-_WHITELIST_IPS = {"10.0.0.20", "10.0.0.21"}
+# Whitelisted IPs are never flood-filtered or submitted to ML (h26 = victim server, h27 = sinkhole). Without this, baseline pings to h26 trip the burst window and flag it as an attacker.
+_WHITELIST_IPS = {"10.0.0.26", "10.0.0.27"}
 from backend.pipeline import worker
 from backend.pipeline.flood_prefilter import flood_filter
 from backend.pipeline.entropy_analyzer import entropy_analyzer

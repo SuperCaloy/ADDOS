@@ -545,12 +545,17 @@ class EntropyAnalyzer:
         # Degenerate-interval guard: too few flows yield meaningless aggregate
         # stats (e.g. false "mechanized cluster"); suppress the verdict.
         degenerate = len(current_flows) < TEA_MIN_FLOWS_PER_INTERVAL
-        is_flash_crowd = False
         confidence = "low"
         # P1: uniformity-only signals count as attack only with an attack-scale
         # volume companion. R1 backstops very high multi-source uniformity.
         volume_anomaly = size_surge or intensity_surge or pps_surge
         collapse_anomaly = size_collapsed or intensity_collapsed or proto_collapsed
+        is_flash_crowd = (
+            volume_anomaly
+            and not collapse_anomaly
+            and not mechanized_cluster
+            and proto_surge
+        ) if not degenerate else False
         uniform_backstop = (
             mechanized_cluster
             and curr["uniform_share"] >= _cfg.TEA_UNIFORM_BACKSTOP_SHARE
@@ -656,17 +661,31 @@ class EntropyAnalyzer:
         return result
 
     def should_submit(self, tea_result: dict, is_flood_prefilter_flagged: bool) -> bool:
+        is_flash_crowd = tea_result.get("is_flash_crowd", False)
+        is_attack = tea_result.get("is_attack_pattern", False)
+        is_learned = tea_result.get("is_learned", False)
+
+        # Flash crowd: high volume + no collapse + not mechanized + diverse
+        # protocols.  Block mitigation unless flood prefilter already flagged
+        # the source (IF override still applies).
+        if is_flash_crowd and not is_flood_prefilter_flagged:
+            with self._lock:
+                self._would_block_count += 1
+            log.info("TEA gate: flash crowd detected, logging only (total=%d)", self._would_block_count)
+            return False
+
+        # Existing advisory gate: learned + no attack + low confidence
         would_block = (
             not is_flood_prefilter_flagged
-            and tea_result.get("is_learned", False)
-            and not tea_result.get("is_attack_pattern", False)
+            and is_learned
+            and not is_attack
             and tea_result.get("confidence", "low") == "low"
         )
         if would_block:
             with self._lock:
                 self._would_block_count += 1
-            log.info("TEA gate advisory: would have blocked (total=%d)", self._would_block_count)
-        return True
+            log.info("TEA gate: normal traffic, logging only (total=%d)", self._would_block_count)
+        return not would_block
 
     def _lock_all(self) -> None:
         self._global_state.size_base.lock()

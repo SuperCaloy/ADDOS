@@ -61,11 +61,13 @@ def recent_events():
     that were fired before the browser connected (or while it was disconnected).
 
     Query params:
-        limit  -- max rows to return (default 100, max 500)
+        limit  -- max rows to return (default 100, max 10000)
         since  -- optional ISO timestamp; only return rows strictly after this time
+        before -- optional ISO timestamp; only return rows strictly before this time (for infinite scroll)
     """
-    limit = min(int(request.args.get("limit", 100)), 500)
+    limit = min(int(request.args.get("limit", 100)), 10000)
     since = request.args.get("since", "")
+    before = request.args.get("before", "")
 
     if since:
         rows = query("""
@@ -76,6 +78,15 @@ def recent_events():
             ORDER BY timestamp DESC
             LIMIT ?
         """, (since, limit))
+    elif before:
+        rows = query("""
+            SELECT timestamp, src_ip, predicted_class, attack_vector,
+                   confidence, priority, action_taken, event_type, reason, session_id
+            FROM mitigation_events
+            WHERE timestamp < ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """, (before, limit))
     else:
         rows = query("""
             SELECT timestamp, src_ip, predicted_class, attack_vector,

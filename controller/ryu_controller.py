@@ -42,7 +42,7 @@ INSTALL_MAP_CAP = 20000    # per-switch entries before eviction
 INSTALL_CAP_PER_SEC = 200  # unique-src installs per switch per second
 
 # IPs whose reply traffic should never be scored by the ML pipeline
-_SKIP_SRC = {"10.0.0.20", "10.0.0.21"}
+_SKIP_SRC = {"10.0.0.26", "10.0.0.27"}
 
 # Action → OVS drop priority mapping
 _DROP_PRIORITY = {"block": 100, "quarantine": 90, "rate_limit": 80}
@@ -665,6 +665,10 @@ class FatTreeController(app_manager.RyuApp):
             self._reset_state()
             return
 
+        if action == "flush_proto_cache":
+            self._flush_proto_caches()
+            return
+
 # Update banned IP set for the throttled fast-path check. Only drop actions (block/quarantine/redirect) add to it; rate_limit allows traffic so flow_stats continue and ML can re-score during probation.
         if action in ("block", "quarantine", "redirect"):
             self._banned_ips.add(src_ip)
@@ -689,7 +693,7 @@ class FatTreeController(app_manager.RyuApp):
             elif action == "proto_block":
                 self._apply_proto_block(dp, ofp, parser, cmd, dpid)
             elif action == "redirect":
-                redirect_to = cmd.get("redirect_to", "10.0.0.21")
+                redirect_to = cmd.get("redirect_to", "10.0.0.27")
                 self._install_redirect_rule(dp, ofp, parser, match, redirect_to)
             elif action == "clear":
                 self._install_clear_rules(dp, ofp, parser, match)
@@ -713,14 +717,28 @@ class FatTreeController(app_manager.RyuApp):
         self._install_budget.clear()
         self.logger.info("*** Ryu state reset — all in-memory state cleared")
 
+    def _flush_proto_caches(self) -> None:
+        # Clear per-IP/switch protocol caches between campaigns. Without this,
+        # a host assigned a different protocol in a new mixed campaign keeps
+        # reporting the previous run's protocol from mitigation-rule telemetry
+        # on switches that never saw its packet-in. Bans are untouched.
+        self._switch_proto.clear()
+        self._src_proto.clear()
+        self._src_proto_global.clear()
+        self._src_ports.clear()
+        self.logger.info("*** Ryu proto caches flushed")
+
     def _on_clear(self, src_ip: str) -> None:
         # Clean up all per-IP state when an IP is unblocked
         self._banned_ips.discard(src_ip)
         self._blocked_prev_pkts.pop(src_ip, None)
 
-        # Remove stale cached protocol so next legit flow is not misclassified
+        # Remove stale cached protocol so next legit flow is not misclassified.
+        # The global cache must die too: it survives per-dpid pops and would
+        # otherwise poison every future campaign for this IP.
         for dpid_key in list(self._src_proto.keys()):
             self._src_proto[dpid_key].pop(src_ip, None)
+        self._src_proto_global.pop(src_ip, None)
 
         # Reset delta counters to avoid stale pps spike after attack stops
         self._switch_prev_total.clear()

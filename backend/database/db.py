@@ -210,7 +210,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             duration_sec    INTEGER NOT NULL DEFAULT 0,
             unblock_reason  TEXT    NOT NULL,
             ban_level       INTEGER NOT NULL DEFAULT 0,
-            offence_count   INTEGER NOT NULL DEFAULT 0
+            offence_count   INTEGER NOT NULL DEFAULT 0,
+            reputation_score REAL   NOT NULL DEFAULT 0.0
         );
 
         CREATE INDEX IF NOT EXISTS idx_history_ip
