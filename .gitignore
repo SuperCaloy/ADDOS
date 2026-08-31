@@ -2,9 +2,6 @@
 **/*.db
 **/*.db-shm
 **/*.db-wal
-!benchmark.db
-!benchmark.db-shm
-!benchmark.db-wal
 
 # Python
 **/*.pyc
@@ -77,6 +74,8 @@ ENV/
 
 # Logs (stray, outside logs/)
 *.log
+
+# Broad PDF ignore (keep source .py tracked)
 
 # Cache / temp
 .cache/
