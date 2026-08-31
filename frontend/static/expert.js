@@ -229,8 +229,7 @@ var ExpertStages = {
       input: '16-feature vector per flow\n(traffic rates, ratios, timing)',
       output: 'Anomaly score (0 to 1) with\nthreshold exceedance flag',
       formula: [
-        { f: 's(x, n) = 2^(-E(h(x)) / c(n))', note: 'anomaly score from average path length' },
-        { f: 'threshold = 0.5992 (frozen model)', note: 'fixed at training; not retrained at runtime' }
+        { f: 's(x, n) = 2^(-E(h(x)) / c(n))', note: 'anomaly score from average path length' }
       ]
     },
     rf: {

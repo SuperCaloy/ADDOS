@@ -90,6 +90,19 @@ _ATTACK_TYPE_PORTS = {
     "ICMP": [0],
 }
 
+# SYN aggression: parallel hping3 instances per SYN attacker. SYN is the
+# weakest-detected attack type (52B packets are smaller than benign TCP and
+# share its ports, so packet rate is the only loud IF feature, and log1p
+# compresses it). Two instances ≈ 20-30k pps per host on a contended VM.
+# Budget: 14 total flooders on 8 vCPU / 10GB (Ryu + backend + OVS share the
+# rest). The bare-metal 12T/24GB machine can raise this to 3.
+_SYN_FLOOD_INSTANCES = 2
+
+
+def _flood_spawn_count(atype: str) -> int:
+    # How many parallel hping3 processes one attacker of this type spawns.
+    return _SYN_FLOOD_INSTANCES if atype == "SYN" else 1
+
 # Attackers run pure continuous --flood with no rest cycling.
 
 _mixed_stop_event = threading.Event()
@@ -709,7 +722,8 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event,
 
     # Restart loop — restarts hping3 if it dies unexpectedly
     while not stop_event.is_set():
-        _nsrun(h, cmd)
+        for _ in range(_flood_spawn_count(atype)):
+            _nsrun(h, cmd)
 # Poll every second inside the host netns, not system-wide. Restart only on a confirmed death (pgrep exit 1); failures must not trigger spurious restarts.
         while not stop_event.is_set():
             time.sleep(1)
@@ -1142,7 +1156,8 @@ def _attacker_cycle_worker_randomized(num: int, stop_event: threading.Event,
 
     # Restart loop
     while not stop_event.is_set():
-        _nsrun(h, cmd)
+        for _ in range(_flood_spawn_count(atype)):
+            _nsrun(h, cmd)
         while not stop_event.is_set():
             time.sleep(1)
             if _hping_state(h) is False:
