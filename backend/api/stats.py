@@ -1,5 +1,5 @@
 from flask import Blueprint, jsonify, request
-from backend.pipeline.decision_engine import get_stats, get_scan_log
+from backend.pipeline.decision_engine import get_stats, get_scan_log, clear_confidence_lock
 from backend.pipeline.flow_tracker import tracker
 from backend.transport.zmq_receiver import get_raw_counts
 from backend.models import loader
@@ -54,6 +54,20 @@ def stats():
     except Exception:
         hist_detect_ms, hist_mitig_ms = 0, 0
 
+    # FP rate from DB — same formula as report (if_fp / (if_fp + if_tn))
+    try:
+        fp_rows = query("""
+            SELECT SUM(if_fp) as fp, SUM(if_tn) as tn
+            FROM traffic_summary
+        """)
+        fpr = 0.0
+        if fp_rows and fp_rows[0]:
+            _fp = float(fp_rows[0].get("fp") or 0)
+            _tn = float(fp_rows[0].get("tn") or 0)
+            fpr = round((_fp / max(_fp + _tn, 1)) * 100, 2)
+    except Exception:
+        fpr = 0.0
+
     return jsonify({
         # Summary cards
         "total_packets":     total,
@@ -68,7 +82,7 @@ def stats():
         # Session metrics
         "active_threats":    session.get("active_threats", 0),
         "avg_latency_ms":    session.get("avg_latency_ms", 0),
-        "fp_rate":           session.get("fp_rate", 0.0),
+        "fp_rate":           fpr,
 
         # Historical latency (all-time from DB, persistent across sessions)
         # Fall back to session-based avg_latency_ms if DB has no data yet
@@ -204,6 +218,9 @@ def gt_stop_all():
             victims = list(_active_attacks.keys())
         for ip in victims:
             del _active_attacks[ip]
+    # Clear the confidence lock so stale high-confidence classifications
+    # from the previous campaign cannot ratchet over fresh RF results.
+    clear_confidence_lock()
     return jsonify({"ok": True, "cleared": len(victims)})
 
 

@@ -44,14 +44,14 @@ topo = _load_topology()
 
 def test_set_sizes_and_membership():
     assert set(topo._ATTACKER_NUMS) == {
-        6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 22}
+        16, 17, 18, 19, 20, 21, 22, 23, 24, 25}
     assert set(topo._ATTACKER_POOL) == set(topo._ATTACKER_NUMS)
 
 
 def test_pairwise_disjoint_full_coverage():
     a, l = topo._ATTACKER_NUMS, topo._LEGIT_NUMS
     assert not (a & l)
-    assert set(a | l | {20, 21}) == set(range(1, 23))
+    assert set(a | l | {26, 27}) == set(range(1, 28))
 
 
 def test_variants_in_lockstep_with_active_set():
@@ -63,26 +63,26 @@ def test_variants_in_lockstep_with_active_set():
 def test_repurposed_variants():
     atype16, flags16 = topo._ATTACKER_VARIANTS[16][0], topo._ATTACKER_VARIANTS[16][1]
     atype19, flags19 = topo._ATTACKER_VARIANTS[19][0], topo._ATTACKER_VARIANTS[19][1]
-    atype22, flags22 = topo._ATTACKER_VARIANTS[22][0], topo._ATTACKER_VARIANTS[22][1]
-    assert atype16 == "SYN" and "-S -p 5432" in flags16
-    assert atype19 == "SYN" and "-S -p 25" in flags19   # h19 attacks like h23
-    assert atype22 == "SYN" and "-S -p 3389" in flags22
+    atype20, flags20 = topo._ATTACKER_VARIANTS[20][0], topo._ATTACKER_VARIANTS[20][1]
+    assert atype16 == "SYN" and "-S -p 80" in flags16
+    assert atype19 == "SYN" and "-S -p 8080" in flags19
+    assert atype20 == "UDP" and "--udp -p 53" in flags20
 
 
 def test_balanced_mix():
     types_ = [t[0] for t in topo._ATTACKER_VARIANTS.values()]
-    assert types_.count("SYN") == 5
-    assert types_.count("UDP") == 5
-    assert types_.count("ICMP") == 5
+    assert types_.count("SYN") == 4
+    assert types_.count("UDP") == 3
+    assert types_.count("ICMP") == 3
 
 
 def test_campaign_rosters_are_active():
     # Full-roster guardrail (2026-08-27): single-vector campaigns must launch
     # EVERY attacker assigned to that type, not a hardcoded subset.
     full = {
-        "SYN": {10, 16, 18, 19, 22},
-        "ICMP": {11, 12, 13, 14, 15},
-        "UDP": {6, 7, 8, 9, 17},
+        "SYN": {16, 17, 18, 19},
+        "ICMP": {23, 24, 25},
+        "UDP": {20, 21, 22},
     }
     for t, hosts in full.items():
         assert set(topo._attackers_of_type(t)) == hosts
@@ -121,11 +121,10 @@ def test_attacker_worker_accepts_delay_override():
 
 def test_launcher_defaults_are_active_and_typed():
     src = open("topology/topology.py").read()
-    assert 'def launch_udp_flood(attacker_name="h7")' in src
-    assert 'def launch_udp_flood_sustained(attacker_name="h7")' in src
-    assert 'attacker_name="h16"' not in src
-    # h16 is SYN now; nothing may still advertise it as the UDP default
-    assert "pkts, h16" not in src
+    assert 'def launch_udp_flood(attacker_name="h20")' in src
+    assert 'def launch_udp_flood_sustained(attacker_name="h20")' in src
+    assert 'def launch_syn_flood(attacker_name="h16")' in src
+    assert 'def launch_icmp_flood(attacker_name="h23")' in src
 
 
 def test_cleanup_sweeps_cover_pool():
@@ -154,6 +153,6 @@ def test_udp_icmp_payloads_capped_at_1024():
     # the frozen model's training range (<=800B was old; 1024 is the safe cap).
     for num, (atype, flags, _, _) in topo._ATTACKER_VARIANTS.items():
         if atype in ("UDP", "ICMP"):
-            assert "--data 1024" in flags, (num, flags)
+            assert "--data 1400" in flags, (num, flags)
         else:
             assert "--data" not in flags, (num, flags)

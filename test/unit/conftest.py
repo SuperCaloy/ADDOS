@@ -53,9 +53,9 @@ def seed_history(temp_db):
                 INSERT INTO ip_attack_history
                     (src_ip, attack_vector, if_score, confidence, priority,
                      phase_reached, first_seen, unblocked_at, duration_sec,
-                     unblock_reason, ban_level, offence_count)
+                     unblock_reason, ban_level, offence_count, reputation_score)
                 VALUES (?, 'SYN Flood', 0.9, 0.9, 'High', 2,
-                        '2026-08-25 10:00:00', ?, 60, 'Test', 1, 1)
+                        '2026-08-25 10:00:00', ?, 60, 'Test', 1, 1, 2.0)
                 """,
                 [(ip, ts) for (ip, ts) in rows],
             )

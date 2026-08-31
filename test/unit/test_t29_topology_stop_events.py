@@ -77,7 +77,7 @@ def test_watchdog_tick_suppressed_during_flash_crowd(monkeypatch):
 
 
 def test_watchdog_tick_ignores_non_legit_hosts(monkeypatch):
-    calls = _seed_watchdog_state(monkeypatch, [_FakeHost(7)])
+    calls = _seed_watchdog_state(monkeypatch, [_FakeHost(16)])
     topo._watchdog_tick()
     assert calls == []
 

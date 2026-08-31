@@ -54,12 +54,12 @@ EXTRACTION_TRIGGER_S    = 0.05
 
 # --- RF micro-batching (B1) ---
 RF_BATCH_ENABLED  = True
-RF_BATCH_MAX      = 32
+RF_BATCH_MAX      = 16
 RF_BATCH_WINDOW_MS = 50
 
 # --- IF micro-batching (L1, default off) ---
 IF_BATCH_ENABLED  = True
-IF_BATCH_MAX      = 32
+IF_BATCH_MAX      = 16
 IF_BATCH_WINDOW_MS = 50
 
 # --- Worker admission control (V2) ---

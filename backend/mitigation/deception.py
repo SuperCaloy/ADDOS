@@ -13,8 +13,8 @@ from backend.mitigation.traffic_filter import (
 log = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────────────
-# Silent dummy host, must match h21 in topology.py.
-SINKHOLE_IP = "10.0.0.21"
+# Silent dummy host, must match h27 in topology.py.
+SINKHOLE_IP = "10.0.0.27"
 
 # Observation window before escalate/release decision
 SINKHOLE_OBSERVE_SECONDS = 30.0

@@ -66,8 +66,12 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
         <span id="status-text">System Online</span>
       </div>
       <button class="expert-btn" id="expert-btn" onclick="toggleExpertMode()" aria-pressed="false" title="Expert Mode: live algorithmic internals">Expert Mode</button>
-      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()">Light Mode</button>
-      <button class="btn" onclick="openModal()">Generate Report</button>
+      <button class="theme-btn" id="theme-btn" onclick="toggleTheme()" title="Toggle light/dark mode">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+      </button>
+      <button class="btn-icon" onclick="openModal()" title="Generate report">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+      </button>
     </div>
   </header>
 
@@ -325,6 +329,18 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
     <div class="modal-actions">
       <button class="btn" onclick="closeModal()">Cancel</button>
       <button class="btn-primary" onclick="submitReport()">Generate</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Action Modal -->
+<div class="overlay" id="confirm-modal">
+  <div class="modal" style="max-width:420px">
+    <h2 id="confirm-title">Confirm Action</h2>
+    <p id="confirm-message" style="color:var(--sub);font-size:14px;margin-bottom:24px;line-height:1.6"></p>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeConfirmModal()">Cancel</button>
+      <button class="btn-primary" id="confirm-btn" onclick="confirmAction()">Confirm</button>
     </div>
   </div>
 </div>

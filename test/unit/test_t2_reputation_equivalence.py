@@ -36,17 +36,18 @@ def _expected_score(temp_db, src_ip, now):
     conn = sqlite3.connect(temp_db)
     try:
         rows = conn.execute(
-            "SELECT unblocked_at FROM ip_attack_history WHERE src_ip = ? ORDER BY rowid",
+            "SELECT unblocked_at, confidence FROM ip_attack_history "
+            "WHERE src_ip = ? ORDER BY rowid",
             (src_ip,),
         ).fetchall()
     finally:
         conn.close()
     score = 0.0
-    for (ts,) in rows:
+    for (ts, conf) in rows:
         try:
             dt = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
             hours = (now - dt).total_seconds() / 3600.0
-            score += 2.0 * (0.5 ** (hours / 24.0))
+            score += (2.0 * conf ** 2) * (0.5 ** (hours / 24.0))
         except Exception:
             continue
     return min(round(score, 4), 10.0)
@@ -60,8 +61,9 @@ def test_decay_matches_independent_recomputation(temp_db, seed_history, frozen_n
     ])
     assert writer.get_offense_count("10.0.0.7") == pytest.approx(
         _expected_score(temp_db, "10.0.0.7", frozen_now), abs=1e-9)
-    # 24h-old offense contributes exactly half of a fresh one.
-    assert writer.get_offense_count("10.0.0.8") == pytest.approx(1.0, abs=1e-9)
+    # 24h-old offense contributes exactly half of a fresh one
+    # (confidence-weighted: 2.0 * 0.9^2 * 0.5 = 0.81).
+    assert writer.get_offense_count("10.0.0.8") == pytest.approx(0.81, abs=1e-9)
 
 
 def test_unparseable_and_empty_history_follow_formula(temp_db, seed_history, frozen_now):
@@ -74,17 +76,17 @@ def test_same_second_duplicates_each_contribute(temp_db, seed_history, frozen_no
     stamp = "2026-08-25 11:59:59"
     seed_history([("10.0.0.10", stamp), ("10.0.0.10", stamp)])
     one_second_hours = (1.0 / 3600.0) / 24.0
-    fresh = 2.0 * (0.5 ** one_second_hours)
+    fresh = (2.0 * 0.9 ** 2) * (0.5 ** one_second_hours)
     assert writer.get_offense_count("10.0.0.10") == pytest.approx(
         min(round(fresh * 2, 4), 10.0), abs=1e-9)
 
 
 def test_blackhole_threshold_crossing_exact_at_10(temp_db, seed_history, frozen_now):
-    # Six near-simultaneous offenses overshoot the cap: raw sum ~12, the
-    # function rounds THEN clamps, so the returned value must be exactly 10.0.
+    # Seven near-simultaneous offenses overshoot the cap with
+    # confidence-weighted scoring: 7 * 2.0 * 0.9^2 ~ 11.34 -> clamped 10.0.
     base = datetime.datetime(2026, 8, 25, 11, 59, 0)
     stamps = [(base + datetime.timedelta(seconds=i)).strftime("%Y-%m-%d %H:%M:%S")
-              for i in range(6)]
+              for i in range(7)]
     seed_history([("10.0.0.11", s) for s in stamps])
     score = behavioral.get_decay_score("10.0.0.11")
     assert score == 10.0
@@ -99,10 +101,10 @@ def test_below_threshold_does_not_blackhole(temp_db, seed_history, frozen_now):
 
 
 def test_fresh_offense_immediately_visible_to_decay(temp_db, seed_history, frozen_now):
-    # Seed five near-simultaneous offenses (raw sum just under 10), then one
-    # more must cross the clamp instantly, never one read later. This is what
-    # a naive TTL cache would break.
-    stamps = ["2026-08-25 11:59:59"] * 5
+    # Seed six near-simultaneous offenses (raw sum ~9.72 with
+    # confidence weighting), then one more must cross the clamp
+    # instantly, never one read later.
+    stamps = ["2026-08-25 11:59:59"] * 6
     seed_history([("10.0.0.13", s) for s in stamps])
     before = behavioral.get_decay_score("10.0.0.13")
     assert before < 10.0
@@ -236,9 +238,9 @@ def test_concurrent_offense_writes_never_omitted_nor_duplicated(
     assert rows == n_offenses
 
     # Structural exactly-once proof, immune to the 10.0 clamp masking score
-    # inflation: the cached timestamp list must hold exactly one entry per
-    # committed offense. A lost append makes it short; a load/append race
-    # duplicate makes it long.
+    # inflation: the cached (timestamp, confidence) list must hold exactly
+    # one entry per committed offense. A lost append makes it short; a
+    # load/append race duplicate makes it long.
     cached_stamps = writer._reputation_cache.get(ip)
     assert cached_stamps is not None
     assert len(cached_stamps) == n_offenses

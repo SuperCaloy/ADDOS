@@ -498,6 +498,13 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
     except Exception:
         duration_s = 0
 
+    # Compute frozen reputation BEFORE inserting the new row, so the snapshot
+    # reflects the IP's score at the moment this session ended.
+    try:
+        frozen_reputation = get_offense_count(src_ip)
+    except Exception:
+        frozen_reputation = 0.0
+
     try:
         # The INSERT, its seq bump, and the cache append run as one atomic
         # section under _reputation_lock so an offense is never omitted or
@@ -507,8 +514,8 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
                 INSERT INTO ip_attack_history
                     (src_ip, attack_vector, if_score, confidence, priority,
                      phase_reached, first_seen, unblocked_at, duration_sec, unblock_reason,
-                     ban_level, offence_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     ban_level, offence_count, reputation_score)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 src_ip,
                 attack_vector,
@@ -522,11 +529,12 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
                 unblock_reason,
                 ban_level,
                 offence_count,
+                round(frozen_reputation, 4),
             ))
             _reputation_seq += 1
             stamps = _reputation_cache.get(src_ip)
             if stamps is not None:
-                stamps.append(unblocked_at)
+                stamps.append((unblocked_at, confidence))
     except Exception:
         log.exception("Failed to write attack history for %s", src_ip)
 
@@ -540,21 +548,21 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
 # ---------------------------------------------------------------------------
 
 _reputation_lock = threading.Lock()
-_reputation_cache: dict[str, list[str]] = {}
+_reputation_cache: dict[str, list[tuple[str, float]]] = {}
 _reputation_seq = 0
 
 
 def clear_reputation_cache() -> None:
-    # Live-reset support: drop every cached per-IP timestamp list so
-    # reputation scores reload from the database on next read.
+    # Live-reset support: drop every cached per-IP (timestamp, confidence)
+    # list so reputation scores reload from the database on next read.
     with _reputation_lock:
         _reputation_cache.clear()
 
 
 def get_offense_count(src_ip: str) -> float:
     # Returns weighted offense score using half-life decay (24h half-life).
-    # Each offense adds +2.0 and decays over time; all offenses are summed so
-    # recent ones weigh more than old ones.
+    # Each offense adds 2.0 * confidence^2 and decays over time; all
+    # offenses are summed so recent high-confidence ones weigh more.
     try:
         from backend.database.db import query
 
@@ -569,11 +577,11 @@ def get_offense_count(src_ip: str) -> float:
                 break
 
             rows = query(
-                "SELECT unblocked_at FROM ip_attack_history "
+                "SELECT unblocked_at, confidence FROM ip_attack_history "
                 "WHERE src_ip = ? ORDER BY rowid",
                 (src_ip,)
             )
-            loaded = [r["unblocked_at"] for r in rows] if rows else []
+            loaded = [(r["unblocked_at"], r["confidence"]) for r in rows] if rows else []
 
             with _reputation_lock:
                 if _reputation_seq != seq0:
@@ -584,13 +592,13 @@ def get_offense_count(src_ip: str) -> float:
         now = datetime.datetime.now()
         score = 0.0
 
-        for ts in snapshot:
+        for ts, conf in snapshot:
             try:
                 # Parse the timestamp of each offense
                 offense_dt   = datetime.datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
                 hours_elapsed = (now - offense_dt).total_seconds() / 3600.0
-                # Half-life decay: +2.0 per offense, halves every 24h
-                score += 2.0 * (0.5 ** (hours_elapsed / 24.0))
+                # Half-life decay: 2.0 * confidence^2 per offense, halves every 24h
+                score += (2.0 * conf ** 2) * (0.5 ** (hours_elapsed / 24.0))
             except Exception:
                 continue
 
@@ -886,31 +894,23 @@ def get_system_metrics_avg(start: str, end: str) -> dict:
 def get_system_metrics_attack_vs_baseline(start: str, end: str) -> dict:
     """Returns avg Controller CPU during attack, baseline, and active mitigation."""
     try:
-        attack = query("""
-            SELECT AVG(ctrl_cpu_percent) as ctrl_cpu
+        rows = query("""
+            SELECT
+                AVG(CASE WHEN is_attack = 1 THEN ctrl_cpu_percent END)
+                    AS attack_cpu,
+                AVG(CASE WHEN is_attack = 0 THEN ctrl_cpu_percent END)
+                    AS baseline_cpu,
+                AVG(CASE WHEN is_mitigating = 1 THEN ctrl_cpu_percent END)
+                    AS mitigating_cpu
             FROM system_metrics
-            WHERE timestamp >= ? AND timestamp <= ? AND is_attack = 1
+            WHERE timestamp >= ? AND timestamp <= ?
         """, (f"{start} 00:00:00", f"{end} 23:59:59"))
 
-        baseline = query("""
-            SELECT AVG(ctrl_cpu_percent) as ctrl_cpu
-            FROM system_metrics
-            WHERE timestamp >= ? AND timestamp <= ? AND is_attack = 0
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
-
-        mitigating = query("""
-            SELECT AVG(ctrl_cpu_percent) as ctrl_cpu
-            FROM system_metrics
-            WHERE timestamp >= ? AND timestamp <= ? AND is_mitigating = 1
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
-
-        a = attack[0]     if attack     else {}
-        b = baseline[0]   if baseline   else {}
-        m = mitigating[0] if mitigating else {}
+        r = rows[0] if rows else {}
         return {
-            "attack_ctrl_cpu":     round(float(a.get("ctrl_cpu") or 0), 2),
-            "baseline_ctrl_cpu":   round(float(b.get("ctrl_cpu") or 0), 2),
-            "mitigation_ctrl_cpu": round(float(m.get("ctrl_cpu") or 0), 2),
+            "attack_ctrl_cpu":     round(float(r.get("attack_cpu") or 0), 2),
+            "baseline_ctrl_cpu":   round(float(r.get("baseline_cpu") or 0), 2),
+            "mitigation_ctrl_cpu": round(float(r.get("mitigating_cpu") or 0), 2),
         }
     except Exception:
         log.exception("Failed to get attack vs baseline metrics")

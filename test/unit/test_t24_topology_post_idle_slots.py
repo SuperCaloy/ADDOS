@@ -54,8 +54,8 @@ def test_post_idle_slots_unknown_host_falls_back_to_icmp():
     assert topo._post_idle_slots(99) == [("icmp_cont", 1)]
 
 
-def test_h2_stays_pure_tcp_and_h5_pure_icmp_after_idle():
+def test_h2_stays_pure_tcp_and_h12_pure_icmp_after_idle():
     assert all(slot_type == "tcp"
                for slot_type, _ in topo._post_idle_slots(2))
     assert all(slot_type == "icmp_cont"
-               for slot_type, _ in topo._post_idle_slots(5))
+               for slot_type, _ in topo._post_idle_slots(12))

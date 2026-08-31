@@ -119,6 +119,6 @@ def test_boundary_age_just_under_timeout_is_processed(triage_env):
 
 
 def test_whitelisted_and_invalid_items_never_reach_callback(triage_env):
-    for bad_ip in ("", "0.0.0.0", "10.0.0.20"):
+    for bad_ip in ("", "0.0.0.0", "10.0.0.26"):
         worker._process_item(1, 1, bad_ip, _flow_stats(), {}, time.monotonic(), 0)
     assert triage_env["callbacks"] == []

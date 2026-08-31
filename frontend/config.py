@@ -12,4 +12,4 @@ DASHBOARD_PORT = 8080
 # Chart settings
 GRAPH_LIVE_POINTS = 30
 POLL_INTERVAL_MS  = 2000
-MAX_LOG_ROWS      = 100
+MAX_LOG_ROWS      = 0  # 0 = no limit - all rows stay in DOM until DB exhausted

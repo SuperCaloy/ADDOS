@@ -39,7 +39,8 @@ def _ban_state(src_ip, recent_pps, if_score):
 
 
 def _seed_reputation_over_threshold(ip):
-    for _ in range(6):
+    # 7 offenses at confidence=0.9: 7 * 2.0 * 0.9^2 = 11.34 >= 10.0
+    for _ in range(7):
         behavioral.record_offense(
             src_ip=ip, attack_vector="SYN Flood", if_score=0.9,
             confidence=0.9, priority="High", phase_reached=2,

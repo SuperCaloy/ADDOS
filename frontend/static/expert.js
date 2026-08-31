@@ -4,6 +4,7 @@
 let _expertPollTimer = null;
 let _expertSSE = null;
 let _expertActive = false;
+let _ambientTimer = null;
 
 function toggleExpertMode() {
   const btn = document.getElementById('expert-btn');
@@ -15,7 +16,7 @@ function toggleExpertMode() {
     window.EXPERT_MODE = true;
     btn.classList.add('active');
     btn.setAttribute('aria-pressed', 'true');
-    btn.textContent = '☰ Expert ✓';
+    btn.textContent = 'Expert Mode \u2713';
     panels.classList.remove('expert-hidden');
     document.getElementById('expert-pipeline-panel').classList.remove('expert-hidden');
     body.classList.add('expert-mode');
@@ -27,7 +28,7 @@ function toggleExpertMode() {
     window.EXPERT_MODE = false;
     btn.classList.remove('active');
     btn.setAttribute('aria-pressed', 'false');
-    btn.textContent = '☰ Expert';
+    btn.textContent = 'Expert Mode';
     panels.classList.add('expert-hidden');
     document.getElementById('expert-pipeline-panel').classList.add('expert-hidden');
     body.classList.remove('expert-mode');
@@ -52,11 +53,15 @@ function startExpertMode() {
   ExpertPipeline.init();
   ExpertStages.init();
   ExpertMetrics.init();
+
+  if (_ambientTimer) clearInterval(_ambientTimer);
+  _ambientTimer = setInterval(ExpertPipeline.spawnAmbientParticle, 1200);
 }
 
 function stopExpertMode() {
   if (_expertPollTimer) { clearInterval(_expertPollTimer); _expertPollTimer = null; }
   if (_expertSSE) { _expertSSE.close(); _expertSSE = null; }
+  if (_ambientTimer) { clearInterval(_ambientTimer); _ambientTimer = null; }
   ExpertPipeline.stop();
 }
 
@@ -169,94 +174,118 @@ var ExpertStages = {
       num: 1, color: '#14B8A6',
       title: 'Mininet Network Topology',
       file: 'topology/topology.py',
-      desc: 'Emulated network environment providing OpenFlow-capable virtual switches and hosts. Generates both legitimate IP/TCP/UDP traffic and high-volume SYN/UDP/ICMP flood patterns from designated attacker hosts, enabling safe pipeline testing without production network exposure.',
-      input: '1 core switch (s0) plus 8 edge switches\n22 hosts in play (5 legit + 15 attackers + h20 server + h21 sinkhole)\nh1 to h5: legit TCP/UDP/ICMP traffic\nh6 to h19 + h22: 15 attackers, SYN/ICMP/UDP\nh20: server (10.0.0.20), whitelisted, never scored',
-      output: 'Raw packets crossing\nOpenFlow switches toward h20'
+      desc: 'Software-defined network emulation comprising a core OpenFlow switch (s0) and eight edge switches (s1-s8). Fifteen legitimate hosts generate baseline TCP, UDP, and ICMP traffic at realistic intervals, while ten attacker hosts produce sustained high-volume floods. Host h26 serves as the whitelisted target server; h27 operates as a silent sinkhole for deception redirects.',
+      input: '1 core switch (s0) + 8 edge switches (s1-s8)\n27 hosts total:\n  h1-h15: legitimate TCP/UDP/ICMP (3-7s intervals)\n  h16-h19: SYN flood (ports 80, 443, 5432, 3389)\n  h20-h22: UDP flood (ports 53, 123, 1900)\n  h23-h25: ICMP flood\n  h26: target server (10.0.0.26), whitelisted\n  h27: sinkhole (10.0.0.27), passive',
+      output: 'Raw packets traversing OpenFlow switches'
     },
     ryu: {
       num: 2, color: '#14B8A6',
       title: 'Ryu SDN Controller',
       file: 'controller/ryu_controller.py',
-      desc: 'SDN controller serving as the network enforcement point. Polls the switch via OpenFlow for per-flow statistics (packet count, byte count, duration) and receives mitigation commands from the Decision Engine, installing corresponding drop rules on the switch.',
-      input: 'OpenFlow Packet-In events\nplus per-flow stat replies',
-      output: 'Structured flow stats:\npacket_count, byte_count, duration, ports'
+      desc: 'SDN controller functioning as the network enforcement point. Polls OpenFlow switches for per-flow statistics (packet count, byte count, duration) and receives mitigation commands from the Decision Engine, installing corresponding drop rules on the switch datapath.',
+      input: 'OpenFlow Packet-In events\nand per-flow stat replies',
+      output: 'Structured flow statistics:\npacket_count, byte_count, duration, ports'
     },
     zmq_rx: {
       num: 3, color: '#14B8A6',
       title: 'ZeroMQ Transport',
       file: 'backend/transport/zmq_receiver.py',
-      desc: 'Asynchronous message transport layer between the SDN controller and detection backend. Queues flow reports for non-blocking delivery, maintaining network operation during periods of high analysis load.',
+      desc: 'Asynchronous message transport layer bridging the SDN controller and detection backend. Queues flow reports for non-blocking delivery, ensuring uninterrupted network operation during periods of high analytical load.',
       input: 'Serialized JSON flow\nreports from Ryu',
-      output: 'Decoded flow dicts pushed\ninto the worker queue'
+      output: 'Decoded flow dictionaries\npushed into the worker queue'
     },
     flood: {
       num: 4, color: '#F59E0B',
       title: 'Flood Prefilter',
       file: 'backend/pipeline/flood_prefilter.py',
-      desc: 'Rate-based prefilter operating before ML analysis. Monitors per-IP, per-protocol packet timing (SYN, ICMP, UDP) against configured thresholds, flagging sources that exceed rate limits or exhibit sub-second burst behavior.',
-      input: 'Per-packet protocol plus\nsource IP, as flows arrive',
-      output: 'Flag: exceeded or not, per\nsource IP and protocol'
+      desc: 'Rate-based prefilter employing exponentially weighted moving average (EWMA) thresholds. Monitors per-source, per-protocol packet arrival rates for SYN, ICMP, and UDP traffic against dynamically learned baselines. Flags sources that exceed adaptive thresholds or exhibit sub-second burst patterns. Correlates simultaneous protocol violations to identify coordinated multi-vector attacks.',
+      input: 'Per-packet protocol classification\nand source IP, on each flow arrival',
+      output: 'Binary flag (exceeded or not)\nper source IP and protocol',
+      formula: [
+        { f: 'ewma = (1 - alpha) * ewma + alpha * current_pps', note: 'EWMA baseline learning with alpha = 0.1' },
+        { f: 'threshold = max(ewma * 3.0, floor = 25)', note: 'adaptive limit with minimum floor' },
+        { f: 'burst: count >= 40% of threshold in 0.1s or 0.5s', note: 'sub-second spike detection' },
+        { f: 'correlation: 2+ protocols tripped simultaneously', note: 'multi-vector attack identification' }
+      ]
     },
     entropy: {
       num: 5, color: '#F59E0B',
       title: 'Entropy Analyzer (TEA)',
       file: 'backend/pipeline/entropy_analyzer.py',
-      desc: 'Temporal Entropy Analyzer (TEA) builds a rolling baseline of packet rate and traffic diversity per switch over time. A sharp entropy drop below the learned baseline signals repetitive, low-diversity attack traffic characteristic of automated floods.',
-      input: 'Flow stream plus per-switch\nrolling packet-rate baseline',
-      output: 'Diversity score plus pass or hold\ndecision on which flows continue',
+      desc: 'Temporal Entropy Analyzer (TEA) maintains rolling baselines of traffic diversity and intensity per switch. Computes Shannon entropy across source IP and port distributions, then applies z-score analysis against the learned baseline. A significant negative deviation indicates repetitive, low-diversity traffic characteristic of automated floods. A latch mechanism freezes the baseline during active attacks to prevent contamination.',
+      input: 'Flow stream with per-switch\nrolling packet-rate baseline',
+      output: 'Diversity score and pass/hold\ndecision for downstream stages',
       formula: [
-        { f: 'H = -sum(p_i * log2(p_i))', note: 'diversity score across source IPs and ports' },
-        { f: 'mu_t = a*x_t + (1-a)*mu_{t-1}', note: 'learned baseline, adapts faster when stable' },
-        { f: 'z = (x - mu) / sigma, flagged when z < -sigma_attack', note: 'baseline learns over 15-interval rolling window' }
+        { f: 'H = -sum(p_i * log2(p_i))', note: 'Shannon entropy across source IPs and ports' },
+        { f: 'mu_t = a * x_t + (1 - a) * mu_{t-1}', note: 'exponentially weighted baseline update' },
+        { f: 'z = (x - mu) / sigma, flagged when z < -sigma_attack', note: 'z-score deviation over 15-interval window' },
+        { f: 'confidence: HIGH (z < -3), MODERATE (z < -2), LOW', note: 'deviation severity classification' }
       ]
     },
     if_node: {
       num: 6, color: '#E11D48',
       title: 'Isolation Forest',
       file: 'backend/models/if_pipeline.py',
-      desc: 'Unsupervised anomaly detector trained exclusively on normal traffic. Scores each flow by how readily it isolates from the observed distribution; anomalous flows isolate quickly and receive higher scores, producing a numeric anomaly rating per flow.',
-      input: '16-feature vector per flow\n(rates, ratios, timing)',
-      output: 'Anomaly score (0 to 1) plus\nabove/below threshold flag',
+      desc: 'Unsupervised anomaly detector trained exclusively on normal traffic patterns. Scores each flow by its average isolation path length: anomalous observations isolate quickly (shorter paths) and receive higher anomaly scores. Only flows exceeding the fixed threshold are forwarded to the Random Forest for supervised classification.',
+      input: '16-feature vector per flow\n(traffic rates, ratios, timing)',
+      output: 'Anomaly score (0 to 1) with\nthreshold exceedance flag',
       formula: [
-        { f: 's(x, n) = 2^(-E(h(x)) / c(n))', note: 'anomaly score from average isolation path length' },
-        { f: 'if_score = -score_samples(x)', note: 'flagged anomalous when if_score >= threshold (from model contract)' }
+        { f: 's(x, n) = 2^(-E(h(x)) / c(n))', note: 'anomaly score from average path length' },
+        { f: 'if_score = -score_samples(x)', note: 'flagged when if_score >= threshold' },
+        { f: 'threshold = 0.5992 (frozen model)', note: 'fixed at training; not retrained at runtime' }
       ]
     },
     rf: {
       num: 7, color: '#14B8A6',
       title: 'Random Forest',
       file: 'backend/models/rf_pipeline.py',
-      desc: 'Supervised classifier invoked only on flows flagged as anomalous by the Isolation Forest. Predicts the attack type (ICMP Flood, SYN Flood, UDP Flood) with an associated confidence score based on learned attack signatures.',
-      input: '15-feature vector, only for\nflows the IF flagged anomalous',
-      output: 'One of: ICMP Flood, SYN Flood,\nUDP Flood, plus confidence',
+      desc: 'Supervised classifier invoked exclusively on flows flagged anomalous by the Isolation Forest. Predicts attack type (SYN Flood, ICMP Flood, or UDP Flood) through majority voting across an ensemble of decision trees. Enforcement actions are triggered only when classification confidence exceeds the configured gate threshold.',
+      input: '15-feature vector, exclusively\nfor IF-flagged anomalous flows',
+      output: 'Attack class (SYN/ICMP/UDP Flood)\nwith confidence score',
       formula: [
         { f: 'y_hat = mode{T_1(x), T_2(x), ..., T_k(x)}', note: 'majority vote across k decision trees' },
-        { f: 'confidence = votes(y_hat) / k', note: 'acted on only when confidence >= conf_gate (from model contract)' }
+        { f: 'confidence = votes(y_hat) / k', note: 'acted upon when confidence >= conf_gate' },
+        { f: 'conf_gate = 0.65 (frozen model)', note: 'minimum confidence for mitigation trigger' }
       ]
     },
     decision: {
       num: 8, color: '#F59E0B',
       title: 'Decision + Mitigation',
       file: 'backend/pipeline/decision_engine.py',
-      desc: 'Final arbitration stage. Evaluates the Isolation Forest anomaly score and Random Forest classification against configured thresholds. When attack confidence is sufficient, issues enforcement commands to the Ryu Controller via ZeroMQ.',
-      input: 'IF anomaly score plus\nRF class and confidence',
-      output: 'Enforcement commands: rate_limit, block, clear, redirect, proto_block'
+      desc: 'Final arbitration stage that evaluates the Isolation Forest anomaly score and Random Forest classification against configured thresholds. When confidence is sufficient, issues enforcement commands to the Ryu Controller via ZeroMQ: rate limiting (Phase 1), full blocking (Phase 2), deception redirect, or clearance.',
+      input: 'IF anomaly score with\nRF class and confidence',
+      output: 'Enforcement commands:\nrate_limit, block, clear, redirect, proto_block',
+      formula: [
+        { f: 'Phase 1: if_score >= 0.5992 AND conf >= 0.65', note: 'quarantine with rate limiting' },
+        { f: 'Phase 2: escalation after persistence check', note: 'full block via OVS flow rules' },
+        { f: 'Phase 3: blackhole for 3600s (1 hour)', note: 'final mitigation with TTL expiry' }
+      ]
     },
     deception: {
       num: 9, color: '#8B5CF6',
       title: 'Deception / Sinkhole',
       file: 'backend/mitigation/deception.py',
-      desc: 'Redirects suspicious traffic to a designated sinkhole host for controlled observation. Measures attack persistence and classifier confidence over a 30-second observation window. Escalates to Phase 1 if traffic persists with high confidence, otherwise releases the source.',
-      input: 'Quarantined IPs with unresolved\nattack vector / low confidence',
-      output: 'OpenFlow redirect to sinkhole,\nescalation to Phase 1 or release'
+      desc: 'Redirects quarantined traffic to the sinkhole host (h27, 10.0.0.27) for controlled observation. Monitors attack persistence and classifier confidence over a 30-second observation window. Escalates to Phase 1 rate limiting if traffic persists with high confidence; otherwise releases the source.',
+      input: 'Quarantined IPs with\nunresolved attack vector',
+      output: 'OpenFlow redirect to sinkhole,\nescalation to Phase 1 or release',
+      formula: [
+        { f: 'observation_window = 30s', note: 'attack persistence measurement period' },
+        { f: 'escalate: persistence > 0.8 AND confidence >= 0.65', note: 'sustained attack with high RF confidence' },
+        { f: 'release: persistence < 0.3 OR confidence < 0.4', note: 'traffic ceased or classifier uncertain' }
+      ]
     },
     resource_guard: {
       num: 10, color: '#EC4899',
       title: 'Resource Guard',
       file: 'backend/mitigation/resource_guard.py',
-      desc: 'Monitors Ryu controller resource utilization (CPU, memory). At HIGH tier: throttles detection rate with 20ms delay. At CRIT tier: installs OVS proto_block rules to shed excess Packet-In load. Auto-recovers when resources normalize.',
-      input: 'Ryu CPU/memory metrics (polled every 2s)',
-      output: 'Throttle delay (20ms/50ms) + proto_block rules on attack protocol'
+      desc: 'Monitors Ryu controller CPU and memory utilization. At HIGH tier, throttles detection rate with a 20ms processing delay. At CRIT tier, installs OpenFlow proto_block rules to shed excess Packet-In load. Automatically recovers when resource utilization normalizes.',
+      input: 'Ryu CPU/memory metrics\n(polled every 2 seconds)',
+      output: 'Throttle delay (20ms/50ms) and\nproto_block rules on attack protocol',
+      formula: [
+        { f: 'HIGH: cpu > 70% OR mem > 80%', note: 'detection throttled with 20ms delay' },
+        { f: 'CRIT: cpu > 90% OR mem > 95%', note: 'proto_block rules installed on attack protocol' },
+        { f: 'recovery: cpu < 50% AND mem < 60% for 10s', note: 'automatic throttle/block removal' }
+      ]
     }
   },
 
@@ -495,6 +524,21 @@ var ExpertPipeline = {
       spawnTime: performance.now(), delay: 0,
       speed: 0.96 + Math.random() * 0.48,
       color: '#8B5CF6', isFeedback: true
+    });
+  },
+
+  spawnAmbientParticle: function() {
+    if (this.reducedMotion || this.particles.length > 40) return;
+    var forwardPaths = this.paths.filter(function(p) { return !p.feedback && p.kind !== 'redirect'; });
+    if (!forwardPaths.length) return;
+    var path = forwardPaths[Math.floor(Math.random() * forwardPaths.length)];
+    var colors = ['#F59E0B', '#14B8A6', '#94A3B8'];
+    this.particles.push({
+      from: path.from, to: path.to,
+      spawnTime: performance.now(), delay: 0,
+      speed: 0.6 + Math.random() * 0.4,
+      color: colors[Math.floor(Math.random() * colors.length)],
+      isFeedback: false
     });
   },
 

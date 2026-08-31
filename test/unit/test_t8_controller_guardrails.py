@@ -418,6 +418,40 @@ def scenario_reconnect_flush_invalidates_dedup():
     assert len(installs(dp)) == 2
 
 
+def scenario_clear_pops_global_proto_cache():
+    c = make_controller()
+    dp = FakeDP(1)
+    c._datapaths[1] = dp
+    c._src_proto[1]["10.0.0.66"] = 17
+    c._src_proto_global["10.0.0.66"] = 17
+
+    c._apply_command({{"action": "clear", "src_ip": "10.0.0.66"}})
+
+    # Both cache levels must die with the unblock: a stale global entry
+    # survives per-dpid pops and poisons the next campaign for a host that
+    # is now assigned a different protocol (mixed campaign ip_proto leak).
+    assert "10.0.0.66" not in c._src_proto[1]
+    assert "10.0.0.66" not in c._src_proto_global
+
+
+def scenario_flush_proto_cache_command_clears_proto_state():
+    c = make_controller()
+    c._banned_ips.add("10.0.0.66")
+    c._switch_proto[1][17] = 9
+    c._src_proto[1]["10.0.0.66"] = 17
+    c._src_proto_global["10.0.0.66"] = 17
+    c._src_ports["10.0.0.66"] = (53, 53)
+
+    c._apply_command({{"action": "flush_proto_cache"}})
+
+    assert not c._switch_proto[1]
+    assert not c._src_proto[1]
+    assert not c._src_proto_global
+    assert not c._src_ports
+    # Flush is a cache hygiene action only: it must never unban anyone.
+    assert "10.0.0.66" in c._banned_ips
+
+
 def scenario_meter_install_deletes_before_add():
     c = make_controller()
     dp = FakeDP(1)
@@ -490,6 +524,8 @@ _SCENARIO_NAMES = [
     "below_limit_path_unaffected_by_cap",
     "block_invalidates_dedup_entry",
     "clear_invalidates_dedup_entry",
+    "clear_pops_global_proto_cache",
+    "flush_proto_cache_command_clears_proto_state",
     "epoch_delete_invalidates_dedup_entry",
     "throttle_dedup_expires_after_ttl",
     "stats_sighting_does_not_extend_dedup",

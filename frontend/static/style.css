@@ -625,19 +625,19 @@ body.light .cal-nav:hover { background: var(--border); color: var(--text); }
   font-weight: 600;
 }
 
-.theme-btn {
-  padding: 9px 18px; border-radius: 9px; cursor: pointer;
-  font-family: var(--sans); font-size: 13px; font-weight: 500;
+.theme-btn, .btn-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; padding: 0; border-radius: 9px; cursor: pointer;
   border: 1px solid var(--border2); background: var(--card); color: var(--sub2);
   transition: all .18s;
 }
-.theme-btn:hover { border-color: var(--amber); color: var(--amber); background: var(--amber-g); }
+.theme-btn:hover, .btn-icon:hover { border-color: var(--amber); color: var(--amber); background: var(--amber-g); }
 
 body.light .expert-btn { background: var(--card); border-color: var(--border2); color: var(--sub2); }
 body.light .expert-btn:hover { border-color: var(--blue); color: var(--blue); background: var(--blue-g); }
 body.light .expert-btn.active { background: var(--blue-g); border-color: var(--blue); color: var(--blue); }
-body.light .theme-btn { background: var(--card); border-color: var(--border2); color: var(--sub2); }
-body.light .theme-btn:hover { border-color: var(--amber); color: var(--amber); background: var(--amber-g); }
+body.light .theme-btn, body.light .btn-icon { background: var(--card); border-color: var(--border2); color: var(--sub2); }
+body.light .theme-btn:hover, body.light .btn-icon:hover { border-color: var(--amber); color: var(--amber); background: var(--amber-g); }
 
 /* ── EXPERT MODE: PANEL VISIBILITY ─────────────────────────────────────── */
 

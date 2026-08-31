@@ -1,8 +1,28 @@
 /* mitigation.js — polls /api/quarantine_list, DOM-diffs watchlist table,
- * handles release and blackhole button actions. */
+ * handles release and blackhole button actions with confirmation modals. */
 
 /* Row map — src_ip → <tr> — used for in-place DOM updates (no flicker) */
 const _qRows = new Map();
+
+/* Confirmation modal state */
+let _confirmCallback = null;
+
+function openConfirmModal(title, message, callback) {
+  document.getElementById('confirm-title').textContent = title;
+  document.getElementById('confirm-message').textContent = message;
+  _confirmCallback = callback;
+  document.getElementById('confirm-modal').classList.add('open');
+}
+
+function closeConfirmModal() {
+  document.getElementById('confirm-modal').classList.remove('open');
+  _confirmCallback = null;
+}
+
+function confirmAction() {
+  if (_confirmCallback) _confirmCallback();
+  closeConfirmModal();
+}
 
 /* Poll /api/quarantine_list and update watchlist table */
 async function fetchQuarantine() {
@@ -63,8 +83,8 @@ async function fetchQuarantine() {
         <td class="mono">${conf}</td>
         <td style="color:var(--sub2);font-family:var(--mono);font-size:12px">${time}</td>
         <td><div style="display:flex;gap:6px">
-          <button class="q-btn q-rel" onclick="event.stopPropagation();quarantineAction('release','${e.src_ip}')">Release</button>
-          <button class="q-btn q-blk" onclick="event.stopPropagation();quarantineAction('block','${e.src_ip}')">Blackhole</button>
+          <button class="q-btn q-rel" onclick="event.stopPropagation();confirmQuarantineAction('release','${e.src_ip}')">Release</button>
+          <button class="q-btn q-blk" onclick="event.stopPropagation();confirmQuarantineAction('block','${e.src_ip}')">Blackhole</button>
         </div></td>`;
 
       if (_qRows.has(e.src_ip)) {
@@ -88,6 +108,22 @@ async function fetchQuarantine() {
     if (placeholder) placeholder.parentElement.remove();
 
   } catch (_) {}
+}
+
+/* Show confirmation modal before executing quarantine action */
+function confirmQuarantineAction(action, ip) {
+  const title = action === 'release' ? 'Release IP' : 'Blackhole IP';
+  const msg = action === 'release'
+    ? `Are you sure you want to release ${ip}?`
+    : `Are you sure you want to blackhole ${ip}?`;
+  const btnText = action === 'release' ? 'Release' : 'Blackhole';
+
+  const btn = document.getElementById('confirm-btn');
+  btn.textContent = btnText;
+  btn.className = action === 'release' ? 'btn-primary' : 'btn-primary';
+  btn.style.background = action === 'release' ? 'var(--green)' : 'var(--red)';
+
+  openConfirmModal(title, msg, () => quarantineAction(action, ip));
 }
 
 /* POST release or blackhole action for an IP */
