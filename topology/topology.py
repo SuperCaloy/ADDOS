@@ -40,7 +40,12 @@ _RESTORE_POLLER_STOP   = threading.Event()
 _BASELINE_WATCHDOG_STOP = threading.Event()
 _WATCHDOG_SUPPRESS      = threading.Event()
 
-# Balanced 4 SYN / 3 ICMP / 3 UDP floods, each using a 1400B UDP/ICMP payload to maximize bandwidth at a fixed packet rate. 1400B stays within the frozen model's training range and near MTU.
+# Attack archetypes are deliberately separable on packet size + ports alone so
+# RF never depends on ip_proto being resolvable (proto caches can go blind after
+# a ban/release of a still-flooding attacker): SYN is the tiny-packet archetype
+# (~60B, TCP ports), UDP the amplification archetype (1400B, service ports),
+# ICMP the ping-flood archetype (512B, no ports). Three disjoint size/port
+# clusters; all sizes stay inside the frozen model's tolerated range.
 _ALL_VARIANTS = {
     16: ("SYN",  "-S -p 80   --flood",                 0, 0),
     17: ("SYN",  "-S -p 443  --flood",                 0, 0),
@@ -49,9 +54,9 @@ _ALL_VARIANTS = {
     20: ("UDP",  "--udp -p 53    --flood --data 1400",  0, 0),
     21: ("UDP",  "--udp -p 123   --flood --data 1400",  0, 0),
     22: ("UDP",  "--udp -p 1900  --flood --data 1400",  0, 0),
-    23: ("ICMP", "--icmp --flood --data 1400",         0, 0),
-    24: ("ICMP", "--icmp --flood --data 1400",         0, 0),
-    25: ("ICMP", "--icmp --flood --data 1400",         0, 0),
+    23: ("ICMP", "--icmp --flood --data 512",          0, 0),
+    24: ("ICMP", "--icmp --flood --data 512",          0, 0),
+    25: ("ICMP", "--icmp --flood --data 512",          0, 0),
 }
 _ATTACKER_VARIANTS = {n: v for n, v in _ALL_VARIANTS.items()
                       if n in _ATTACKER_NUMS}
@@ -72,11 +77,12 @@ _ATTACKER_START_DELAYS = {
     num: round(random.uniform(0.1, 0.6), 2) for num in _ATTACKER_NUMS
 }
 
-# Attack type flags for randomized mixed campaigns
+# Attack type flags for randomized mixed campaigns (same archetypes as
+# _ALL_VARIANTS: SYN tiny, UDP 1400B, ICMP 512B ping-flood)
 _ATTACK_TYPE_FLAGS = {
     "SYN":  "-S -p {port} --flood",
-    "UDP":  "--udp -p {port} --flood --data 1024",
-    "ICMP": "--icmp --flood --data 1024",
+    "UDP":  "--udp -p {port} --flood --data 1400",
+    "ICMP": "--icmp --flood --data 512",
 }
 _ATTACK_TYPE_PORTS = {
     "SYN":  [80, 443, 8080, 5432, 3389, 25, 1900],
@@ -177,6 +183,51 @@ _baseline_lock       = threading.Lock()
 _baseline_slot_procs: dict[str, list] = {}
 _idle_host_ref:      list = [-1]
 _restore_log = _logging.getLogger("restore_poller")
+
+# Warm-start pacing: rebuilt legit flows (600s epoch delete, flush) sit at 1-2
+# packets when the 10s young-suppression gate lets them through, and 1-4 packet
+# rows score 0.61-0.64 on the frozen IF (benign UDP FP evidence, benchmark.db
+# 15:xx). Fast pacing for a short window pushes 5+ packets into the flow first;
+# 5-10 packet rows maxed 0.5903 (safe).
+_FLOW_EPOCH_S        = 600  # mirrors FLOW_EPOCH_S in controller/ryu_controller.py
+_WARM_FLUSH_GRACE_S  = 45   # fast pacing duration after a legit-flow flush
+_WARM_EPOCH_WINDOW_S = 30   # fast pacing duration after each epoch boundary
+_WARM_FAST_SLEEP     = (2.0, 3.0)
+_flow_clear_ts:      float = 0.0
+_BASELINE_START_TS:  float = 0.0
+_WARM_START_JITTER   = {n: random.uniform(0.0, 15.0) for n in sorted(_LEGIT_NUMS)}
+
+
+def note_flow_flush() -> None:
+    # Mark that legit p10 flows were just flushed (reset_flow_epochs), so the
+    # baseline loop fast-paces the rebuilt flows out of the young FP zone.
+    global _flow_clear_ts
+    _flow_clear_ts = time.time()
+
+
+def _warm_start_active(num: int, now: float | None = None) -> bool:
+    # True while host `num` should fast-pace: within _WARM_FLUSH_GRACE_S of a
+    # flow flush, or inside a per-host jittered window after each 600s epoch
+    # boundary measured from baseline start (jitter desynchronizes hosts so
+    # they never rebuild flows in the same second).
+    now = time.time() if now is None else now
+    if _flow_clear_ts and (now - _flow_clear_ts) < _WARM_FLUSH_GRACE_S:
+        return True
+    if not _BASELINE_START_TS:
+        return False
+    phase = now - _BASELINE_START_TS - _WARM_START_JITTER.get(num, 0.0)
+    if phase < 0:
+        return False
+    return (phase % _FLOW_EPOCH_S) < _WARM_EPOCH_WINDOW_S
+
+
+def _baseline_sleep(num: int, slot_type: str, mult: float,
+                    now: float | None = None) -> float:
+    # Send-interval for one baseline send. UDP slots fast-pace during the
+    # warm-start window; everything else keeps the calibrated 3-7s * mult.
+    if slot_type == "udp" and _warm_start_active(num, now):
+        return random.uniform(*_WARM_FAST_SLEEP)
+    return random.uniform(3.0 * mult, 7.0 * mult)
 
 net   = None
 hosts = []
@@ -393,14 +444,15 @@ def _baseline_loop(host, stop_event: threading.Event, idle_host_ref: list) -> No
                 break
             slot_type, slot_key = random.choice(slots)
             _run_slot(host, slot_type, slot_key)
-            time.sleep(random.uniform(3.0 * mult, 7.0 * mult))
+            time.sleep(_baseline_sleep(num, slot_type, mult))
 
     _kill_baseline_procs(host)
 
 def start_baseline_traffic() -> None:
     # start a baseline thread for every legit host
-    global _baseline_threads, _baseline_stop
+    global _baseline_threads, _baseline_stop, _BASELINE_START_TS
     _stop_baseline_threads()
+    _BASELINE_START_TS = time.time()
     legit = [h for h in hosts if int(h.name[1:]) in _LEGIT_NUMS]
     info(f"*** Starting baseline on {len(legit)} legit hosts -> {SERVER_IP}\n")
 
@@ -1166,6 +1218,7 @@ def stop_stress_test() -> None:
 
 def reset_flow_epochs() -> None:
 # Flush priority-10 forward rules so flow counters restart, bounding the cumulative age drift that pushes clean hosts over the threshold. Strict per-IP deletes are required by the installed OVS.
+    note_flow_flush()
     if net is None:
         return
     info("*** Resetting flow epochs (flush priority=10 forwards)...\n")

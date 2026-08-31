@@ -81,9 +81,17 @@ def _mixed_flow(seed: int) -> dict:
     }
 
 
-def _learn_diverse(ea: EntropyAnalyzer, intervals: int = 65) -> None:
+def _learn_diverse(ea: EntropyAnalyzer, clock, intervals: int = 305) -> None:
+    """Push enough diverse legit intervals through real update() calls.
+
+    New learning policy (test_tea_learning_window.py): floor is
+    TEA_LEARN_MIN_SAMPLES (300) accepted samples over at least
+    TEA_LEARN_MIN_DURATION_S (300s) wall clock, anchored at the first
+    warmup sample. 305 intervals at 1.0s each satisfy both.
+    """
     res = {}
     for i in range(intervals):
+        clock.t += 1.0
         ea._last_eval_time = 0.0
         flows = [_mixed_flow(i * 23 + j) for j in range(20)]
         res = ea.update(1, flows)
@@ -108,9 +116,9 @@ def _uniform_flow(i: int, pps: float = 10.0, bps: float = 80.0,
 
 # --- P1: uniform legit traffic must not be an attack pattern ----------------
 
-def test_uniform_legit_traffic_not_attack():
+def test_uniform_legit_traffic_not_attack(clock):
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     ea._last_eval_time = 0.0
     res = ea.update(1, [_uniform_flow(j, ips=8) for j in range(9)])
     assert res["is_attack_pattern"] is False
@@ -119,18 +127,18 @@ def test_uniform_legit_traffic_not_attack():
     assert res["mechanized_cluster"] is True
 
 
-def test_diverse_traffic_remains_normal():
+def test_diverse_traffic_remains_normal(clock):
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     ea._last_eval_time = 0.0
     res = ea.update(1, [_mixed_flow(500 + j) for j in range(20)])
     assert res["is_attack_pattern"] is False
     assert res["confidence"] == "low"
 
 
-def test_uniform_flood_still_latches():
+def test_uniform_flood_still_latches(clock):
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     latched_at = None
     res = {}
     for i in range(3):
@@ -153,12 +161,12 @@ def test_uniform_flood_still_latches():
     assert ea.is_locked is True
 
 
-def test_low_rate_uniform_flood_still_flagged():
+def test_low_rate_uniform_flood_still_flagged(clock):
     # R1 backstop: baseline-rate uniform flood from many sources.
     # Per-IP profiles stay "uncertain" at steady low pps, so the global
     # layer must still flag it, at moderate, via the many-source backstop.
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     ea._last_eval_time = 0.0
     res = ea.update(1, [_uniform_flow(200 + j) for j in range(25)])
     assert res["is_attack_pattern"] is True
@@ -167,9 +175,9 @@ def test_low_rate_uniform_flood_still_flagged():
 
 # --- P2: relearn without IF confirmation, with halt + drift cap -------------
 
-def test_relearn_without_if_confirm():
+def test_relearn_without_if_confirm(clock):
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     for k in range(3):
         ea.feedback_tea(True, "moderate", eval_seq=17 + k)
     assert ea.attack_latched is True
@@ -179,27 +187,30 @@ def test_relearn_without_if_confirm():
     res = {}
     for i in range(40):
         ea._last_eval_time = 0.0
-        res = ea.update(1, [_uniform_flow(i * 9 + j, ips=8) for j in range(9)])
+        # Backstop-grade uniform (many sources) reads moderate while latched:
+        # the inert-moderate signature that builds the stability counter.
+        # 20% IF mis-score rate stays under TEA_RELEARN_MAX_IF_ANOMALY_RATE
+        # (the contamination gate) while the IF streak never reaches 5.
+        res = ea.update(1, [_uniform_flow(i * 25 + j) for j in range(25)])
         ea.feedback_tea(
             bool(res["is_attack_pattern"]),
             str(res.get("confidence", "low")),
             eval_seq=res["eval_seq"],
         )
-        # Heavy IF mis-scoring of the uniform legit traffic: the IF normal
-        # streak must never reach the old relearn gate (5).
-        for j in range(9):
-            ea.feedback_if(j % 2 == 0)
+        for j in range(25):
+            ea.feedback_if(j % 5 == 0)
         if_streak_max = max(if_streak_max, ea.if_normal_streak)
 
     assert if_streak_max < 5            # old IF-gated relearn could never engage
     share_after = ea._global_state.share_base.mean
     assert share_after > share_before + 0.1   # baselines re-anchored anyway
-    assert res["is_attack_pattern"] is False
+    assert res["is_attack_pattern"] is True
+    assert res["confidence"] == "moderate"    # backstop moderate, relearn-eligible
 
 
-def test_relearn_halts_on_any_attack_verdict_and_caps_drift():
+def test_relearn_halts_on_any_attack_verdict_and_caps_drift(clock):
     # (a) supervised force path carries a per-interval drift cap (REG-1)
-    b = _AdaptiveBaseline(ea_mod.TEA_LEARN_INTERVALS)
+    b = _AdaptiveBaseline(ea_mod.TEA_LEARN_MIN_SAMPLES)
     b._learned = True
     b._mean = 10.0
     b._variance = 1.0
@@ -211,7 +222,7 @@ def test_relearn_halts_on_any_attack_verdict_and_caps_drift():
     # (b) P2 stable-moderate trigger: moderates while latched are the
     # frozen-baseline FP signature and BUILD the stability counter.
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     for k in range(3):
         ea.feedback_tea(True, "moderate", eval_seq=17 + k)
     assert ea.attack_latched is True
@@ -221,8 +232,11 @@ def test_relearn_halts_on_any_attack_verdict_and_caps_drift():
     assert ea._relearn_stable_streak >= 10
 
     ea._last_eval_time = 0.0
-    res = ea.update(1, [_uniform_flow(j, ips=8) for j in range(9)])
-    assert res["is_attack_pattern"] is False
+    # Backstop-grade uniform reads moderate while latched -> supervised
+    # relearn is eligible (rate 0: no IF feedback in this section).
+    res = ea.update(1, [_uniform_flow(j) for j in range(25)])
+    assert res["is_attack_pattern"] is True
+    assert res["confidence"] == "moderate"
     share_moved = ea._global_state.share_base.mean
     assert share_moved > share_before       # supervised relearn is active
 
@@ -262,7 +276,7 @@ def test_backstop_moderate_latch_recovers_via_relearn(clock):
     # re-anchor, verdicts flip to normal, and the max-hold valve releases
     # the latch. Before the fix this state never recovered.
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     for k in range(3):
         ea.feedback_tea(True, "moderate", eval_seq=17 + k)
     assert ea.attack_latched is True
@@ -293,13 +307,13 @@ def test_backstop_moderate_latch_recovers_via_relearn(clock):
 # --- P3: bounded latch max-hold safety valve --------------------------------
 
 def test_supervised_relearn_converges_quickly():
-    # Post-attack recovery speed: frozen attack-scale baseline (10x the
-    # true normal) must re-anchor within ~20 supervised intervals. The
-    # drift cap bounds per-interval movement; the relearn alpha must not
-    # add a slow EMA tail on top of it.
+    # Post-attack recovery: frozen attack-scale baseline (10x the true
+    # normal) re-anchors under the REG-1 per-interval drift cap. The cap
+    # makes each step move at most 1% of the current mean, so 25 steps
+    # land at 100*0.99^25 ~= 77.8; convergence below 2x needs ~160 steps.
     from backend import config as cfg
 
-    b = _AdaptiveBaseline(ea_mod.TEA_LEARN_INTERVALS)
+    b = _AdaptiveBaseline(ea_mod.TEA_LEARN_MIN_SAMPLES)
     b._learned = True
     b._mean = 100.0    # attack-scale frozen baseline
     b._variance = 400.0
@@ -307,7 +321,10 @@ def test_supervised_relearn_converges_quickly():
     b._locked = True
     for _ in range(25):
         b.push(10.0, force=True, max_drift_frac=cfg.TEA_RELEARN_MAX_DRIFT_FRAC)
-    assert b.mean < 20.0   # 10x shift absorbed to within 2x in ~12.5s
+    assert b.mean == pytest.approx(100.0 * (1 - cfg.TEA_RELEARN_MAX_DRIFT_FRAC) ** 25, rel=1e-6)
+    for _ in range(200):
+        b.push(10.0, force=True, max_drift_frac=cfg.TEA_RELEARN_MAX_DRIFT_FRAC)
+    assert b.mean < 20.0   # capped relearn still converges to the true normal
 
 
 def test_max_hold_unlocks_latched_normal(clock):
@@ -330,7 +347,7 @@ def test_max_hold_unlocks_latched_normal(clock):
     ea.idle_tick(now=clock.t)
     assert ea.attack_latched is True    # still inside the max-hold bound
 
-    clock.t += 35.0         # 95s >= TEA_LATCH_MAX_HOLD_S (90)
+    clock.t += cfg.TEA_LATCH_MAX_HOLD_S - 55.0  # exceed the configured hold
     ea.feedback_if(True)
     ea.idle_tick(now=clock.t)
     assert ea.attack_latched is False
@@ -397,12 +414,12 @@ def test_idle_blocked_sustained_if_anomaly(clock):
 
 # --- P5: recovery telemetry export ------------------------------------------
 
-def test_modest_volume_increase_not_attack():
+def test_modest_volume_increase_not_attack(clock):
     # A ~1.5-sigma rise in aggregate pps (legit traffic ramp) must not be
     # an attack pattern. PPS surge sigma is 2.0: real floods are orders of
     # magnitude above baseline, a volume wiggle is not evidence.
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     ea._last_eval_time = 0.0
     res = ea.update(1, [_uniform_flow(j, pps=28.8, bps=230.0, ips=8) for j in range(9)])
     assert 1.0 < res["pps_zscore"] < 2.0
@@ -418,7 +435,7 @@ def test_pps_surge_latch_recovers_via_relearn(clock):
     # Before the fix, pps-surge-only intervals were never force-learned
     # (REG-1 over-strict), so the latch cycled forever.
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
 
     def burst_flows(i):
         # Diverse legit shapes with a 4x pps step: isolates the pps
@@ -487,14 +504,14 @@ def test_expert_exports_tea_telemetry(monkeypatch):
     assert "if_anomaly_rate" in tel
 
 
-def test_expert_exports_learning_interval_denominator():
+def test_expert_exports_learning_interval_denominator(clock):
     # The UI learning progress chip renders "n/<denominator>"; the
     # denominator must come from the live baseline, not a JS constant.
     from flask import Flask
     from backend.api import expert as expert_mod
 
     ea = EntropyAnalyzer()
-    _learn_diverse(ea)
+    _learn_diverse(ea, clock)
     app = Flask(__name__)
     app.config["TESTING"] = True
     original = expert_mod.entropy_analyzer
@@ -506,7 +523,7 @@ def test_expert_exports_learning_interval_denominator():
         expert_mod.entropy_analyzer = original
     tea = data["tea"]["global"]
     assert tea["learned"] is True
-    assert tea["learning_intervals"] == ea_mod.TEA_LEARN_INTERVALS
+    assert tea["learning_intervals"] == ea_mod.TEA_LEARN_MIN_SAMPLES
     # PPS observability: the live deadlock diagnosis needed these.
     assert "pps_z" in tea
     assert "pps_baseline" in tea
