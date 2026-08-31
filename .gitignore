@@ -2,6 +2,9 @@
 **/*.db
 **/*.db-shm
 **/*.db-wal
+!benchmark.db
+!benchmark.db-shm
+!benchmark.db-wal
 
 # Python
 **/*.pyc
