@@ -206,6 +206,7 @@ def expert_live():
             "flood_prefilter_flagged": flood_flagged,
             "flood_prefilter_breakdown": prefilter_breakdown,
             "flood_prefilter_correlated": prefilter_correlated,
+            "mean_pps": curr.get("mean_pps", 0) if curr else 0,
         },
         "if": {
             "threshold": loader.if_threshold,

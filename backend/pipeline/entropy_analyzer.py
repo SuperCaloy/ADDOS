@@ -108,8 +108,9 @@ class _AdaptiveBaseline:
         """Provisional volume guard during the learning phase (pps only).
 
         Two rules:
-        - absolute: per-flow pps above TEA_WARMUP_MAX_PPS is flood scale,
-          rejected regardless of the provisional mean;
+        - absolute: per-flow pps above the dynamic cap is flood scale,
+          rejected regardless of the provisional mean. The cap scales with
+          observed traffic: max(floor, provisional_mean * factor);
         - relative: once the provisional mean has crossed the validity gate
           (a calibrated regime exists), values deviating more than
           TEA_WARMUP_REJECT_FACTOR are rejected. Below the gate the baseline
@@ -123,11 +124,13 @@ class _AdaptiveBaseline:
         """
         if not self._warmup_guard or len(self._samples) < TEA_WARMUP_REJECT_AFTER:
             return False
-        if value > _cfg.TEA_WARMUP_MAX_PPS:
+        # Dynamic cap: scales with observed traffic
+        mean = self._psum / len(self._samples)
+        dynamic_cap = max(_cfg.TEA_LEARN_CAP_FLOOR_PPS, mean * _cfg.TEA_LEARN_CAP_FACTOR)
+        if value > dynamic_cap:
             return True
         if self._min_learn_mean is None:
             return False
-        mean = self._psum / len(self._samples)
         if mean < self._min_learn_mean:
             return False
         ratio = value / mean
@@ -153,15 +156,19 @@ class _AdaptiveBaseline:
                 )
             )
             if ready:
-                self._mean     = sum(self._samples) / len(self._samples)
-                variance_vals  = [(x - self._mean) ** 2 for x in self._samples]
+                # Use recent window for mean and variance to avoid blending
+                # idle and busy phases during ramping traffic
+                window_size = min(_cfg.TEA_LEARN_VARIANCE_WINDOW_SIZE, len(self._samples))
+                recent_samples = self._samples[-window_size:]
+                self._mean     = sum(recent_samples) / len(recent_samples)
+                variance_vals  = [(x - self._mean) ** 2 for x in recent_samples]
                 self._variance = sum(variance_vals) / len(variance_vals)
                 self._alpha    = self._compute_alpha()
                 self._learned  = True
                 self._baseline_history.append(self._mean)
                 log.info(
-                    "TEA baseline learned - mean=%.4f  std=%.4f  alpha=%.4f  (n=%d samples)",
-                    self._mean, self._std, self._alpha, len(self._samples)
+                    "TEA baseline learned - mean=%.4f  std=%.4f  alpha=%.4f  (n=%d samples, window=%d)",
+                    self._mean, self._std, self._alpha, len(self._samples), window_size
                 )
             return
 

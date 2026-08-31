@@ -113,11 +113,18 @@ TEA_LEARN_MIN_DURATION_S = 300.0
 # during a benchmark cold start, real traffic then read +170 sigma).
 # Tuned to this testbed: idle ~0.5 pps/flow, active host traffic >= 1.
 TEA_LEARN_MIN_MEAN_PPS = 1.0
-# Absolute flood scale for the warmup volume guard: per-flow pps above this
-# is rejected during warmup regardless of the provisional mean, so an attack
-# cannot poison an idle-seeded or validly-seeded baseline. The relative
-# factor rule only arms once the provisional mean crosses the validity gate.
-TEA_WARMUP_MAX_PPS = 50.0
+# Dynamic flood cap for warmup volume guard: per-flow pps above the cap is
+# rejected during warmup. The cap scales with observed traffic:
+#   cap = max(TEA_LEARN_CAP_FLOOR_PPS, provisional_mean * TEA_LEARN_CAP_FACTOR)
+# This allows flash crowds above old hardcoded 50pps while still rejecting
+# attacks. The floor ensures idle-to-active transitions are not stalled.
+TEA_LEARN_CAP_FLOOR_PPS = 10.0
+TEA_LEARN_CAP_FACTOR = 5.0
+# Recent-window size for variance computation during warmup finalize.
+# Instead of computing variance over all samples (which blends idle and busy
+# phases during ramping), use only the last N samples to capture the current
+# traffic state. Post-learning EMA updates remain unchanged.
+TEA_LEARN_VARIANCE_WINDOW_SIZE = 50
 # Warmup volume guard: while learning, the pps baseline rejects interval
 # means deviating more than this factor from the provisional mean, so an
 # attack that starts mid-warmup cannot be absorbed (verified +38.9% baseline

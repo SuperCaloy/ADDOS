@@ -78,9 +78,6 @@ ENV/
 # Logs (stray, outside logs/)
 *.log
 
-# Broad PDF ignore (keep source .py tracked)
-*.pdf
-!benchmarkSession1.pdf
 # Cache / temp
 .cache/
 tmp/

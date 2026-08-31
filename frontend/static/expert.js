@@ -786,7 +786,7 @@ var ExpertMetrics = {
     el.innerHTML =
       '<div class="expert-metrics-title">Live pipeline readout</div>' +
       '<div class="expert-metrics-row">' +
-        '<div class="expert-stat"><span class="lbl">Packets / sec</span><span class="val" id="ep-pps" style="color:var(--text)">0</span><span class="note">pipeline input</span></div>' +
+        '<div class="expert-stat"><span class="lbl">Packets / sec</span><span class="val" id="ep-pps" style="color:var(--text)">0</span><span class="note">pipeline input pps</span></div>' +
         '<div class="expert-stat"><span class="lbl">Size variance</span><span class="val" id="ep-entropy" style="color:var(--text)">0.00</span><span class="note">diversity variance</span></div>' +
         '<div class="expert-stat"><span class="lbl">TEA verdict</span><span class="val" id="ep-verdict" style="color:var(--green);font-size:15px">Normal</span><span class="note">TEA global verdict</span></div>' +
       '</div>' +
@@ -821,7 +821,7 @@ var ExpertMetrics = {
     var verdictEl = document.getElementById('ep-verdict');
     if (!ppsEl) return;
 
-    var pps = (pipeline && pipeline.worker_queue_size) || 0;
+    var pps = (pipeline && pipeline.mean_pps) || 0;
     ppsEl.textContent = pps;
 
     var entropy = (tea && tea.global) ? (tea.global.size_var || 0).toFixed(2) : '0.00';
