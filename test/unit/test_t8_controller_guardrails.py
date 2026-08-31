@@ -133,6 +133,7 @@ def make_controller():
         lambda: collections.defaultdict(int))
     c._src_proto = collections.defaultdict(dict)
     c._src_proto_global = {{}}
+    c._src_last_proto = {{}}
     c._src_ports = {{}}
     c._blocked_prev_pkts = collections.defaultdict(int)
     c._cooldown_intervals = {{}}
@@ -452,6 +453,96 @@ def scenario_flush_proto_cache_command_clears_proto_state():
     assert "10.0.0.66" in c._banned_ips
 
 
+def scenario_clear_keeps_last_proto():
+    # Released-while-flooding blind spot: _on_clear wipes the per-dpid and
+    # global caches, but the surviving rules keep reporting telemetry with no
+    # packet_in to refill them. The last packet_in-derived protocol must
+    # survive the clear so the fallback chain keeps resolving (h22 15:44:42
+    # release -> 15:44:53 "ICMP Flood" on a UDP flood, ip_proto=0).
+    c = make_controller()
+    dp = FakeDP(1)
+    c._datapaths[1] = dp
+    c._src_proto[1]["10.0.0.66"] = 17
+    c._src_proto_global["10.0.0.66"] = 17
+    c._src_last_proto["10.0.0.66"] = 17
+
+    c._apply_command({{"action": "clear", "src_ip": "10.0.0.66"}})
+
+    assert "10.0.0.66" not in c._src_proto[1]
+    assert "10.0.0.66" not in c._src_proto_global
+    assert c._src_last_proto["10.0.0.66"] == 17
+
+
+def scenario_flush_clears_last_proto():
+    # Campaign boundaries must wipe the survives-clear store too, or the
+    # mixed-campaign stale-proto leak returns (host assigned a different
+    # protocol in the next run would resolve to the previous run's protocol).
+    c = make_controller()
+    c._src_last_proto["10.0.0.66"] = 17
+
+    c._apply_command({{"action": "flush_proto_cache"}})
+
+    assert not c._src_last_proto
+
+
+def scenario_update_proto_cache_records_last_proto():
+    # Same priority rules as the per-dpid/global caches: TCP/UDP always
+    # overwrite, ICMP only fills an empty entry (warmup pings never clobber
+    # an attack protocol).
+    c = make_controller()
+
+    c._update_proto_cache(1, "10.0.0.66", 17)
+    assert c._src_last_proto["10.0.0.66"] == 17
+
+    c._update_proto_cache(1, "10.0.0.66", 1)   # ICMP must not overwrite UDP
+    assert c._src_last_proto["10.0.0.66"] == 17
+
+    c._update_proto_cache(1, "10.0.0.99", 1)   # ICMP fills an empty entry
+    assert c._src_last_proto["10.0.0.99"] == 1
+
+
+def scenario_proto_zero_row_skipped():
+    # A resolved ip_proto of 0 (all cache levels empty) must never reach ML:
+    # 0 is out-of-distribution for the frozen RF and routes flood-shaped rows
+    # to the wrong class (h22 labeled ICMP Flood 0.80-0.92 with proto=0).
+    c = make_controller()
+    pushed = []
+    c._push = lambda msg: pushed.append(msg)
+    dp = FakeDP(1)
+    stat = SimpleNamespace(packet_count=40, byte_count=4000, duration_sec=60,
+                           duration_nsec=0, priority=10,
+                           match={{"ipv4_src": "10.0.0.66"}},
+                           idle_timeout=60, hard_timeout=0, flags=0)
+    c._switch_agg[1].update({{"last_reply_ts": time.time() - 1.0,
+                              "disp_interval": 1.0}})
+    c.flow_stats_reply_handler(SimpleNamespace(
+        msg=SimpleNamespace(datapath=dp, body=[stat])))
+
+    assert not [m for m in pushed if m.get("type") == "flow_stats"]
+
+
+def scenario_last_proto_fallback_resolves():
+    # Fourth fallback level: per-dpid and global caches empty (post-clear),
+    # last-proto store populated -> the row is pushed with the real protocol.
+    c = make_controller()
+    pushed = []
+    c._push = lambda msg: pushed.append(msg)
+    dp = FakeDP(1)
+    c._src_last_proto["10.0.0.66"] = 17
+    stat = SimpleNamespace(packet_count=40, byte_count=4000, duration_sec=60,
+                           duration_nsec=0, priority=10,
+                           match={{"ipv4_src": "10.0.0.66"}},
+                           idle_timeout=60, hard_timeout=0, flags=0)
+    c._switch_agg[1].update({{"last_reply_ts": time.time() - 1.0,
+                              "disp_interval": 1.0}})
+    c.flow_stats_reply_handler(SimpleNamespace(
+        msg=SimpleNamespace(datapath=dp, body=[stat])))
+
+    rows = [m for m in pushed if m.get("type") == "flow_stats"]
+    assert len(rows) == 1
+    assert rows[0]["flow_stats"]["ip_proto"] == 17
+
+
 def scenario_meter_install_deletes_before_add():
     c = make_controller()
     dp = FakeDP(1)
@@ -528,6 +619,7 @@ def scenario_mitigation_rule_real_traffic_pushed():
     c = make_controller()
     pushed = []
     c._push = lambda msg: pushed.append(msg)
+    c._src_last_proto["10.0.0.66"] = 17
     dp = FakeDP(1)
     stat = SimpleNamespace(packet_count=600, byte_count=60000, duration_sec=5,
                            duration_nsec=0, priority=90,
@@ -546,6 +638,7 @@ def scenario_young_massive_flood_pushed():
     c = make_controller()
     pushed = []
     c._push = lambda msg: pushed.append(msg)
+    c._src_last_proto["10.0.0.66"] = 17
     dp = FakeDP(1)
     stat = SimpleNamespace(packet_count=5000, byte_count=500000,
                            duration_sec=0, duration_nsec=100_000_000,
@@ -565,6 +658,7 @@ def scenario_aged_p10_pushed():
     c = make_controller()
     pushed = []
     c._push = lambda msg: pushed.append(msg)
+    c._src_last_proto["10.0.0.66"] = 17
     dp = FakeDP(1)
     stat = SimpleNamespace(packet_count=40, byte_count=4000, duration_sec=60,
                            duration_nsec=0, priority=10,
@@ -621,6 +715,11 @@ _SCENARIO_NAMES = [
     "block_invalidates_dedup_entry",
     "clear_invalidates_dedup_entry",
     "clear_pops_global_proto_cache",
+    "clear_keeps_last_proto",
+    "flush_clears_last_proto",
+    "update_proto_cache_records_last_proto",
+    "proto_zero_row_skipped",
+    "last_proto_fallback_resolves",
     "flush_proto_cache_command_clears_proto_state",
     "epoch_delete_invalidates_dedup_entry",
     "throttle_dedup_expires_after_ttl",

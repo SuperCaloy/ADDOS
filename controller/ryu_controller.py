@@ -136,6 +136,13 @@ class FatTreeController(app_manager.RyuApp):
         # Fallback protocol cache per src_ip — survives dpid mismatch on re-detection
         self._src_proto_global: dict[str, int] = {}
 
+        # Last packet_in-derived protocol per src_ip. Unlike _src_proto/_src_proto_global
+        # this survives _on_clear: a released-while-flooding attacker keeps matching its
+        # surviving rules (no packet_in to refill the other caches), and without this
+        # level its telemetry resolves to ip_proto=0, which the frozen RF reads as OOD
+        # and misclassifies (h22 UDP flood labeled "ICMP Flood" 0.80-0.92).
+        self._src_last_proto: dict[str, int] = {}
+
         # Cached transport ports (tp_src, tp_dst) per src_ip — used as IF features
         self._src_ports: dict[str, tuple[int, int]] = {}
 
@@ -428,6 +435,10 @@ class FatTreeController(app_manager.RyuApp):
         if proto in (6, 17) or gcur == 0:
             self._src_proto_global[src_ip] = proto
 
+        lcur = self._src_last_proto.get(src_ip, 0)
+        if proto in (6, 17) or lcur == 0:
+            self._src_last_proto[src_ip] = proto
+
     def _update_port_cache(self, src_ip: str, tcp_pkt, udp_pkt) -> None:
         # Cache transport ports per src_ip — used as IF features (tp_src, tp_dst)
         if tcp_pkt:
@@ -567,12 +578,19 @@ class FatTreeController(app_manager.RyuApp):
             self._push({"type": "dropped_delta", "src_ip": drop_key, "delta": delta})
 
     def _push_flow_stats(self, dpid, src_ip, stat, match, flow_count_per_src) -> None:
-        # Resolve protocol: flow match first, then per-IP cache, then global fallback
+        # Resolve protocol: flow match first, then per-IP cache, then global
+        # fallback, then the survives-clear last-proto store.
         ip_proto = (
             int(match.get("ip_proto", 0))
             or int(self._src_proto[dpid].get(src_ip, 0))
             or int(self._src_proto_global.get(src_ip, 0))
+            or int(self._src_last_proto.get(src_ip, 0))
         )
+        if not ip_proto:
+            # Blind row: no cache level knows this source's protocol. ip_proto=0
+            # is out-of-distribution for the frozen RF and routes flood-shaped
+            # rows to the wrong class; skip ML scoring instead of feeding it.
+            return
 
         total_s = max(stat.duration_sec + stat.duration_nsec / 1e9, 1e-9)
         pps     = stat.packet_count / total_s
@@ -717,6 +735,7 @@ class FatTreeController(app_manager.RyuApp):
         self._switch_proto.clear()
         self._src_proto.clear()
         self._src_proto_global.clear()
+        self._src_last_proto.clear()
         self._src_ports.clear()
         self._pkt_in_rate.clear()
         self._recent_installs.clear()
@@ -731,6 +750,7 @@ class FatTreeController(app_manager.RyuApp):
         self._switch_proto.clear()
         self._src_proto.clear()
         self._src_proto_global.clear()
+        self._src_last_proto.clear()
         self._src_ports.clear()
         self.logger.info("*** Ryu proto caches flushed")
 

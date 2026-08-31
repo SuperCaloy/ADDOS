@@ -97,11 +97,23 @@ FLOOD_UDP_WINDOW_S  = 1.0
 # Rolling window size per switch — adaptive thresholds learned from traffic
 TEA_WINDOW_SIZE = 500
 
-TEA_LEARN_INTERVALS = 360
-# Hard floor on samples before a baseline may lock in. At n=10-15 the sample
-# variance carries ~40-47% relative error (NIST chi-square); 30 is the
-# practical floor at the 0.5s snapshot cadence. See
-TEA_LEARN_MIN_SAMPLES = 100
+TEA_LEARN_MIN_SAMPLES = 300
+# Minimum wall-clock span of the learning phase, measured from the first
+# warmup sample. Learning completes only when BOTH the sample floor and the
+# duration floor hold, so the phase can never finish early on an active
+# network and idle gaps cannot shorten it. The producer's stats poll runs
+# at 1s cadence, so 300 samples and 300s complete together on continuous
+# traffic; sparse traffic extends the phase until the floor is met.
+# Ref: notes/bugs/tea-learning-phase-duration.md.
+TEA_LEARN_MIN_DURATION_S = 300.0
+# Warmup volume guard: while learning, the pps baseline rejects interval
+# means deviating more than this factor from the provisional mean, so an
+# attack that starts mid-warmup cannot be absorbed (verified +38.9% baseline
+# contamination without it). Applied to the pps baseline only: variance-type
+# metrics are heavy-tailed at 9-flow windows (legit 5-8x swings), so a
+# statistical guard there over-rejects and stalls learning.
+# Ref: notes/bugs/tea-learning-phase-duration.md.
+TEA_WARMUP_REJECT_FACTOR = 5.0
 
 # --- TEA dual feedback hysteresis ---
 # IF side: per-flow, streak-only, NEVER locks baselines by itself.

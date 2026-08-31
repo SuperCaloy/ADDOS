@@ -5,8 +5,9 @@ import numpy as np
 from collections import deque
 from backend.config import (
     TEA_WINDOW_SIZE,
-    TEA_LEARN_INTERVALS,
     TEA_LEARN_MIN_SAMPLES,
+    TEA_LEARN_MIN_DURATION_S,
+    TEA_WARMUP_REJECT_FACTOR,
     TEA_ATTACK_SIGMA,
     TEA_CROWD_SIGMA,
     TEA_EMA_ALPHA_MIN,
@@ -45,6 +46,12 @@ def _push_expert_event(payload: dict) -> None:
 
 TEA_VARIANCE_STABLE_THRESHOLD = 0.01
 TEA_BASELINE_HISTORY_MAX = 60
+# Warmup provisional rejection: after this many accepted samples the pps
+# baseline holds a provisional mean and rejects attack-scale volume outliers
+# (multiplicative factor from config). Variance-type baselines are NOT
+# guarded: their small-window values are heavy-tailed (legit 5-8x swings),
+# so any statistical guard over-rejects and stalls learning.
+TEA_WARMUP_REJECT_AFTER = 30
 
 
 def _shannon_entropy(values: list[float]) -> float:
@@ -61,15 +68,21 @@ def _shannon_entropy(values: list[float]) -> float:
 
 
 class _AdaptiveBaseline:
-    def __init__(self, learn_intervals: int):
-        self._learn_n      = learn_intervals
+    def __init__(self, learn_samples: int, warmup_guard: bool = False):
+        self._learn_n      = learn_samples
         self._samples      = []
         self._mean         = None
         self._variance     = None
         self._learned      = False
         self._alpha        = TEA_EMA_ALPHA_MIN
-        self._locked        = False
+        self._locked       = False
         self._baseline_history = []
+        # Learning window: wall-clock anchor set at the first warmup sample.
+        self._learn_started_at: float | None = None
+        # Volume guard (pps only): reject attack-scale warmup samples.
+        self._warmup_guard = warmup_guard
+        # Provisional running sum for the warmup guard.
+        self._psum = 0.0
 
     @property
     def is_learned(self) -> bool:
@@ -83,20 +96,43 @@ class _AdaptiveBaseline:
         return max(TEA_EMA_ALPHA_MIN, min(TEA_EMA_ALPHA_MAX, alpha))
 
     def _variance_stable(self) -> bool:
-        # REMOVED: statistically unsound (biased estimator, CLT fails at n=5).
-        # Learning now requires full TEA_LEARN_INTERVALS (360 intervals = 180s).
-        # Ref: tea-flash-crowd-assessment.md §15, RT1-RT3 findings.
         return False
+
+    def _warmup_reject(self, value: float) -> bool:
+        """Provisional volume guard during the learning phase (pps only).
+
+        Rejects interval means deviating more than TEA_WARMUP_REJECT_FACTOR
+        from the provisional mean, so an attack that begins after the seed
+        window cannot be absorbed into the baseline. A sustained attack
+        simply delays learning until it stops, which is the conservative
+        outcome: no calibration under fire. An attack present from the very
+        first packets can still seed the provisional window; the flood
+        prefilter and IF cover that case.
+        """
+        if not self._warmup_guard or len(self._samples) < TEA_WARMUP_REJECT_AFTER:
+            return False
+        mean = self._psum / len(self._samples)
+        if mean <= 0:
+            return False
+        ratio = value / mean
+        return ratio > _cfg.TEA_WARMUP_REJECT_FACTOR or ratio < 1 / _cfg.TEA_WARMUP_REJECT_FACTOR
 
     def push(self, value: float, force: bool = False,
              max_drift_frac: float | None = None) -> None:
         if not self._learned:
+            now = time.monotonic()
+            if self._learn_started_at is None:
+                self._learn_started_at = now
+            if self._warmup_reject(value):
+                log.debug("TEA warmup volume reject: value=%.4f", value)
+                return
             self._samples.append(value)
+            self._psum += value
             ready = (
-                len(self._samples) >= self._learn_n or
-                self._variance_stable()
+                len(self._samples) >= self._learn_n
+                and now - self._learn_started_at >= _cfg.TEA_LEARN_MIN_DURATION_S
             )
-            if ready and len(self._samples) >= TEA_LEARN_MIN_SAMPLES:
+            if ready:
                 self._mean     = sum(self._samples) / len(self._samples)
                 variance_vals  = [(x - self._mean) ** 2 for x in self._samples]
                 self._variance = sum(variance_vals) / len(variance_vals)
@@ -191,11 +227,11 @@ class _AdaptiveBaseline:
 class _GlobalEntropyState:
     def __init__(self, window_size: int):
         self.window    = deque(maxlen=window_size)
-        self.size_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
-        self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
-        self.proto_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
-        self.share_base = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
-        self.pps_base   = _AdaptiveBaseline(TEA_LEARN_INTERVALS)
+        self.size_base  = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
+        self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
+        self.proto_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
+        self.share_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
+        self.pps_base   = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True)
         self.last_result = {}
 
     def observe(self, snapshot: dict) -> None:
@@ -486,7 +522,8 @@ class EntropyAnalyzer:
             pps_base     = state.pps_base
 
             if not state.is_ready():
-                state.learn(snapshot)
+                if len(current_flows) >= TEA_MIN_FLOWS_PER_INTERVAL:
+                    state.learn(snapshot)
                 res = self._neutral(size_var, intensity_var, learned=False)
                 res["eval_seq"] = self._eval_seq
                 state.last_result = res
@@ -535,7 +572,8 @@ class EntropyAnalyzer:
         if not is_learned:
             log.debug("TEA global learning phase")
             with self._lock:
-                state.learn(snapshot)
+                if len(current_flows) >= TEA_MIN_FLOWS_PER_INTERVAL:
+                    state.learn(snapshot)
             res = self._neutral(size_var, intensity_var, learned=False)
             res["eval_seq"] = self._eval_seq
             with self._lock:

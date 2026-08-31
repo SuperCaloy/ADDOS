@@ -218,8 +218,7 @@ var ExpertStages = {
       formula: [
         { f: 'H = -sum(p_i * log2(p_i))', note: 'Shannon entropy across source IPs and ports' },
         { f: 'mu_t = a * x_t + (1 - a) * mu_{t-1}', note: 'exponentially weighted baseline update' },
-        { f: 'z = (x - mu) / sigma, flagged when z < -sigma_attack', note: 'z-score deviation over 15-interval window' },
-        { f: 'confidence: HIGH (z < -3), MODERATE (z < -2), LOW', note: 'deviation severity classification' }
+        { f: 'z = (x - mu) / sigma, flagged when z < -sigma_attack', note: 'z-score deviation over 15-interval window' }
       ]
     },
     if_node: {
@@ -231,7 +230,6 @@ var ExpertStages = {
       output: 'Anomaly score (0 to 1) with\nthreshold exceedance flag',
       formula: [
         { f: 's(x, n) = 2^(-E(h(x)) / c(n))', note: 'anomaly score from average path length' },
-        { f: 'if_score = -score_samples(x)', note: 'flagged when if_score >= threshold' },
         { f: 'threshold = 0.5992 (frozen model)', note: 'fixed at training; not retrained at runtime' }
       ]
     },
@@ -244,8 +242,7 @@ var ExpertStages = {
       output: 'Attack class (SYN/ICMP/UDP Flood)\nwith confidence score',
       formula: [
         { f: 'y_hat = mode{T_1(x), T_2(x), ..., T_k(x)}', note: 'majority vote across k decision trees' },
-        { f: 'confidence = votes(y_hat) / k', note: 'acted upon when confidence >= conf_gate' },
-        { f: 'conf_gate = 0.65 (frozen model)', note: 'minimum confidence for mitigation trigger' }
+        { f: 'confidence = votes(y_hat) / k', note: 'acted upon when confidence >= conf_gate' }
       ]
     },
     decision: {
@@ -254,12 +251,7 @@ var ExpertStages = {
       file: 'backend/pipeline/decision_engine.py',
       desc: 'Final arbitration stage that evaluates the Isolation Forest anomaly score and Random Forest classification against configured thresholds. When confidence is sufficient, issues enforcement commands to the Ryu Controller via ZeroMQ: rate limiting (Phase 1), full blocking (Phase 2), deception redirect, or clearance.',
       input: 'IF anomaly score with\nRF class and confidence',
-      output: 'Enforcement commands:\nrate_limit, block, clear, redirect, proto_block',
-      formula: [
-        { f: 'Phase 1: if_score >= 0.5992 AND conf >= 0.65', note: 'quarantine with rate limiting' },
-        { f: 'Phase 2: escalation after persistence check', note: 'full block via OVS flow rules' },
-        { f: 'Phase 3: blackhole for 3600s (1 hour)', note: 'final mitigation with TTL expiry' }
-      ]
+      output: 'Enforcement commands:\nrate_limit, block, clear, redirect, proto_block'
     },
     deception: {
       num: 9, color: '#8B5CF6',
@@ -267,12 +259,7 @@ var ExpertStages = {
       file: 'backend/mitigation/deception.py',
       desc: 'Redirects quarantined traffic to the sinkhole host (h27, 10.0.0.27) for controlled observation. Monitors attack persistence and classifier confidence over a 30-second observation window. Escalates to Phase 1 rate limiting if traffic persists with high confidence; otherwise releases the source.',
       input: 'Quarantined IPs with\nunresolved attack vector',
-      output: 'OpenFlow redirect to sinkhole,\nescalation to Phase 1 or release',
-      formula: [
-        { f: 'observation_window = 30s', note: 'attack persistence measurement period' },
-        { f: 'escalate: persistence > 0.8 AND confidence >= 0.65', note: 'sustained attack with high RF confidence' },
-        { f: 'release: persistence < 0.3 OR confidence < 0.4', note: 'traffic ceased or classifier uncertain' }
-      ]
+      output: 'OpenFlow redirect to sinkhole,\nescalation to Phase 1 or release'
     },
     resource_guard: {
       num: 10, color: '#EC4899',
