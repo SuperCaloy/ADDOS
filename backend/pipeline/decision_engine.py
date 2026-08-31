@@ -447,15 +447,19 @@ def on_result(src_ip: str, if_score, is_anomaly,
                 prev_ban   = int(prior[0].get("ban_level", 0) or 0)
                 prev_occ   = int(prior[0].get("offence_count", 0) or 0)
                 if prev_ban > 0:
-                    state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_occ)
+                    state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_occ,
+                                               recent_pps=_recent_pps)
                     _post_state = state_machine.get_state(src_ip)
                     action_taken = _post_state.action_taken if _post_state else "Quarantined"
                 else:
-                    action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
+                    action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence,
+                                                              recent_pps=_recent_pps)
             else:
-                action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
+                action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence,
+                                                          recent_pps=_recent_pps)
         else:
-            action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence)
+            action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence,
+                                                      recent_pps=_recent_pps)
 
         mitigation_ms = (time.monotonic() - t_mitigate_start) * 1000.0
 
