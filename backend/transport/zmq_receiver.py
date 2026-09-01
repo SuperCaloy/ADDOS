@@ -21,6 +21,10 @@ _RECV_TIMEOUT_MS   = 1000
 _raw_lock       = threading.Lock()
 _raw_total_pkts = 0
 
+# --- Total system PPS (packets per second) ---
+_pps_lock = threading.Lock()
+_total_pps = 0.0
+
 # --- Connected switch count from ZMQ switch_count messages ---
 _switch_count_lock  = threading.Lock()
 _connected_switches = 0
@@ -38,6 +42,15 @@ _switch_flows_lock = threading.Lock()
 def get_raw_counts() -> dict:
     with _raw_lock:
         return {"raw_total": _raw_total_pkts}
+
+
+def get_total_pps() -> float:
+    """Return current total system packets per second and reset."""
+    global _total_pps
+    with _pps_lock:
+        result = _total_pps
+        _total_pps = 0.0
+    return result
 
 
 def get_switch_count() -> int:
@@ -209,6 +222,11 @@ def _parse_and_route(raw: bytes) -> None:
         # Update raw total for UI
         with _raw_lock:
             _raw_total_pkts += delta_pkts
+
+        # Accumulate total PPS from flow pps (already calculated by Ryu)
+        with _pps_lock:
+            global _total_pps
+            _total_pps += pps
 
         # --- ML OFF - skip TEA and ML inference, count packet directly ---
         # Calls on_result() directly so dashboard counters still update.

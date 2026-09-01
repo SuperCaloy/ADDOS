@@ -55,7 +55,7 @@ function startExpertMode() {
   ExpertMetrics.init();
 
   if (_ambientTimer) clearInterval(_ambientTimer);
-  _ambientTimer = setInterval(ExpertPipeline.spawnAmbientParticle, 1200);
+  _ambientTimer = setInterval(ExpertPipeline.spawnAmbientParticle, 2000);
 }
 
 function stopExpertMode() {
@@ -70,11 +70,11 @@ async function fetchExpert() {
     var r = await fetch(window.API_URL + '/api/expert/live');
     if (!r.ok) return;
     var data = await r.json();
+    window._lastExpertData = data;
     renderMLPanel(data.if, data.rf, data.tea);
     renderMitigationPanel(data.state_machine, data.deception, data.resource_guard);
 
-    ExpertMetrics.updateStats(data.pipeline, data.tea, data.if);
-    ExpertMetrics.updateProtoCounts(data.rf.class_distribution);
+    ExpertMetrics.updateStats(data.pipeline, data.tea, data.if, data.state_machine);
     ExpertPipeline.updateNodeGlow(data);
 
     if (data.if && data.if.recent_scores) {
@@ -295,6 +295,14 @@ var ExpertStages = {
         '</div>';
     }
 
+    var hiwHtml = '';
+    if (s.formula && s.formula.length) {
+      hiwHtml = '<button class="expert-hiw-btn" onclick="ExpertModals.open(\'' + key + '\')">' +
+        '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>' +
+        'How it works - see details' +
+        '</button>';
+    }
+
     el.innerHTML =
       '<div class="expert-inspector-head">' +
         '<div class="expert-stage-badge" style="background:' + s.color + '22;border:1px solid ' + s.color + '55;color:' + s.color + '">' + s.num + '</div>' +
@@ -309,7 +317,8 @@ var ExpertStages = {
         '<div class="expert-io-col input"><span class="lbl">Receives</span><div class="body">' + s.input + '</div></div>' +
         '<div class="expert-io-arrow">&rarr;</div>' +
         '<div class="expert-io-col output"><span class="lbl">Hands off</span><div class="body">' + s.output + '</div></div>' +
-      '</div>';
+      '</div>' +
+      hiwHtml;
   }
 };
 
@@ -342,16 +351,16 @@ var ExpertPipeline = {
   },
 
   paths: [
-    { from: 'mininet', to: 'ryu' },
-    { from: 'ryu', to: 'zmq_rx' },
-    { from: 'zmq_rx', to: 'flood' },
-    { from: 'flood', to: 'entropy' },
-    { from: 'entropy', to: 'if_node' },
-    { from: 'if_node', to: 'rf' },
-    { from: 'rf', to: 'decision' },
+    { from: 'mininet', to: 'ryu', label: 'traffic data' },
+    { from: 'ryu', to: 'zmq_rx', label: 'flow reports' },
+    { from: 'zmq_rx', to: 'flood', label: 'flow reports' },
+    { from: 'flood', to: 'entropy', label: 'flagged IPs' },
+    { from: 'entropy', to: 'if_node', label: 'traffic patterns' },
+    { from: 'if_node', to: 'rf', label: 'suspicious flows' },
+    { from: 'rf', to: 'decision', label: 'attack type' },
     { from: 'decision', to: 'ryu', kind: 'enforce' },
     { from: 'decision', to: 'deception', kind: 'redirect' },
-    { from: 'decision', to: 'resource_guard' }
+    { from: 'decision', to: 'resource_guard', label: 'system stats' }
   ],
 
   nodeGlow: {},
@@ -390,17 +399,17 @@ var ExpertPipeline = {
     }
 
     this._particleSprites = {};
-    var particleColors = ['#F59E0B', '#E11D48', '#14B8A6', '#94A3B8', '#10B981', '#8B5CF6'];
+    var particleColors = ['#F59E0B', '#E11D48', '#14B8A6', '#10B981', '#8B5CF6'];
     particleColors.forEach(function(color) {
       var pCanvas = document.createElement('canvas');
       pCanvas.width = 20;
       pCanvas.height = 20;
       var pCtx = pCanvas.getContext('2d');
-      pCtx.shadowBlur = 8;
+      pCtx.shadowBlur = 10;
       pCtx.shadowColor = color;
       pCtx.fillStyle = color;
       pCtx.beginPath();
-      pCtx.arc(10, 10, 3.4, 0, Math.PI * 2);
+      pCtx.arc(10, 10, 5, 0, Math.PI * 2);
       pCtx.fill();
       this._particleSprites[color] = pCanvas;
     }.bind(this));
@@ -416,7 +425,7 @@ var ExpertPipeline = {
       fCtx.shadowColor = color;
       fCtx.fillStyle = color;
       fCtx.beginPath();
-      fCtx.arc(12, 12, 4, 0, Math.PI * 2);
+      fCtx.arc(12, 12, 5, 0, Math.PI * 2);
       fCtx.fill();
       this._feedbackSprites[color] = fCanvas;
     }.bind(this));
@@ -435,7 +444,7 @@ var ExpertPipeline = {
     }.bind(this));
 
     this._lastFrameTime = 0;
-    this._frameInterval = 1000 / 30;
+    this._frameInterval = 1000 / 20;
     this._isOffscreen = false;
 
     var observer = new IntersectionObserver(function(entries) {
@@ -458,18 +467,30 @@ var ExpertPipeline = {
 
   spawnParticleFromEvent: function(inferencePayload) {
     if (this.reducedMotion) return;
-    var attackClass = inferencePayload.attack_class || 'SYN Flood';
-    var color = attackClass.indexOf('SYN') >= 0 ? '#F59E0B' :
-                attackClass.indexOf('ICMP') >= 0 ? '#E11D48' :
-                attackClass.indexOf('UDP') >= 0 ? '#14B8A6' : '#94A3B8';
+    var isAnomaly = inferencePayload.is_anomaly;
+    var attackClass = inferencePayload.attack_class || 'Normal';
+
+    // Path-specific colors
+    var pathColors = {
+      'mininet->ryu': '#10B981',
+      'ryu->zmq_rx': '#14B8A6',
+      'zmq_rx->flood': '#14B8A6',
+      'flood->entropy': isAnomaly ? '#F59E0B' : '#10B981',
+      'entropy->if_node': '#14B8A6',
+      'if_node->rf': isAnomaly ? '#E11D48' : '#10B981',
+      'rf->decision': isAnomaly ? '#E11D48' : '#10B981',
+      'decision->resource_guard': '#14B8A6'
+    };
 
     var now = performance.now();
     var forwardPaths = this.paths.filter(function(p) { return !p.feedback && p.kind !== 'redirect'; });
     forwardPaths.forEach(function(path, index) {
+      var key = path.from + '->' + path.to;
+      var color = pathColors[key] || '#10B981';
       this.particles.push({
         from: path.from, to: path.to,
-        spawnTime: now, delay: index * 50,
-        speed: 1.32,
+        spawnTime: now, delay: index * 60,
+        speed: 1.2,
         color: color, isFeedback: false
       });
     }.bind(this));
@@ -518,7 +539,7 @@ var ExpertPipeline = {
     var forwardPaths = this.paths.filter(function(p) { return !p.feedback && p.kind !== 'redirect'; });
     if (!forwardPaths.length) return;
     var path = forwardPaths[Math.floor(Math.random() * forwardPaths.length)];
-    var colors = ['#F59E0B', '#14B8A6', '#94A3B8'];
+    var colors = ['#10B981', '#14B8A6', '#10B981'];
     this.particles.push({
       from: path.from, to: path.to,
       spawnTime: performance.now(), delay: 0,
@@ -571,7 +592,7 @@ var ExpertPipeline = {
     this._lastFrameTime = timestamp - (elapsed % this._frameInterval);
 
     if (this._isOffscreen) {
-      if (this.particles.length > 60) this.particles.splice(0, this.particles.length - 60);
+    if (this.particles.length > 40) this.particles.splice(0, this.particles.length - 40);
       if (this.feedbackParticles.length > 30) this.feedbackParticles.splice(0, this.feedbackParticles.length - 30);
       this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
       return;
@@ -612,11 +633,29 @@ var ExpertPipeline = {
         ctx.setLineDash(hasKind ? [5, 4] : []);
       } else {
         ctx.lineTo(end.x, end.y);
-        ctx.strokeStyle = this.isLightMode ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.25)';
+        ctx.strokeStyle = this.isLightMode ? 'rgba(20,184,166,0.2)' : 'rgba(20,184,166,0.25)';
         ctx.lineWidth = 1.4;
       }
       ctx.stroke();
       ctx.setLineDash([]);
+
+      // Arrow heads on forward paths
+      if (!hasKind && !path.feedback) {
+        var angle = Math.atan2(end.y - start.y, end.x - start.x);
+        var arrowLen = 10;
+        var arrowAngle = 0.4;
+        // Position arrow before the end node circle (node radius is 24px, add padding)
+        var ax = end.x - Math.cos(angle) * 32;
+        var ay = end.y - Math.sin(angle) * 32;
+        ctx.beginPath();
+        ctx.moveTo(ax + Math.cos(angle) * arrowLen, ay + Math.sin(angle) * arrowLen);
+        ctx.lineTo(ax - arrowLen * Math.cos(angle - arrowAngle), ay - arrowLen * Math.sin(angle - arrowAngle));
+        ctx.moveTo(ax + Math.cos(angle) * arrowLen, ay + Math.sin(angle) * arrowLen);
+        ctx.lineTo(ax - arrowLen * Math.cos(angle + arrowAngle), ay - arrowLen * Math.sin(angle + arrowAngle));
+        ctx.strokeStyle = this.isLightMode ? 'rgba(20,184,166,0.5)' : 'rgba(20,184,166,0.6)';
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+      }
 
       if (hasKind) {
         var lx, ly;
@@ -639,6 +678,38 @@ var ExpertPipeline = {
         ctx.fillStyle = color;
         ctx.fillText(label, lx, ly);
       }
+
+      if (path.label && !path.kind) {
+        var fLx = (start.x + end.x) / 2;
+        var fLy = (start.y + end.y) / 2 - 10;
+        ctx.font = '600 10px "Fira Code", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        var tw = ctx.measureText(path.label).width;
+        var px = fLx - tw / 2 - 5;
+        var py = fLy - 8;
+        var pw = tw + 10;
+        var ph = 15;
+        var pr = 4;
+        ctx.beginPath();
+        ctx.moveTo(px + pr, py);
+        ctx.lineTo(px + pw - pr, py);
+        ctx.arcTo(px + pw, py, px + pw, py + pr, pr);
+        ctx.lineTo(px + pw, py + ph - pr);
+        ctx.arcTo(px + pw, py + ph, px + pw - pr, py + ph, pr);
+        ctx.lineTo(px + pr, py + ph);
+        ctx.arcTo(px, py + ph, px, py + ph - pr, pr);
+        ctx.lineTo(px, py + pr);
+        ctx.arcTo(px, py, px + pr, py, pr);
+        ctx.closePath();
+        ctx.fillStyle = this.isLightMode ? 'rgba(255,255,255,0.85)' : 'rgba(30,41,59,0.85)';
+        ctx.fill();
+        ctx.strokeStyle = this.isLightMode ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.fillStyle = this.isLightMode ? 'rgba(51,65,85,0.7)' : 'rgba(248,250,252,0.5)';
+        ctx.fillText(path.label, fLx, fLy);
+      }
     }.bind(this));
 
     if (this.particles.length > 60) this.particles.splice(0, this.particles.length - 60);
@@ -653,12 +724,29 @@ var ExpertPipeline = {
       var e = this._coords(this.nodes[p.to].x, this.nodes[p.to].y);
       var px = s.x + (e.x - s.x) * p.progress;
       var py = s.y + (e.y - s.y) * p.progress;
+
+      // Trail effect
+      var trailLen = 3;
+      for (var t = trailLen; t >= 1; t--) {
+        var trailProgress = p.progress - (t * 0.012);
+        if (trailProgress < 0) continue;
+        var tx = s.x + (e.x - s.x) * trailProgress;
+        var ty = s.y + (e.y - s.y) * trailProgress;
+        ctx.beginPath();
+        ctx.arc(tx, ty, 4 - t * 0.7, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = 0.2 - t * 0.05;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
+      // Main particle
       var sprite = this._particleSprites[p.color];
       if (sprite) {
         ctx.drawImage(sprite, px - 10, py - 10);
       } else {
         ctx.beginPath();
-        ctx.arc(px, py, 3.4, 0, Math.PI * 2);
+        ctx.arc(px, py, 5, 0, Math.PI * 2);
         ctx.fillStyle = p.color;
         ctx.fill();
       }
@@ -688,7 +776,7 @@ var ExpertPipeline = {
         ctx.drawImage(fSprite, px - 12, py - 12);
       } else {
         ctx.beginPath();
-        ctx.arc(px, py, 4, 0, Math.PI * 2);
+        ctx.arc(px, py, 5, 0, Math.PI * 2);
         ctx.fillStyle = fp.color;
         ctx.fill();
       }
@@ -767,7 +855,74 @@ var ExpertPipeline = {
       ctx.fillStyle = this.isLightMode ? '#334155' : (isSel ? '#F8FAFC' : 'rgba(248,250,252,0.7)');
       ctx.textBaseline = 'alphabetic';
       ctx.fillText(node.label, c.x, c.y + 42);
+
+      // Status indicator dot
+      var dotGlow = this.nodeGlow[key] || 0;
+      if (key === 'deception') dotGlow = this._hasSinkhole ? dotGlow : 0;
+      var dotColor = dotGlow >= 0.8 ? '#E11D48' : dotGlow >= 0.5 ? '#F59E0B' : dotGlow > 0 ? '#10B981' : '#64748B';
+      var dotX = c.x + 18;
+      var dotY = c.y - 18;
+      ctx.beginPath();
+      ctx.arc(dotX, dotY, 4, 0, Math.PI * 2);
+      ctx.fillStyle = dotColor;
+      ctx.fill();
+      ctx.strokeStyle = this.isLightMode ? '#FFFFFF' : '#1e293b';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
     }
+
+    // Legend - top right corner
+    var legendX = this.canvas.width - 196;
+    var legendY = 12;
+    var legendBg = this.isLightMode ? 'rgba(255,255,255,0.9)' : 'rgba(30,41,59,0.9)';
+    var legendBorder = this.isLightMode ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)';
+    var legendText = this.isLightMode ? '#334155' : 'rgba(248,250,252,0.7)';
+    var legendSubText = this.isLightMode ? '#64748B' : 'rgba(248,250,252,0.4)';
+
+    // Background
+    ctx.fillStyle = legendBg;
+    ctx.strokeStyle = legendBorder;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(legendX, legendY, 180, 78, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = '600 10px "Fira Code", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    // Data flow legend
+    ctx.fillStyle = '#10B981';
+    ctx.beginPath();
+    ctx.arc(legendX + 14, legendY + 16, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = legendText;
+    ctx.fillText('Normal traffic', legendX + 26, legendY + 16);
+
+    // Processing legend
+    ctx.fillStyle = '#14B8A6';
+    ctx.beginPath();
+    ctx.arc(legendX + 14, legendY + 32, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = legendText;
+    ctx.fillText('Data processing', legendX + 26, legendY + 32);
+
+    // Flagged legend
+    ctx.fillStyle = '#F59E0B';
+    ctx.beginPath();
+    ctx.arc(legendX + 14, legendY + 48, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = legendText;
+    ctx.fillText('Flagged / suspicious', legendX + 26, legendY + 48);
+
+    // Attack legend
+    ctx.fillStyle = '#E11D48';
+    ctx.beginPath();
+    ctx.arc(legendX + 14, legendY + 64, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = legendText;
+    ctx.fillText('Attack detected', legendX + 26, legendY + 64);
 
     this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
   },
@@ -791,12 +946,16 @@ var ExpertMetrics = {
         '<div class="expert-stat"><span class="lbl">TEA verdict</span><span class="val" id="ep-verdict" style="color:var(--green);font-size:15px">Normal</span><span class="note">TEA global verdict</span></div>' +
       '</div>' +
       '<div class="expert-proto-row">' +
-        '<span class="expert-proto-title">Flood Prefilter, per protocol</span>' +
-        '<div class="expert-proto-items">' +
-          '<div class="expert-proto-item"><span class="pk">SYN</span><span class="pv" id="ep-syn">0</span></div>' +
-          '<div class="expert-proto-item"><span class="pk">ICMP</span><span class="pv" id="ep-icmp">0</span></div>' +
-          '<div class="expert-proto-item"><span class="pk">UDP</span><span class="pv" id="ep-udp">0</span></div>' +
+        '<span class="expert-proto-title">First Line of Defense</span>' +
+        '<div class="expert-pf-stats">' +
+          '<div class="expert-pf-stat"><span class="expert-pf-label">Spike Detected</span><span class="expert-pf-val" id="ep-pf-burst" style="color:var(--amber)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">session total</span></div>' +
+          '<div class="expert-pf-stat"><span class="expert-pf-label">Over Rate Limit</span><span class="expert-pf-val" id="ep-pf-limit" style="color:var(--blue)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">session total</span></div>' +
+          '<div class="expert-pf-stat"><span class="expert-pf-label">Multi-Protocol</span><span class="expert-pf-val" id="ep-pf-corr" style="color:var(--red)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">session total</span></div>' +
         '</div>' +
+      '</div>' +
+      '<div class="expert-metrics-row">' +
+        '<div class="expert-stat"><span class="lbl">IF Anomaly Rate</span><span class="val" id="ep-if-rate" style="color:var(--green)">0%</span><span class="note">anomalous flows</span></div>' +
+        '<div class="expert-stat"><span class="lbl">Active Mitigations</span><span class="val" id="ep-mitigations" style="color:var(--green)">0</span><span class="note">IPs in state machine</span></div>' +
       '</div>' +
       '<div class="expert-trend-block">' +
         '<span class="expert-proto-title">Detection trend</span>' +
@@ -815,14 +974,14 @@ var ExpertMetrics = {
       '</div>';
   },
 
-  updateStats: function(pipeline, tea, ifData) {
+  updateStats: function(pipeline, tea, ifData, stateMachine) {
     var ppsEl = document.getElementById('ep-pps');
     var entropyEl = document.getElementById('ep-entropy');
     var verdictEl = document.getElementById('ep-verdict');
     if (!ppsEl) return;
 
-    var pps = (pipeline && pipeline.mean_pps) || 0;
-    ppsEl.textContent = pps;
+    var pps = (pipeline && pipeline.total_pps) || 0;
+    ppsEl.textContent = Number(pps).toFixed(2);
 
     var entropy = (tea && tea.global) ? (tea.global.size_var || 0).toFixed(2) : '0.00';
     entropyEl.textContent = entropy;
@@ -839,6 +998,33 @@ var ExpertMetrics = {
     } else {
       verdictEl.textContent = 'Normal';
       verdictEl.style.color = 'var(--green)';
+    }
+
+    // Prefilter breakdown - use session cumulative data
+    var pfSession = (pipeline && pipeline.flood_prefilter_session) || {};
+    var pfBurst = document.getElementById('ep-pf-burst');
+    var pfLimit = document.getElementById('ep-pf-limit');
+    var pfCorr = document.getElementById('ep-pf-corr');
+    if (pfBurst) pfBurst.textContent = pfSession.session_spike || 0;
+    if (pfLimit) pfLimit.textContent = pfSession.session_limit || 0;
+    if (pfCorr) pfCorr.textContent = pfSession.session_multi || 0;
+
+    // IF anomaly rate
+    var ifRateEl = document.getElementById('ep-if-rate');
+    if (ifRateEl && ifData && ifData.score_distribution) {
+      var an = ifData.score_distribution.anomaly || 0;
+      var nm = ifData.score_distribution.normal || 0;
+      var total = an + nm;
+      ifRateEl.textContent = total > 0 ? Math.round(an / total * 100) + '%' : '0%';
+      ifRateEl.style.color = an > 0 ? 'var(--red)' : 'var(--green)';
+    }
+
+    // Active mitigations
+    var mitEl = document.getElementById('ep-mitigations');
+    if (mitEl && stateMachine) {
+      var count = Object.keys(stateMachine).length;
+      mitEl.textContent = count;
+      mitEl.style.color = count > 0 ? 'var(--amber)' : 'var(--green)';
     }
   },
 
@@ -1300,3 +1486,349 @@ function exportExpertSnapshot() {
 }
 
 window.exportExpertSnapshot = exportExpertSnapshot;
+
+/* -- Expert Modals: Algorithm Detail Popups -------------------------------- */
+
+var ExpertModals = {
+  _pollTimer: null,
+
+  open: function(stageKey) {
+    var overlay = document.getElementById('expert-modal-overlay');
+    var body = document.getElementById('expert-modal-body');
+    var head = document.querySelector('.expert-modal-head');
+    if (!overlay || !body) return;
+    var s = ExpertStages.data[stageKey];
+    if (!s) return;
+
+    var badge = head.querySelector('.expert-modal-badge');
+    var title = head.querySelector('.expert-modal-title');
+    if (badge) {
+      badge.style.background = s.color + '22';
+      badge.style.borderColor = s.color + '55';
+      badge.style.color = s.color;
+      badge.textContent = s.num;
+    }
+    if (title) title.textContent = s.title;
+
+    this._renderBody(stageKey, body);
+    overlay.classList.add('open');
+
+    var self = this;
+    if (this._pollTimer) clearInterval(this._pollTimer);
+    this._pollTimer = setInterval(function() {
+      if (!document.getElementById('expert-modal-overlay').classList.contains('open')) {
+        clearInterval(self._pollTimer);
+        self._pollTimer = null;
+        return;
+      }
+      self._renderBody(stageKey, document.getElementById('expert-modal-body'));
+    }, 2000);
+  },
+
+  close: function() {
+    var overlay = document.getElementById('expert-modal-overlay');
+    if (overlay) overlay.classList.remove('open');
+    if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+  },
+
+  _renderBody: function(key, el) {
+    var d = window._lastExpertData || {};
+    if (key === 'flood') this._renderPrefilter(d, el);
+    else if (key === 'entropy') this._renderTEA(d, el);
+    else if (key === 'if_node') this._renderIF(d, el);
+    else if (key === 'rf') this._renderRF(d, el);
+  },
+
+  _renderPrefilter: function(d, el) {
+    var pf = (d.pipeline && d.pipeline.flood_prefilter_breakdown) || {};
+    var pfSession = (d.pipeline && d.pipeline.flood_prefilter_session) || {};
+
+    // Session summary
+    var spikeCount = pfSession.session_spike || 0;
+    var limitCount = pfSession.session_limit || 0;
+    var multiCount = pfSession.session_multi || 0;
+
+    // Flagged IP list - use current snapshot (live state)
+    var flaggedHtml = '';
+    var seen = {};
+    Object.entries(pf).forEach(function(entry) {
+      var proto = entry[0];
+      var bd = entry[1];
+      if (bd.flagged_ips_list) {
+        bd.flagged_ips_list.forEach(function(ip) {
+          if (!seen[ip]) seen[ip] = { protocols: [], burst: 0, limit: 0 };
+          seen[ip].protocols.push(proto);
+          seen[ip].burst += bd.burst || 0;
+          seen[ip].limit += bd.limit || 0;
+        });
+      }
+    });
+    var entries = Object.entries(seen).sort(function(a, b) { return b[1].protocols.length - a[1].protocols.length; }).slice(0, 10);
+    if (entries.length === 0) {
+      flaggedHtml = '<div style="font-size:15px;color:var(--sub2);padding:12px 0">No flagged sources</div>';
+    } else {
+      entries.forEach(function(e) {
+        var ip = e[0], info = e[1];
+        var reason = info.burst > 0 ? 'spike' : info.limit > 0 ? 'over limit' : 'flagged';
+        var multi = info.protocols.length > 1 ? ' <span style="color:var(--red);font-weight:700">MULTI-PROTOCOL</span>' : '';
+        flaggedHtml += '<div class="expert-modal-signal-row"><span style="font-weight:700;min-width:130px">' + ip + '</span><span style="min-width:80px">' + info.protocols.join('+') + '</span><span>' + reason + '</span>' + multi + '</div>';
+      });
+    }
+
+    el.innerHTML =
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">The first guard. It watches how many packets each source IP is sending, for each protocol (SYN, ICMP, UDP). It learns what is normal for each source over time using a moving average. If a source suddenly sends way more than usual, or if a huge burst arrives in a fraction of a second, that source gets flagged. If the same source is flagged on two or more protocols at the same time, it is likely a coordinated attack.</div></div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Session Summary</div>' +
+        '<div style="display:flex;gap:12px;flex-wrap:wrap">' +
+          '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(245,158,11,0.15);color:var(--amber)">Spike: ' + spikeCount + '</span>' +
+          '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(96,180,255,0.15);color:var(--blue)">Over Limit: ' + limitCount + '</span>' +
+          '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(225,29,72,0.15);color:var(--red)">Multi-Protocol: ' + multiCount + '</span>' +
+        '</div>' +
+      '</div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Currently Active (' + entries.length + ')</div>' + flaggedHtml + '</div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">A source is flagged when: (1) its packet rate goes above 3 times what the system learned as normal for that protocol, OR (2) it sends a big burst (40% of the limit) in less than 0.1 seconds. The baseline adjusts over time. If the same source is flagged on 2+ protocols at the same time, it is marked as a coordinated multi-protocol attack.</div></div>';
+  },
+
+  _renderTEA: function(d, el) {
+    var g = (d.tea && d.tea.global) || {};
+    var szVar = g.size_var || 0;
+    var intVar = g.intensity_var || 0;
+    var szBase = g.size_baseline || 0;
+    var intBase = g.intensity_baseline || 0;
+    var attackSigma = g.dynamic_attack_sigma || 2.5;
+    var szZ = g.size_z || 0;
+    var intZ = g.intensity_z || 0;
+    var szPct = Math.min(Math.max((szZ + 3) / 6 * 100, 0), 100);
+    var intPct = Math.min(Math.max((intZ + 3) / 6 * 100, 0), 100);
+    var thrPct = Math.min(Math.max((attackSigma + 3) / 6 * 100, 0), 100);
+    var isAttack = !!g.is_attack;
+    var locked = !!g._locked;
+    var confidence = g.confidence || 'LOW';
+    var learned = !!g.learned;
+    var learningInterval = g.learning_interval || 0;
+    var learningIntervals = g.learning_intervals || 15;
+    var varClass = isAttack ? 'var(--red)' : 'var(--blue)';
+
+    var statusText = isAttack ? 'ATTACK' : locked ? 'LOCKED' : learned ? 'NORMAL' : 'LEARNING';
+    var statusColor = isAttack ? 'var(--red)' : locked ? 'var(--amber)' : learned ? 'var(--green)' : 'var(--blue)';
+
+    var learningHtml = '';
+    if (!learned) {
+      var pct = Math.round(learningInterval / learningIntervals * 100);
+      learningHtml = '<div style="margin-top:12px"><div style="font-size:15px;color:var(--sub2);margin-bottom:8px">Learning: ' + learningInterval + '/' + learningIntervals + ' intervals (' + pct + '%)</div>' +
+        '<div class="expert-modal-gauge-track"><div class="expert-modal-gauge-fill" style="width:' + pct + '%;background:var(--blue)"></div></div></div>';
+    }
+
+    // Shadow learning
+    var shadow = g.shadow || null;
+    var shadowHtml = '';
+    if (shadow && shadow.active) {
+      var shadowReady = shadow.learned && shadow.age_s >= 300;
+      var shadowStatus = shadowReady ? 'Ready for promotion' : 'Learning';
+      var shadowColor = shadowReady ? 'var(--green)' : 'var(--blue)';
+      var shadowPct = shadow.sample_count > 0 ? Math.min(Math.round(shadow.sample_count / 300 * 100), 100) : 0;
+      shadowHtml = '<div style="margin-top:14px;padding:16px;background:var(--surface);border:1px solid var(--border);border-radius:12px">' +
+        '<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">' +
+          '<span style="font-size:16px;font-weight:700">Shadow Baseline</span>' +
+          '<span style="padding:4px 10px;border-radius:6px;font-size:13px;font-weight:600;background:' + shadowColor + '22;color:' + shadowColor + ';border:1px solid ' + shadowColor + '44">' + shadowStatus + '</span>' +
+        '</div>' +
+        '<div style="display:flex;gap:20px;font-size:15px;color:var(--sub);margin-bottom:8px">' +
+          '<span>Samples: ' + shadow.sample_count + '/300</span>' +
+          '<span>Age: ' + shadow.age_s.toFixed(0) + 's / 300s</span>' +
+        '</div>' +
+        '<div class="expert-modal-gauge-track" style="margin-bottom:8px"><div class="expert-modal-gauge-fill" style="width:' + shadowPct + '%;background:' + shadowColor + '"></div></div>' +
+        (shadow.size_mean != null ? '<div style="font-size:14px;color:var(--sub2)">Shadow size mean: ' + shadow.size_mean.toFixed(4) + '</div>' : '') +
+        (shadow.intensity_mean != null ? '<div style="font-size:14px;color:var(--sub2)">Shadow intensity mean: ' + shadow.intensity_mean.toFixed(4) + '</div>' : '') +
+        '<div style="font-size:14px;color:var(--sub2);margin-top:8px">Learns in parallel while primary is frozen during attack. Promotes when ready to replace corrupted baseline.</div>' +
+      '</div>';
+    }
+
+    el.innerHTML =
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Measures how varied and diverse the traffic is. Normal traffic has many different source IPs, destination ports, and packet sizes. A flood is the opposite - repetitive, uniform, and predictable. When diversity drops below normal, it raises an alarm. During an attack, it freezes its memory of what normal looks like.</div></div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Diversity Tracks</div>' +
+        this._teaTrack('Size Diversity', szZ, szPct, thrPct, varClass, szBase) +
+        this._teaTrack('Packet Intensity', intZ, intPct, thrPct, varClass, intBase) +
+        '<div style="font-size:15px;color:var(--sub2);margin-top:12px">Center line = normal baseline. Bars going left = less diversity (flood). Red line = attack threshold.</div>' +
+      '</div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Status</div>' +
+        '<div style="display:flex;gap:12px;flex-wrap:wrap">' +
+          '<span style="padding:6px 14px;border-radius:8px;font-size:15px;font-weight:700;background:' + statusColor + '22;color:' + statusColor + ';border:1px solid ' + statusColor + '44">' + statusText + '</span>' +
+          '<span style="padding:6px 14px;border-radius:8px;font-size:15px;font-weight:700;background:var(--surface);border:1px solid var(--border);color:var(--text)">Confidence: ' + confidence + '</span>' +
+        '</div>' +
+        learningHtml +
+        shadowHtml +
+      '</div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">Compares current traffic diversity to what it learned as normal. If the z-score drops below a negative threshold, traffic is less diverse than normal - a flood signal. The latch freezes memory during attacks so the flood does not corrupt the baseline. It unlocks only when both the anomaly detector and entropy analyzer agree traffic has returned to normal.</div></div>';
+  },
+
+  _teaTrack: function(label, z, pct, thrPct, color, baseVal) {
+    return '<div style="margin-bottom:16px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">' +
+      '<span style="font-size:15px;font-weight:700">' + label + '</span>' +
+      '<span style="font-size:15px;font-family:var(--mono);color:' + color + ';font-weight:600">' + (z >= 0 ? '+' : '') + z.toFixed(1) + 'z</span>' +
+    '</div>' +
+    '<div class="expert-modal-gauge-track">' +
+      '<div class="expert-modal-gauge-fill" style="width:' + pct + '%;background:' + color + '"></div>' +
+      '<div class="expert-modal-gauge-marker" style="left:50%;background:#fff"></div>' +
+      '<div class="expert-modal-gauge-marker" style="left:' + thrPct + '%;background:var(--red)"></div>' +
+    '</div>' +
+    '<div style="font-size:14px;color:var(--sub2);margin-top:4px">baseline mean: ' + baseVal.toFixed(4) + '</div></div>';
+  },
+
+  _renderIF: function(d, el) {
+    var ifData = d.if || {};
+    var threshold = ifData.threshold || 0.5992;
+    var recentScores = ifData.recent_scores || [];
+    var dist = ifData.score_distribution || { normal: 0, anomaly: 0 };
+    var total = (dist.normal || 0) + (dist.anomaly || 0);
+    var anomPct = total > 0 ? Math.round((dist.anomaly || 0) / total * 100) : 0;
+    var highestScore = 0;
+    var isAnom = false;
+    if (recentScores.length > 0) {
+      var sorted = recentScores.slice().sort(function(a, b) { return b.score - a.score; });
+      highestScore = sorted[0].score;
+      isAnom = sorted[0].anomaly;
+    }
+    var fillPct = Math.min(highestScore / 1 * 100, 100);
+    var thrPct = Math.min(threshold / 1 * 100, 100);
+    var scoreColor = isAnom ? 'var(--red)' : 'var(--green)';
+    var verdict = isAnom ? 'ANOMALY' : 'NORMAL';
+
+    // Recent scores sparkline with threshold reference
+    var sparkHtml = '';
+    if (recentScores.length > 0) {
+      var last20 = recentScores.slice(-20);
+      var w = 500, h = 80;
+      var pad = 10;
+      var usable = h - pad * 2;
+      var thrY = h - pad - (threshold / 1) * usable;
+      var pts = last20.map(function(s, i) {
+        var x = last20.length === 1 ? pad : pad + (i / (last20.length - 1)) * (w - pad * 2);
+        var y = h - pad - (Math.min(s.score, 1) / 1) * usable;
+        return x.toFixed(1) + ',' + y.toFixed(1);
+      }).join(' ');
+      // Threshold area fill
+      var thrAreaPts = pts + ' ' + (w - pad) + ',' + thrY + ' ' + pad + ',' + thrY;
+      sparkHtml = '<svg style="width:100%;height:' + h + 'px" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+        '<rect x="' + pad + '" y="0" width="' + (w - pad * 2) + '" height="' + thrY + '" fill="rgba(225,29,72,0.06)"/>' +
+        '<line x1="' + pad + '" y1="' + thrY + '" x2="' + (w - pad) + '" y2="' + thrY + '" stroke="rgba(225,29,72,0.4)" stroke-width="1.5" stroke-dasharray="6,4"/>' +
+        '<text x="' + (w - pad - 4) + '" y="' + (thrY - 6) + '" fill="rgba(225,29,72,0.6)" font-size="11" font-family="monospace" text-anchor="end">threshold</text>' +
+        '<polyline fill="none" stroke="' + scoreColor + '" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" points="' + pts + '"/>' +
+        last20.map(function(s, i) {
+          var x = last20.length === 1 ? pad : pad + (i / (last20.length - 1)) * (w - pad * 2);
+          var y = h - pad - (Math.min(s.score, 1) / 1) * usable;
+          var dotColor = s.anomaly ? 'var(--red)' : 'var(--green)';
+          return '<circle cx="' + x + '" cy="' + y + '" r="4" fill="' + dotColor + '" stroke="var(--card)" stroke-width="1.5"/>';
+        }).join('') +
+      '</svg>';
+    }
+
+    el.innerHTML =
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Looks at every flow (a conversation between two IPs) and asks: does this look like the normal traffic I was trained on? It randomly cuts the data into pieces. Normal flows need many cuts to separate. Anomalous flows stand out quickly with fewer cuts. The fewer cuts needed, the more suspicious the flow.</div></div>' +
+
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Current Score</div>' +
+        '<div style="display:flex;align-items:baseline;gap:16px;margin-bottom:10px">' +
+          '<span style="font-size:32px;font-weight:800;font-family:var(--mono);color:' + scoreColor + '">' + highestScore.toFixed(4) + '</span>' +
+          '<span style="font-size:16px;font-weight:700;padding:4px 12px;border-radius:6px;background:' + scoreColor + '22;color:' + scoreColor + ';border:1px solid ' + scoreColor + '44">' + verdict + '</span>' +
+        '</div>' +
+        '<div class="expert-modal-gauge-track" style="height:20px">' +
+          '<div class="expert-modal-gauge-fill" style="width:' + fillPct + '%;background:' + scoreColor + '"></div>' +
+          '<div class="expert-modal-gauge-marker" style="left:' + thrPct + '%;background:var(--red)"></div>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:space-between;margin-top:6px;font-size:14px;color:var(--sub2)">' +
+          '<span>0 (normal)</span>' +
+          '<span>threshold: ' + threshold.toFixed(4) + '</span>' +
+          '<span>1 (anomalous)</span>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Score Distribution (last ' + total + ' flows)</div>' +
+        '<div style="display:flex;gap:20px;align-items:center">' +
+          '<div style="flex:1">' +
+            '<div class="expert-modal-gauge-track" style="height:18px">' +
+              '<div class="expert-modal-gauge-fill" style="width:' + (100 - anomPct) + '%;background:var(--green);border-radius:8px 0 0 8px"></div>' +
+              '<div class="expert-modal-gauge-fill" style="width:' + anomPct + '%;background:var(--red);border-radius:0 8px 8px 0"></div>' +
+            '</div>' +
+          '</div>' +
+          '<div style="display:flex;gap:20px;font-size:15px;flex-shrink:0">' +
+            '<span style="color:var(--green);font-weight:700">' + (100 - anomPct) + '% normal</span>' +
+            '<span style="color:var(--red);font-weight:700">' + anomPct + '% anomalous</span>' +
+          '</div>' +
+        '</div>' +
+        '<div style="font-size:14px;color:var(--sub2);margin-top:8px">How many recent flows were classified as normal vs anomalous.</div>' +
+      '</div>' +
+
+      (sparkHtml ? '<div class="expert-modal-section"><div class="expert-modal-section-title">Recent Scores (last 20)</div>' +
+        '<div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px">' +
+          '<div style="display:flex;gap:16px;margin-bottom:8px;font-size:13px">' +
+            '<span style="display:flex;align-items:center;gap:6px"><span style="width:10px;height:10px;border-radius:50%;background:var(--green);display:inline-block"></span> normal flow</span>' +
+            '<span style="display:flex;align-items:center;gap:6px"><span style="width:10px;height:10px;border-radius:50%;background:var(--red);display:inline-block"></span> anomalous flow</span>' +
+            '<span style="display:flex;align-items:center;gap:6px"><span style="width:20px;height:0;border-top:2px dashed rgba(225,29,72,0.4);display:inline-block"></span> threshold</span>' +
+          '</div>' +
+          sparkHtml +
+        '</div>' +
+      '</div>' : '') +
+
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">Each flow gets a score from 0 to 1. A score near 0 looks normal. A score near 1 looks very different from normal. The threshold is set during training. If above threshold, the flow is sent to Random Forest to identify the attack type. Below threshold = normal, not forwarded.</div></div>';
+  },
+
+  _renderRF: function(d, el) {
+    var rf = d.rf || {};
+    var dist = rf.class_distribution || {};
+    var gate = rf.conf_gate || 0.6;
+    var recent = rf.recent_classifications || [];
+    var total = Object.values(dist).reduce(function(a, b) { return a + b; }, 0) || 1;
+    var segs = [
+      { key: 'SYN Flood', color: 'var(--amber)', label: 'SYN' },
+      { key: 'ICMP Flood', color: '#f472b6', label: 'ICMP' },
+      { key: 'UDP Flood', color: '#60b4ff', label: 'UDP' },
+      { key: 'Uncertain', color: 'var(--sub2)', label: 'Uncertain' },
+      { key: 'Normal', color: 'var(--green)', label: 'Normal' }
+    ];
+    var barHtml = '';
+    var legendHtml = '';
+    segs.forEach(function(seg) {
+      var count = dist[seg.key] || 0;
+      var pct = total > 0 ? Math.round(count / total * 100) : 0;
+      if (pct > 0) {
+        barHtml += '<div style="width:' + pct + '%;background:' + seg.color + ';display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:' + (seg.key === 'Normal' ? '#fff' : '#000') + '">' + (pct > 8 ? pct + '%' : '') + '</div>';
+        legendHtml += '<span style="font-size:14px;color:' + seg.color + ';font-weight:600">' + seg.label + ': ' + pct + '%</span>';
+      }
+    });
+    if (!barHtml) barHtml = '<div style="width:100%;background:var(--green);display:flex;align-items:center;justify-content:center;font-size:14px;font-weight:600;color:#fff">No data</div>';
+
+    var confPct = Math.round(gate * 100);
+    var headerRow = '<div class="expert-modal-signal-row" style="border-bottom:2px solid var(--border);padding-bottom:8px;margin-bottom:4px">' +
+      '<span style="font-weight:700;min-width:130px;font-size:13px;color:var(--sub2);text-transform:uppercase;letter-spacing:.06em">Source IP</span>' +
+      '<span style="min-width:110px;font-size:13px;color:var(--sub2);text-transform:uppercase;letter-spacing:.06em">Classification</span>' +
+      '<span style="font-size:13px;color:var(--sub2);text-transform:uppercase;letter-spacing:.06em">Confidence</span>' +
+    '</div>';
+    var anomalyOnly = recent.filter(function(c) { return c.is_anomaly; });
+    var rowsHtml = headerRow;
+    anomalyOnly.slice(0, 8).forEach(function(c) {
+      var confVal = typeof c.conf === 'number' ? (c.conf <= 1 ? Math.round(c.conf * 100) : Math.round(c.conf)) : 0;
+      rowsHtml += '<div class="expert-modal-signal-row">' +
+        '<span style="font-weight:700;min-width:130px">' + c.src_ip + '</span>' +
+        '<span style="min-width:110px">' + (c.attack_class || 'unknown') + '</span>' +
+        '<span>' + confVal + '%</span>' +
+      '</div>';
+    });
+    if (anomalyOnly.length === 0) rowsHtml += '<div style="font-size:15px;color:var(--sub2);padding:12px 0">No anomalies detected yet - RF activates when IF flags a flow</div>';
+
+    el.innerHTML =
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Takes suspicious flows from the previous step and figures out what kind of attack it is. Many small decision trees each look at different features and vote on the attack type. The final answer is whichever type got the most votes.</div></div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Vote Breakdown</div>' +
+        '<div class="expert-modal-gauge-track" style="height:24px;display:flex;overflow:hidden;border-radius:8px">' + barHtml + '</div>' +
+        '<div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">' + legendHtml + '</div>' +
+        '<div style="font-size:15px;color:var(--sub2);margin-top:10px">Each segment shows how many trees voted for that attack type.</div>' +
+      '</div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Confidence Gate</div>' +
+        '<div style="font-size:18px;font-weight:700">Gate threshold: ' + confPct + '%</div>' +
+        '<div style="font-size:15px;color:var(--sub2);margin-top:8px">The system only acts when enough trees agree. If they disagree, it waits for more data. This prevents false alarms.</div>' +
+      '</div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Recent Classifications</div>' + rowsHtml + '</div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">Each decision tree votes on the attack type. The final prediction is whichever type got the most votes. The confidence is the percentage of trees that agreed. If confidence is below the gate threshold, the system waits for more data. If above, it issues a mitigation command to block or rate-limit the source.</div></div>';
+  }
+};
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') ExpertModals.close();
+});

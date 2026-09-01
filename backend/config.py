@@ -111,8 +111,8 @@ TEA_LEARN_MIN_DURATION_S = 300.0
 # this floor, the analyzer remains in shadow mode instead of calibrating
 # "normal" on a near-idle window (observed: baseline learned at 0.47 pps/flow
 # during a benchmark cold start, real traffic then read +170 sigma).
-# Tuned to this testbed: idle ~0.5 pps/flow, active host traffic >= 1.
-TEA_LEARN_MIN_MEAN_PPS = 1.0
+# Tuned to this testbed: idle ~0.2-0.5 pps/flow, active host traffic >= 1.
+TEA_LEARN_MIN_MEAN_PPS = 0.1
 # Dynamic flood cap for warmup volume guard: per-flow pps above the cap is
 # rejected during warmup. The cap scales with observed traffic:
 #   cap = max(TEA_LEARN_CAP_FLOOR_PPS, provisional_mean * TEA_LEARN_CAP_FACTOR)
@@ -189,6 +189,13 @@ TEA_IF_RATE_WINDOW = 20
 TEA_IF_ANOMALY_RATE_BLOCK = 0.3
 # --- TEA telemetry validation (P6) ---
 TEA_EVAL_SEQ_MAX_JUMP = 1000            # reject absurd dedup-blackout seq jumps
+
+# --- TEA Shadow Baseline (dual-baseline learning) ---
+TEA_SHADOW_ENABLED = True              # master switch
+TEA_SHADOW_MIN_SAMPLES = 300           # shadow must accumulate before promotion
+TEA_SHADOW_MIN_DURATION_S = 300.0      # shadow must span this time before promotion
+TEA_SHADOW_MAX_AGE_S = 600.0           # discard shadow if older (stale)
+TEA_SHADOW_PROMOTE_MIN_CONFIDENCE = "moderate"
 
 # --- TEA detection thresholds (moved from entropy_analyzer.py for single source of truth) ---
 # z-score for attack variance collapse detection

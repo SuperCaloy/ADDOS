@@ -1389,22 +1389,28 @@ def stop_all_attacks() -> None:
 # === FLASH CROWD ===
 
 # Flash crowd: elevated per-host rates, same traffic types as baseline.
+# Flash crowd profiles: realistic L3/L4 packet sizes, bursty timing.
+# TCP: 200-1400 bytes (HTTP request/response sizes)
+# UDP DNS: 50-300 bytes (real DNS queries/responses)
+# UDP other: 50-200 bytes (NTP/SSDP realistic payloads)
+# ICMP: 56-64 bytes (standard ping, already correct)
+# Bursty: send 3-5 packets fast (0.1-0.3s), then pause 1-3s (page load pattern)
 _FLASH_CROWD_PROFILES = {
-    1:  ("icmp_cont", 56,  64,  0.8, 1.2),
-    2:  ("icmp_cont", 56,  64,  0.8, 1.2),
-    3:  ("tcp",       80,  20,  50,  0.5, 1.0),
-    4:  ("tcp",       443, 20,  60,  0.5, 1.0),
-    5:  ("udp",       53,  5,   10,  0.8, 1.5),
-    6:  ("udp",       123, 5,   10,  0.8, 1.5),
-    7:  ("udp",       1900, 5,  10,  0.8, 1.5),
-    8:  ("tcp",       8080, 20, 50,  0.5, 1.0),
-    9:  ("tcp",       80,  20,  50,  0.5, 1.0),
-    10: ("udp",       53,  5,   10,  0.8, 1.5),
-    11: ("icmp_cont", 56,  64,  0.8, 1.2),
-    12: ("icmp_cont", 56,  64,  0.8, 1.2),
-    13: ("icmp_cont", 56,  64,  0.8, 1.2),
-    14: ("icmp_cont", 56,  64,  0.8, 1.2),
-    15: ("icmp_cont", 56,  64,  0.8, 1.2),
+    1:  ("tcp_burst",  80,   200, 1400, 3, 5),    # HTTP page load burst
+    2:  ("tcp_burst",  443,  200, 1400, 3, 5),    # HTTPS page load burst
+    3:  ("tcp_burst",  80,   200, 1400, 3, 5),    # HTTP API calls burst
+    4:  ("tcp_burst",  443,  200, 1400, 3, 5),    # HTTPS API calls burst
+    5:  ("tcp_burst",  8080, 200, 1400, 3, 5),    # HTTP alt port burst
+    6:  ("udp_burst",  53,   50,  300,  3, 5),    # DNS query burst
+    7:  ("udp",        123,  50,  200,  1.0, 2.0), # NTP steady
+    8:  ("udp",        1900, 50,  200,  1.0, 2.0), # SSDP steady
+    9:  ("udp_burst",  53,   50,  300,  3, 5),    # DNS query burst
+    10: ("udp",        123,  50,  200,  1.0, 2.0), # NTP steady
+    11: ("icmp_cont",  56,   64,  0.8, 1.2),      # ICMP ping (unchanged)
+    12: ("icmp_cont",  56,   64,  0.8, 1.2),      # ICMP ping (unchanged)
+    13: ("icmp_cont",  56,   64,  0.8, 1.2),      # ICMP ping (unchanged)
+    14: ("icmp_cont",  56,   64,  0.8, 1.2),      # ICMP ping (unchanged)
+    15: ("icmp_cont",  56,   64,  0.8, 1.2),      # ICMP ping (unchanged)
 }
 
 
@@ -1438,6 +1444,27 @@ def _flash_crowd_run_slot(host, num: int) -> None:
             f" time.sleep(random.uniform({slp_min},{slp_max}))"
             f"\" 2>/dev/null"
         ), return_proc=True)
+    elif kind == "tcp_burst":
+        # Bursty TCP: send 3-5 packets fast (page load), then pause 1-3s
+        _, port, pkt_min, pkt_max, burst_min, burst_max = profile
+        proc = _nsrun(host, (
+            f"python3 -c \""
+            f"import socket,os,time,random;"
+            f"while True:"
+            f" burst=random.randint({burst_min},{burst_max});"
+            f" for _ in range(burst):"
+            f"  try:"
+            f"   s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);"
+            f"   s.settimeout(3);"
+            f"   s.connect(('{SERVER_IP}',{port}));"
+            f"   size=random.randint({pkt_min},{pkt_max});"
+            f"   s.sendall(os.urandom(size));"
+            f"   s.close();"
+            f"  except: pass;"
+            f"  time.sleep(random.uniform(0.1,0.3));"
+            f" time.sleep(random.uniform(1.0,3.0))"
+            f"\" 2>/dev/null"
+        ), return_proc=True)
     elif kind == "udp":
         # raw L4 UDP, continuous loop for the full flash crowd duration
         _, port, pkt_min, pkt_max, slp_min, slp_max = profile
@@ -1450,6 +1477,23 @@ def _flash_crowd_run_slot(host, num: int) -> None:
             f" s.sendto(os.urandom({size}),('{SERVER_IP}',{port}));"
             f" s.close();"
             f" time.sleep(random.uniform({slp_min},{slp_max}))"
+            f"\" 2>/dev/null"
+        ), return_proc=True)
+    elif kind == "udp_burst":
+        # Bursty UDP: send 3-5 packets fast (DNS burst), then pause 2-4s
+        _, port, pkt_min, pkt_max, burst_min, burst_max = profile
+        proc = _nsrun(host, (
+            f"python3 -c \""
+            f"import socket,os,time,random;"
+            f"while True:"
+            f" burst=random.randint({burst_min},{burst_max});"
+            f" for _ in range(burst):"
+            f"  s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+            f"  size=random.randint({pkt_min},{pkt_max});"
+            f"  s.sendto(os.urandom(size),('{SERVER_IP}',{port}));"
+            f"  s.close();"
+            f"  time.sleep(random.uniform(0.1,0.3));"
+            f" time.sleep(random.uniform(2.0,4.0))"
             f"\" 2>/dev/null"
         ), return_proc=True)
     # Track the proc so _kill_baseline_procs can stop it after duration

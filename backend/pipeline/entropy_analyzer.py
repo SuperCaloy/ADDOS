@@ -30,6 +30,10 @@ from backend.config import (
     TEA_TEA_UNLOCK_STREAK,
     TEA_TEA_HIGH_CONF_LOCK,
     TEA_MIN_FLOWS_PER_INTERVAL,
+    TEA_SHADOW_ENABLED,
+    TEA_SHADOW_MIN_SAMPLES,
+    TEA_SHADOW_MIN_DURATION_S,
+    TEA_SHADOW_MAX_AGE_S,
 )
 
 # Read-at-call-time constants (dual-feedback E2 guidance): accessed via the
@@ -261,6 +265,24 @@ class _GlobalEntropyState:
         self.pps_base   = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True,
                                             min_learn_mean=TEA_LEARN_MIN_MEAN_PPS)
         self.last_result = {}
+        self._shadow = None
+
+    @property
+    def shadow(self):
+        return self._shadow
+
+    def start_shadow(self) -> None:
+        """Create a new shadow baseline."""
+        if not _cfg.TEA_SHADOW_ENABLED:
+            return
+        self._shadow = _ShadowState()
+        log.info("TEA shadow baseline created")
+
+    def discard_shadow(self, reason: str) -> None:
+        """Discard the current shadow baseline."""
+        if self._shadow:
+            self._shadow.discard(reason)
+            self._shadow = None
 
     def observe(self, snapshot: dict) -> None:
         self.window.append(snapshot)
@@ -303,8 +325,38 @@ class _GlobalEntropyState:
         )
 
 
+class _ShadowState:
+    """Shadow baseline that learns in parallel while primary is frozen."""
+
+    def __init__(self):
+        self.baselines = _GlobalEntropyState(TEA_WINDOW_SIZE)
+        self.created_at: float = time.monotonic()
+        self.sample_count: int = 0
+        self.active: bool = True
+
+    def is_ready(self) -> bool:
+        """Shadow ready when all baselines learned and age sufficient."""
+        if not self.active:
+            return False
+        age = time.monotonic() - self.created_at
+        return (
+            self.baselines.is_learned
+            and age >= _cfg.TEA_SHADOW_MIN_DURATION_S
+        )
+
+    def is_stale(self) -> bool:
+        """Shadow too old, should be discarded."""
+        age = time.monotonic() - self.created_at
+        return age > _cfg.TEA_SHADOW_MAX_AGE_S
+
+    def discard(self, reason: str) -> None:
+        """Mark shadow inactive."""
+        self.active = False
+        log.info("TEA shadow discarded: %s", reason)
+
+
 IP_PROFILE_MIN_SAMPLES = 10
-IP_PROFILE_WINDOW      = 40
+IP_PROFILE_WINDOW      = 50
 
 class _IpEntropyProfile:
     def __init__(self):
@@ -604,13 +656,22 @@ class EntropyAnalyzer:
                 # IF anomaly-rate gate blocks the restart during a real
                 # flood: otherwise a sustained low-rate attack could get the
                 # fresh baseline calibrated at attack scale.
+                #
+                # FIX: During an active attack, extreme z-scores are EXPECTED
+                # (attack traffic differs from baseline). Never wipe baselines
+                # mid-attack. After the attack ends, the supervised relearning
+                # path handles baseline recalibration if needed.
                 if self._attack_latched:
+                    # During attack: always reset streak. Extreme z-scores are
+                    # expected and NOT a sign of miscalibrated baselines.
+                    self._extreme_z_streak = 0
+                else:
+                    # After attack ended: check if baselines need recalculation
                     extreme_now = (
                         max(
                             abs(size_z), abs(intensity_z), abs(proto_z),
                             abs(share_z), abs(pps_z),
                         ) >= _cfg.TEA_EXTREME_Z_SIGMA
-                        and self._if_anomaly_rate() < _cfg.TEA_RELEARN_MAX_IF_ANOMALY_RATE
                     )
                     if extreme_now:
                         self._extreme_z_streak += 1
@@ -622,6 +683,9 @@ class EntropyAnalyzer:
                             "baseline miscalibrated, wiping and relearning",
                             _cfg.TEA_EXTREME_Z_SIGMA, self._extreme_z_streak,
                         )
+                        # When wiping baselines, also discard any shadow
+                        if self._global_state.shadow:
+                            self._global_state.discard_shadow("extreme-z wipe")
                         self._global_state = _GlobalEntropyState(TEA_WINDOW_SIZE)
                         self._extreme_z_streak = 0
                         self._tea_attack_streak = 0
@@ -656,11 +720,15 @@ class EntropyAnalyzer:
         # volume companion. R1 backstops very high multi-source uniformity.
         volume_anomaly = size_surge or intensity_surge or pps_surge
         collapse_anomaly = size_collapsed or intensity_collapsed or proto_collapsed
+        # Flash crowd: high volume + no collapse + not mechanized.
+        # NOTE: proto_surge removed - baseline traffic already uses diverse
+        # protocols (TCP/UDP/ICMP), so flash crowd proto entropy is similar
+        # to baseline. mechanized_cluster already distinguishes crowds from
+        # uniform attacks.
         is_flash_crowd = (
             volume_anomaly
             and not collapse_anomaly
             and not mechanized_cluster
-            and proto_surge
         ) if not degenerate else False
         uniform_backstop = (
             mechanized_cluster
@@ -703,6 +771,19 @@ class EntropyAnalyzer:
             if not is_attack_pattern or supervised:
                 with self._lock:
                     state.learn(snapshot, force=supervised, capped=supervised)
+
+        # Feed shadow baseline if active and primary is frozen
+        with self._lock:
+            if state.shadow and state.shadow.active and self._attack_latched:
+                state.shadow.baselines.learn(snapshot)
+                state.shadow.sample_count += 1
+                if state.shadow.is_ready():
+                    log.info("TEA shadow ready for promotion (n=%d, age=%.1fs)",
+                             state.shadow.sample_count,
+                             time.monotonic() - state.shadow.created_at)
+            # Discard stale shadows
+            if state.shadow and state.shadow.is_stale():
+                state.discard_shadow("too old")
 
         result = {
             "size_var":  round(curr["size_var"],  4),
@@ -817,9 +898,13 @@ class EntropyAnalyzer:
         if latched:
             self._latch_set_at = time.monotonic()
             self._lock_all()
+            # Start shadow baseline when latch locks
+            self._global_state.start_shadow()
             log.info("TEA latch LOCKED (%s): tea_attack_streak=%d", reason, self._tea_attack_streak)
         else:
             self._unlock_all()
+            # Try to promote shadow if ready
+            self._try_promote_shadow()
             log.info("TEA latch UNLOCKED (%s): if_streak=%d tea_normal_streak=%d",
                      reason, self._if_normal_streak, self._tea_normal_streak)
 
@@ -831,6 +916,66 @@ class EntropyAnalyzer:
             and self._tea_normal_streak >= TEA_TEA_UNLOCK_STREAK
         ):
             self._set_latch(False, "both streaks satisfied", caller_holds_lock=True)
+
+    def _shadow_health_check(self, shadow: _ShadowState) -> bool:
+        """Verify shadow baselines produce reasonable z-scores for current traffic."""
+        baselines = shadow.baselines
+        if not baselines.is_learned:
+            return False
+
+        # Use the latest snapshot from the shadow's window
+        if not baselines.window:
+            return False
+
+        latest = baselines.window[-1]
+
+        # Map baseline names to snapshot keys
+        key_map = {
+            "size": "size_var",
+            "intensity": "intensity_var",
+            "pps": "mean_pps",
+        }
+
+        # Check each baseline's z-score against shadow's own mean
+        for name, base in [
+            ("size", baselines.size_base),
+            ("intensity", baselines.intensity_base),
+            ("pps", baselines.pps_base),
+        ]:
+            if not base.is_learned:
+                return False
+            value = latest.get(key_map[name], 0)
+            z = base.z_score(value)
+            if abs(z) > 3.0:
+                log.debug("TEA shadow health check failed: %s z=%.2f", name, z)
+                return False
+
+        return True
+
+    def _try_promote_shadow(self) -> None:
+        """Promote shadow baseline to primary if ready and healthy."""
+        state = self._global_state
+        if not state.shadow or not state.shadow.is_ready():
+            return
+
+        # Health check before promotion
+        if not self._shadow_health_check(state.shadow):
+            log.info("TEA shadow failed health check, discarding")
+            state.discard_shadow("health check failed")
+            return
+
+        log.info("TEA shadow promoted to primary (old_mean=%.4f, new_mean=%.4f)",
+                 state.size_base.mean or 0,
+                 state.shadow.baselines.size_base.mean or 0)
+
+        # Swap: shadow becomes primary
+        old_state = state
+        self._global_state = state.shadow.baselines
+        # Carry over window, last_result from old state
+        self._global_state.window = old_state.window
+        self._global_state.last_result = old_state.last_result
+        # Clear shadow reference
+        old_state._shadow = None
 
     def _if_sustained_anomaly(self, now: float) -> bool:
         """P4: IF is 'sustained anomalous' only when anomalies dominate the
@@ -903,6 +1048,9 @@ class EntropyAnalyzer:
                 self._tea_normal_streak = 0
                 self._relearn_stable_streak = 0
                 self._last_attack_event = time.monotonic()
+                # Discard shadow baseline if an attack arrives during shadow learning
+                if is_attack and self._global_state.shadow and self._global_state.shadow.active:
+                    self._global_state.discard_shadow("attack during shadow learning")
                 if TEA_TEA_HIGH_CONF_LOCK and confidence == "high":
                     self._set_latch(True, "high confidence attack", caller_holds_lock=True)
                     return
@@ -929,6 +1077,11 @@ class EntropyAnalyzer:
         """
         now = now if now is not None else time.monotonic()
         with self._lock:
+            # Cleanup stale shadows regardless of latch state
+            state = self._global_state
+            if state.shadow and state.shadow.is_stale():
+                state.discard_shadow("stale during idle")
+
             if not self._attack_latched:
                 return
             if (

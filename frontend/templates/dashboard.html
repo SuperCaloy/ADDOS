@@ -242,7 +242,6 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
     <div class="expert-pipeline-canvas-wrap">
       <div class="expert-pipeline-header">
         <span class="expert-pipeline-eyebrow">Detection and Mitigation Pipeline &middot; click a stage to inspect</span>
-        <span class="expert-pipeline-live"><span class="expert-pipeline-live-dot"></span>streaming</span>
       </div>
       <canvas id="expert-pipeline-canvas"></canvas>
     </div>
@@ -269,6 +268,18 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
   </div>
 
 </div><!-- /app -->
+
+<!-- Expert Algorithm Modal -->
+<div class="expert-modal-overlay" id="expert-modal-overlay" onclick="ExpertModals.close()">
+  <div class="expert-modal" onclick="event.stopPropagation()">
+    <div class="expert-modal-head">
+      <div class="expert-modal-badge">0</div>
+      <h3 class="expert-modal-title"></h3>
+      <button class="expert-modal-close" onclick="ExpertModals.close()">&times;</button>
+    </div>
+    <div class="expert-modal-body" id="expert-modal-body"></div>
+  </div>
+</div>
 
 <!-- Report Modal -->
 <div class="overlay" id="modal">
