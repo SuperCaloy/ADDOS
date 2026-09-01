@@ -194,7 +194,7 @@ def _build_db_features(src_ip: str) -> dict | None:
 
     # ip_attack_history — offence/ban/phase metadata
     hist = query("""
-        SELECT ban_level, phase_reached, first_seen, priority
+        SELECT ban_level, phase_reached, first_seen, priority, offence_count, reputation_score
         FROM ip_attack_history
         WHERE src_ip = ?
         ORDER BY unblocked_at DESC LIMIT 1

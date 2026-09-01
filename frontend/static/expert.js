@@ -468,7 +468,6 @@ var ExpertPipeline = {
   spawnParticleFromEvent: function(inferencePayload) {
     if (this.reducedMotion) return;
     var isAnomaly = inferencePayload.is_anomaly;
-    var attackClass = inferencePayload.attack_class || 'Normal';
 
     // Path-specific colors
     var pathColors = {
@@ -485,6 +484,12 @@ var ExpertPipeline = {
     var now = performance.now();
     var forwardPaths = this.paths.filter(function(p) { return !p.feedback && p.kind !== 'redirect'; });
     forwardPaths.forEach(function(path, index) {
+      // Skip if there's already a recent particle on this path (avoid reset mid-flight)
+      var hasRecent = this.particles.some(function(p) {
+        return p.from === path.from && p.to === path.to && (now - p.spawnTime) < 800;
+      });
+      if (hasRecent) return;
+
       var key = path.from + '->' + path.to;
       var color = pathColors[key] || '#10B981';
       this.particles.push({
@@ -712,7 +717,7 @@ var ExpertPipeline = {
       }
     }.bind(this));
 
-    if (this.particles.length > 60) this.particles.splice(0, this.particles.length - 60);
+    if (this.particles.length > 40) this.particles.splice(0, this.particles.length - 40);
     var currentTime = performance.now();
     for (var i = this.particles.length - 1; i >= 0; i--) {
       var p = this.particles[i];
@@ -1548,6 +1553,25 @@ var ExpertModals = {
     var limitCount = pfSession.session_limit || 0;
     var multiCount = pfSession.session_multi || 0;
 
+    // Per-protocol breakdown
+    var protoHtml = '';
+    ['SYN', 'ICMP', 'UDP'].forEach(function(proto) {
+      var bd = pf[proto] || { flagged_ips: 0, burst: 0, limit: 0 };
+      var hasData = bd.flagged_ips > 0 || bd.burst > 0 || bd.limit > 0;
+      protoHtml += '<div style="margin-bottom:12px;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px">' +
+        '<div style="display:flex;align-items:center;justify-content:space-between">' +
+          '<span style="font-size:16px;font-weight:800;font-family:var(--mono)">' + proto + '</span>' +
+          '<span style="font-size:15px;font-weight:700;color:' + (hasData ? 'var(--red)' : 'var(--green)') + '">' + bd.flagged_ips + ' flagged</span>' +
+        '</div>' +
+        (hasData ?
+          '<div style="display:flex;gap:10px;margin-top:6px;font-size:13px">' +
+            (bd.burst > 0 ? '<span style="padding:2px 8px;border-radius:5px;background:rgba(245,158,11,0.15);color:var(--amber);font-weight:600">' + bd.burst + ' spike</span>' : '') +
+            (bd.limit > 0 ? '<span style="padding:2px 8px;border-radius:5px;background:rgba(96,180,255,0.15);color:var(--blue);font-weight:600">' + bd.limit + ' over limit</span>' : '') +
+          '</div>'
+        : '<div style="font-size:13px;color:var(--sub2);margin-top:4px">No flagged sources</div>') +
+      '</div>';
+    });
+
     // Flagged IP list - use current snapshot (live state)
     var flaggedHtml = '';
     var seen = {};
@@ -1584,6 +1608,7 @@ var ExpertModals = {
           '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(225,29,72,0.15);color:var(--red)">Multi-Protocol: ' + multiCount + '</span>' +
         '</div>' +
       '</div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">Detection by Protocol</div>' + protoHtml + '</div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Currently Active (' + entries.length + ')</div>' + flaggedHtml + '</div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">A source is flagged when: (1) its packet rate goes above 3 times what the system learned as normal for that protocol, OR (2) it sends a big burst (40% of the limit) in less than 0.1 seconds. The baseline adjusts over time. If the same source is flagged on 2+ protocols at the same time, it is marked as a coordinated multi-protocol attack.</div></div>';
   },
