@@ -98,14 +98,8 @@ FLOOD_UDP_WINDOW_S  = 1.0
 TEA_WINDOW_SIZE = 500
 
 TEA_LEARN_MIN_SAMPLES = 300
-# Minimum wall-clock span of the learning phase, measured from the first
-# warmup sample. Learning completes only when BOTH the sample floor and the
-# duration floor hold, so the phase can never finish early on an active
-# network and idle gaps cannot shorten it. The producer's stats poll runs
-# at 1s cadence, so 300 samples and 300s complete together on continuous
-# traffic; sparse traffic extends the phase until the floor is met.
-# Ref: notes/bugs/tea-learning-phase-duration.md.
-TEA_LEARN_MIN_DURATION_S = 300.0
+# Duration requirement removed: learn from sample count only (AWS: "minutes not hours")
+# Old: TEA_LEARN_MIN_DURATION_S = 300.0
 # Calibration validity gate (option A): the pps baseline may only finalize
 # when the warmup saw real traffic. If the all-sample mean pps stays below
 # this floor, the analyzer remains in shadow mode instead of calibrating
@@ -192,9 +186,10 @@ TEA_EVAL_SEQ_MAX_JUMP = 1000            # reject absurd dedup-blackout seq jumps
 
 # --- TEA Shadow Baseline (dual-baseline learning) ---
 TEA_SHADOW_ENABLED = True              # master switch
-TEA_SHADOW_MIN_SAMPLES = 300           # shadow must accumulate before promotion
-TEA_SHADOW_MIN_DURATION_S = 300.0      # shadow must span this time before promotion
-TEA_SHADOW_MAX_AGE_S = 600.0           # discard shadow if older (stale)
+TEA_SHADOW_MIN_SAMPLES = 60            # shadow samples before promotion (reduced from 300)
+# Duration requirement removed: learn from sample count only (same as main baselines)
+# Old: TEA_SHADOW_MIN_DURATION_S = 300.0
+TEA_SHADOW_MAX_AGE_S = 120.0           # discard shadow if older (reduced from 600)
 TEA_SHADOW_PROMOTE_MIN_CONFIDENCE = "moderate"
 
 # --- TEA detection thresholds (moved from entropy_analyzer.py for single source of truth) ---
@@ -215,6 +210,13 @@ TEA_IDLE_UNLOCK_S = 45.0
 TEA_IP_PROFILE_TTL_S = 90
 # Bounded max-hold safety valve (literature Apply: 90-120s)
 TEA_LATCH_MAX_HOLD_S = 105.0
+
+# --- TEA flash crowd guidance (Phase 4) ---
+# IF anomaly rate above this threshold overrides flash crowd detection
+# (mixed-protocol attack disguised as flash crowd)
+TEA_FLASH_CROWD_IF_THRESHOLD = 0.3
+# Rolling window size for IF anomaly rate calculation
+TEA_FLASH_CROWD_IF_BUFFER_SIZE = 50
 
 FLOW_FIELD_MAX = 1e9                    # clamp ceiling for pps/bps/count fields
 

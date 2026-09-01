@@ -294,6 +294,8 @@ def _parse_and_route(raw: bytes) -> None:
         # Interval sequence number: lets worker-side feedback_tea dedup the
         # cached verdict shared by every flow inside one eval window.
         flow_stats["tea_eval_seq"]       = tea_result.get("eval_seq")
+        # Flash crowd guidance for IF scoring (Phase 4)
+        flow_stats["tea_flash_crowd_guidance"] = entropy_analyzer.get_flash_crowd_guidance()
 
         # Check per-IP verdict for small attackers. Only once the global
         # baseline is learned: during warmup a per-IP 'attack' is shadow-logged

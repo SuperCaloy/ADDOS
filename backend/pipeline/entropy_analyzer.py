@@ -6,7 +6,6 @@ from collections import deque
 from backend.config import (
     TEA_WINDOW_SIZE,
     TEA_LEARN_MIN_SAMPLES,
-    TEA_LEARN_MIN_DURATION_S,
     TEA_LEARN_MIN_MEAN_PPS,
     TEA_WARMUP_REJECT_FACTOR,
     TEA_EXTREME_Z_SIGMA,
@@ -32,7 +31,6 @@ from backend.config import (
     TEA_MIN_FLOWS_PER_INTERVAL,
     TEA_SHADOW_ENABLED,
     TEA_SHADOW_MIN_SAMPLES,
-    TEA_SHADOW_MIN_DURATION_S,
     TEA_SHADOW_MAX_AGE_S,
 )
 
@@ -151,9 +149,9 @@ class _AdaptiveBaseline:
                 return
             self._samples.append(value)
             self._psum += value
+            # Duration check removed: learn from sample count only (AWS: "minutes not hours")
             ready = (
                 len(self._samples) >= self._learn_n
-                and now - self._learn_started_at >= _cfg.TEA_LEARN_MIN_DURATION_S
                 and (
                     self._min_learn_mean is None
                     or self._psum / len(self._samples) >= self._min_learn_mean
@@ -335,14 +333,10 @@ class _ShadowState:
         self.active: bool = True
 
     def is_ready(self) -> bool:
-        """Shadow ready when all baselines learned and age sufficient."""
+        """Shadow ready when all baselines learned (no duration gate)."""
         if not self.active:
             return False
-        age = time.monotonic() - self.created_at
-        return (
-            self.baselines.is_learned
-            and age >= _cfg.TEA_SHADOW_MIN_DURATION_S
-        )
+        return self.baselines.is_learned
 
     def is_stale(self) -> bool:
         """Shadow too old, should be discarded."""
@@ -758,15 +752,14 @@ class EntropyAnalyzer:
         # Supervised relearning (P2): a stable TEA-side "new normal" force-learns
         # the frozen baselines without IF confirmation (REG-1 caps drift and excludes
         # high-confidence snapshots so attack-scale data can't poison baselines).
-        # Contamination guard: require moderate confidence + low IF anomaly rate.
+        # IF anomaly rate gate removed for latched recovery: frozen baselines
+        # produce false IF anomalies, creating a vicious cycle (AWS: "Post-Attack Tuning").
         if not degenerate:
             with self._lock:
-                if_anomaly_rate = self._if_anomaly_rate()
                 supervised = (
                     self._attack_latched
                     and self._relearn_stable_streak >= TEA_RELEARN_STABLE_INTERVALS
                     and confidence == TEA_RELEARN_MIN_CONFIDENCE
-                    and if_anomaly_rate < TEA_RELEARN_MAX_IF_ANOMALY_RATE
                 )
             if not is_attack_pattern or supervised:
                 with self._lock:
@@ -873,6 +866,31 @@ class EntropyAnalyzer:
                 self._would_block_count += 1
             log.info("TEA gate: normal traffic, logging only (total=%d)", self._would_block_count)
         return not would_block
+
+    def get_flash_crowd_guidance(self) -> dict:
+        """Return selective IF guidance during flash crowds.
+
+        Decision matrix:
+        - Flash crowd + low IF rate -> legitimate crowd -> ignore volume
+        - Flash crowd + high IF rate -> mixed-protocol attack -> no guidance
+        - No flash crowd -> no guidance
+        """
+        with self._lock:
+            last = self._global_state.last_result
+            if not last or not last.get("is_flash_crowd"):
+                return {"enabled": False}
+
+            if_anomaly_rate = self._if_anomaly_rate()
+            if if_anomaly_rate >= _cfg.TEA_FLASH_CROWD_IF_THRESHOLD:
+                log.info("TEA flash crowd overridden by IF rate %.2f", if_anomaly_rate)
+                return {"enabled": False}
+
+        return {
+            "enabled": True,
+            "ignore_volume": True,
+            "keep_pattern": True,
+            "keep_protocol": True,
+        }
 
     def _lock_all(self) -> None:
         self._global_state.size_base.lock()

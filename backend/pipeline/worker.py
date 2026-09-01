@@ -418,6 +418,12 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
 
         # Threshold: use model contract value
         _effective_threshold = loader.if_threshold
+
+        # Flash crowd guidance: raise threshold during legitimate flash crowds
+        _guidance = flow_stats.get("tea_flash_crowd_guidance", {}) if flow_stats else {}
+        if _guidance.get("enabled") and _guidance.get("ignore_volume"):
+            _effective_threshold = loader.if_threshold * 1.5
+
         is_anomaly = (if_score >= _effective_threshold)
 
         # --- TEA dual feedback (IF streak + TEA verdict latch) ---
