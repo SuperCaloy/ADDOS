@@ -386,16 +386,86 @@ def _write_slot_script(slot_type: str, slot_key: int, size: int, dst: str) -> st
             f"s=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\n"
             f"s.settimeout(3)\n"
             f"s.connect(('{dst}',{slot_key}))\n"
-            f"s.sendall(os.urandom({size}))\n"
+            f"req=(\n"
+            f" b'GET /index.html HTTP/1.1\\r\\n'\n"
+            f" b'Host: {dst}\\r\\n'\n"
+            f" b'User-Agent: Mozilla/5.0\\r\\n'\n"
+            f" b'Accept: text/html\\r\\n'\n"
+            f" b'Connection: close\\r\\n'\n"
+            f" b'\\r\\n'\n"
+            f")\n"
+            f"pad={size}-len(req)\n"
+            f"if pad>0:req+=os.urandom(pad)\n"
+            f"s.send(req)\n"
+            f"try:s.recv(4096)\n"
+            f"except:pass\n"
             f"s.close()\n"
         )
     else:
-        code = (
-            f"import socket,os\n"
-            f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
-            f"s.sendto(os.urandom({size}),('{dst}',{slot_key}))\n"
-            f"s.close()\n"
-        )
+        # Protocol-valid UDP queries (DNS/NTP/SNMP/syslog/SSDP)
+        if slot_key == 53:
+            # DNS query: header + www.example.com A record query
+            code = (
+                f"import socket,struct\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"h=struct.pack('>HHHHHH',0x1234,0x0100,1,0,0,0)\n"
+                f"q=b'\\x03www\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01'\n"
+                f"s.sendto(h+q,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        elif slot_key == 123:
+            # NTP request: LI=0, VN=4, Mode=3 (client)
+            code = (
+                f"import socket,struct\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"h=struct.pack('>BBBBIIIIIIII',0x23,0,0,0,0,0,0,0,0,0,0)\n"
+                f"s.sendto(h,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        elif slot_key == 161:
+            # SNMP GetRequest: version=1, community=public, GetRequest PDU
+            code = (
+                f"import socket,struct\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"h=bytes([0x30,0x26,0x02,0x01,0x00,0x04,0x06,0x70,0x75,0x62,0x6c,0x69,0x63,\n"
+                f"         0xa0,0x19,0x02,0x04,0x00,0x00,0x00,0x01,0x02,0x01,0x00,0x02,0x01,0x00,\n"
+                f"         0x30,0x0b,0x30,0x09,0x06,0x05,0x2b,0x06,0x01,0x02,0x01,0x05,0x00])\n"
+                f"s.sendto(h,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        elif slot_key == 514:
+            # Syslog message: <13>timestamp hostname app: message
+            code = (
+                f"import socket\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"msg=b'<13>Sep  2 12:00:00 h{slot_key} kernel: [12345.678] eth0: link up'\n"
+                f"s.sendto(msg,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        elif slot_key == 1900:
+            # SSDP M-SEARCH request
+            code = (
+                f"import socket\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"msg=(\n"
+                f" b'M-SEARCH * HTTP/1.1\\r\\n'\n"
+                f" b'HOST: 239.255.255.250:1900\\r\\n'\n"
+                f" b'MAN: \"ssdp:discover\"\\r\\n'\n"
+                f" MX: 3\\r\\n'\n"
+                f" ST: ssdp:all\\r\\n'\n"
+                f" b'\\r\\n'\n"
+                f")\n"
+                f"s.sendto(msg,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        else:
+            # Fallback: random bytes
+            code = (
+                f"import socket,os\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"s.sendto(os.urandom({size}),('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
     with open(path, "w") as f:
         f.write(code)
     return path
