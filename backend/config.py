@@ -222,6 +222,11 @@ TEA_FLASH_CROWD_IF_BUFFER_SIZE = 50
 TEA_TEMPORAL_WINDOW_SIZE = 50        # number of inter-arrival times to track
 TEA_TEMPORAL_ENTROPY_BINS = 10       # number of bins for entropy calculation
 
+# --- TEA Mahalanobis distance (multi-dimensional attack detection) ---
+TEA_MAHALANOBIS_ATTACK_THRESHOLD = 5.0
+TEA_MAHALANOBIS_CROWD_THRESHOLD = 3.0
+TEA_MAHALANOBIS_HISTORY_SIZE = 100
+
 FLOW_FIELD_MAX = 1e9                    # clamp ceiling for pps/bps/count fields
 
 # --- API ---

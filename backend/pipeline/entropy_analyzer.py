@@ -475,6 +475,7 @@ class EntropyAnalyzer:
         self._last_eval_time = 0.0
         self._eval_interval = 0.5
         self._eval_seq = 0
+        self._snapshot_history = deque(maxlen=_cfg.TEA_MAHALANOBIS_HISTORY_SIZE)
 
     @property
     def fb_normal_streak(self) -> int:
@@ -603,6 +604,33 @@ class EntropyAnalyzer:
             "mean_pps": mean_pps,
             "temporal_entropy": round(temporal_entropy, 4),
         }
+
+        # Mahalanobis distance: 6D vector capturing multi-dimensional correlation
+        vector = np.array([
+            size_var,
+            intensity_var,
+            proto_entropy,
+            uniform_share,
+            mean_pps,
+            temporal_entropy,
+        ])
+        # Compute distance against existing baseline before appending
+        if len(self._snapshot_history) >= 30:
+            history_array = np.array(self._snapshot_history)
+            mean_vec = np.mean(history_array, axis=0)
+            cov_matrix = np.cov(history_array.T)
+            try:
+                cov_inv = np.linalg.inv(cov_matrix + np.eye(6) * 1e-6)
+                diff = vector - mean_vec
+                mahal_dist = float(np.sqrt(diff @ cov_inv @ diff))
+            except np.linalg.LinAlgError:
+                mahal_dist = 0.0
+        else:
+            mahal_dist = 0.0
+        # Only add to baseline history if not an extreme outlier, to prevent
+        # attack traffic from contaminating the covariance matrix.
+        if mahal_dist < _cfg.TEA_MAHALANOBIS_ATTACK_THRESHOLD * 2.0:
+            self._snapshot_history.append(vector)
 
         with self._lock:
             state = self._global_state
@@ -809,6 +837,7 @@ class EntropyAnalyzer:
             "pps_zscore":    round(pps_z, 4),
             "pps_baseline":  round(pps_base.mean, 4),
             "temporal_entropy":  round(curr["temporal_entropy"], 4),
+            "mahalanobis_distance": round(mahal_dist, 4),
             "mechanized_cluster":    mechanized_cluster,
             "size_surge":    size_surge,
             "intensity_surge":   intensity_surge,
