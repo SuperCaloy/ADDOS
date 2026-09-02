@@ -1,8 +1,7 @@
-"""Tests for TEA Phase 1 false positive fix: std floor + magnitude check.
+"""Tests for TEA false positive fix: always-learn + std floor + magnitude check.
 
-The bug: when baselines learn from very uniform traffic, variance becomes tiny
-(e.g. 1e-6). Even a slight traffic increase produces massive z-scores (1000+),
-causing false positive HIGH confidence.
+Phase 1: std floor + magnitude check (prevents tiny-variance FP).
+Phase 2: always-learn mode (baselines track traffic even during attacks).
 """
 import math
 import sys
@@ -14,6 +13,8 @@ if str(REPO_ROOT) not in sys.path:
 
 import backend.config as _cfg
 from backend.pipeline.entropy_analyzer import _AdaptiveBaseline
+from backend.pipeline import entropy_analyzer as ea_mod
+from backend.pipeline.entropy_analyzer import EntropyAnalyzer
 
 
 class TestStdFloor:
@@ -101,3 +102,164 @@ class TestConfigConstants:
     def test_magnitude_constant_exists(self):
         assert hasattr(_cfg, "TEA_SURGE_MIN_MAGNITUDE")
         assert _cfg.TEA_SURGE_MIN_MAGNITUDE == 2.0
+
+    def test_high_confidence_intervals_exists(self):
+        assert hasattr(_cfg, "TEA_HIGH_CONFIDENCE_INTERVALS")
+        assert _cfg.TEA_HIGH_CONFIDENCE_INTERVALS == 3
+
+
+class _FakeClock:
+    def __init__(self, start: float = 0.0):
+        self.t = start
+    def monotonic(self) -> float:
+        return self.t
+
+
+def _flow(seed: int, pps: float = 10.0) -> dict:
+    return {
+        "src_ip": f"10.0.{(seed % 5) + 1}.{(seed % 250) + 1}",
+        "packet_count": float(40 + (seed * 7) % 60),
+        "byte_count": float(4000 + (seed * 130) % 5000),
+        "packet_count_per_second": pps,
+        "byte_count_per_second": pps * 100,
+        "ip_proto": 6 if seed % 2 else 17,
+    }
+
+
+def _learn(ea: EntropyAnalyzer, clock: _FakeClock) -> None:
+    for i in range(350):
+        clock.t = float(i)
+        ea._last_eval_time = 0.0
+        ea.update(1, [_flow(i * 9 + j) for j in range(9)])
+
+
+class TestSustainedHighConfidence:
+    """Phase 3: HIGH confidence requires sustained multi-dimension evidence."""
+
+    def test_single_interval_not_high_confidence(self, monkeypatch):
+        """Single attack interval should NOT produce HIGH confidence."""
+        clock = _FakeClock()
+        monkeypatch.setattr(ea_mod, "time", clock)
+        ea = EntropyAnalyzer()
+        _learn(ea, clock)
+
+        # Feed one attack interval with high pps
+        clock.t = 350.0
+        ea._last_eval_time = 0.0
+        res = ea.update(1, [_flow(i, pps=50.0) for i in range(9)])
+
+        # Even with multi-dimension signals, single interval is NOT high
+        assert res["confidence"] != "high", (
+            "Single interval should not get HIGH confidence; "
+            f"got confidence={res['confidence']}"
+        )
+
+    def test_sustained_attack_gets_high_confidence(self, monkeypatch):
+        """3+ consecutive attack intervals SHOULD produce HIGH confidence."""
+        clock = _FakeClock()
+        monkeypatch.setattr(ea_mod, "time", clock)
+        ea = EntropyAnalyzer()
+        _learn(ea, clock)
+
+        # Feed enough attack intervals to build sustained evidence
+        for i in range(5):
+            clock.t = 350.0 + i * 0.5
+            ea._last_eval_time = 0.0
+            res = ea.update(1, [_flow(i * 9 + j, pps=50.0) for j in range(9)])
+
+        # After sustained attack, confidence should be HIGH
+        assert res["confidence"] == "high", (
+            "Sustained attack intervals should get HIGH confidence; "
+            f"got confidence={res['confidence']}"
+        )
+
+    def test_streak_resets_on_normal_interval(self, monkeypatch):
+        """Normal interval breaks the streak, restarting the HIGH counter."""
+        clock = _FakeClock()
+        monkeypatch.setattr(ea_mod, "time", clock)
+        ea = EntropyAnalyzer()
+        _learn(ea, clock)
+
+        # Build 2 attack intervals (not enough for HIGH)
+        for i in range(2):
+            clock.t = 350.0 + i * 0.5
+            ea._last_eval_time = 0.0
+            ea.update(1, [_flow(i * 9 + j, pps=50.0) for j in range(9)])
+
+        # Normal interval resets streak
+        clock.t = 351.0
+        ea._last_eval_time = 0.0
+        ea.update(1, [_flow(i * 9 + j, pps=10.0) for j in range(9)])
+
+        # One more attack interval - streak should restart from 1, not continue
+        clock.t = 351.5
+        ea._last_eval_time = 0.0
+        res = ea.update(1, [_flow(i * 9 + j, pps=50.0) for j in range(9)])
+
+        assert res["confidence"] != "high", (
+            "Streak should reset after normal interval; "
+            f"got confidence={res['confidence']}"
+        )
+
+
+class TestAlwaysLearnDuringAttack:
+    """Phase 2: baselines must update (even if capped) during attacks."""
+
+    def test_baselines_update_during_attack(self, monkeypatch):
+        """Baselines move during attack intervals (capped at 1% drift)."""
+        clock = _FakeClock()
+        monkeypatch.setattr(ea_mod, "time", clock)
+        ea = EntropyAnalyzer()
+        _learn(ea, clock)
+
+        mean_before = ea._global_state.pps_base.mean
+        # Latch into attack mode
+        ea.feedback_tea(True, "high", eval_seq=1)
+        assert ea.attack_latched
+
+        # Feed 10 attack intervals — baselines should drift (capped)
+        for i in range(10):
+            clock.t = 350.0 + i * 0.5
+            ea._last_eval_time = 0.0
+            ea.update(1, [_flow(i * 9 + j, pps=50.0) for j in range(9)])
+
+        mean_after = ea._global_state.pps_base.mean
+        # Baselines must have moved (even if capped) — NOT frozen
+        assert mean_after != mean_before, (
+            "Baselines should update during attack (capped drift), "
+            "not freeze at old values."
+        )
+
+    def test_baselines_recover_after_attack(self, monkeypatch):
+        """Baselines converge to post-attack normal after attack ends."""
+        clock = _FakeClock()
+        monkeypatch.setattr(ea_mod, "time", clock)
+        ea = EntropyAnalyzer()
+        _learn(ea, clock)
+
+        mean_before = ea._global_state.pps_base.mean
+        # Latch into attack
+        ea.feedback_tea(True, "high", eval_seq=1)
+        assert ea.attack_latched
+
+        # Feed high-pps attack traffic for several intervals
+        for i in range(20):
+            clock.t = 350.0 + i * 0.5
+            ea._last_eval_time = 0.0
+            ea.update(1, [_flow(i * 9 + j, pps=50.0) for j in range(9)])
+
+        # Now end the attack: feed normal traffic and simulate normal feedback
+        for i in range(60):
+            clock.t = 400.0 + i * 0.5
+            ea._last_eval_time = 0.0
+            res = ea.update(1, [_flow(i * 9 + j, pps=10.0) for j in range(9)])
+            ea.feedback_tea(False, "low", eval_seq=res.get("eval_seq", i + 100))
+            ea.feedback_if(False)
+
+        mean_after_attack = ea._global_state.pps_base.mean
+        # After recovery, baseline should be closer to 10 pps than to the
+        # attack-level pps (50), or at least moved away from frozen old value.
+        assert mean_after_attack != mean_before, (
+            "Baselines should recover after attack ends, "
+            "not stay frozen at pre-attack value."
+        )

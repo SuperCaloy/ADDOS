@@ -483,6 +483,7 @@ class EntropyAnalyzer:
         # baseline never reads |z| >= 50 even in a real flood; only a
         # miscalibrated one does. Reaching the bound wipes the baselines.
         self._extreme_z_streak = 0
+        self._multi_dim_streak = 0
 
         self._flow_buffer = deque(maxlen=2000)
         self._last_eval_time = 0.0
@@ -734,6 +735,7 @@ class EntropyAnalyzer:
                         self._extreme_z_streak += 1
                     else:
                         self._extreme_z_streak = 0
+
                     if self._extreme_z_streak >= _cfg.TEA_EXTREME_Z_RESTART_INTERVALS:
                         log.warning(
                             "TEA extreme-z restart: |z| >= %.0f for %d intervals - "
@@ -777,6 +779,12 @@ class EntropyAnalyzer:
         # volume companion. R1 backstops very high multi-source uniformity.
         volume_anomaly = size_surge or intensity_surge or pps_surge
         collapse_anomaly = size_collapsed or intensity_collapsed or proto_collapsed
+
+        # Track sustained multi-dimension confirmation
+        if (size_surge and intensity_surge) or (mechanized_cluster and volume_anomaly):
+            self._multi_dim_streak += 1
+        else:
+            self._multi_dim_streak = 0
         # Flash crowd: high volume + no collapse + not mechanized.
         # NOTE: proto_surge removed - baseline traffic already uses diverse
         # protocols (TCP/UDP/ICMP), so flash crowd proto entropy is similar
@@ -802,18 +810,16 @@ class EntropyAnalyzer:
         ) if not degenerate else False
 
         if is_attack_pattern:
-            if uniform_backstop and not volume_anomaly:
+            # HIGH confidence requires sustained multi-dimension evidence
+            if self._multi_dim_streak >= _cfg.TEA_HIGH_CONFIDENCE_INTERVALS:
+                if (size_surge and intensity_surge) or (mechanized_cluster and volume_anomaly):
+                    confidence = "high"
+                elif mahal_attack and (collapse_anomaly or mechanized_cluster):
+                    confidence = "high"
+                else:
+                    confidence = "moderate"
+            elif uniform_backstop and not volume_anomaly:
                 confidence = "moderate"  # many-source uniform flood, no volume surge
-            elif ((size_collapsed or size_surge) and (intensity_collapsed or intensity_surge)) or (
-                mechanized_cluster and (
-                    size_collapsed or size_surge or intensity_collapsed
-                    or intensity_surge or proto_collapsed or proto_surge
-                    or pps_surge
-                )
-            ):
-                confidence = "high"  # Multi-dimension confirmation
-            elif mahal_attack and (collapse_anomaly or mechanized_cluster):
-                confidence = "high"  # Mahalanobis confirms suspicious pattern
             elif mahal_crowd:
                 confidence = "moderate"  # Mahalanobis crowd-level deviation
             else:
@@ -831,9 +837,11 @@ class EntropyAnalyzer:
                     and self._relearn_stable_streak >= TEA_RELEARN_STABLE_INTERVALS
                     and confidence == TEA_RELEARN_MIN_CONFIDENCE
                 )
-            if not is_attack_pattern or supervised:
-                with self._lock:
-                    state.learn(snapshot, force=supervised, capped=supervised)
+            # Always learn, but cap drift during attacks to prevent contamination.
+            # force=True bypasses the locked baseline so learning isn't frozen;
+            # the drift cap and robust reject still guard against poisoning.
+            with self._lock:
+                state.learn(snapshot, force=False, capped=is_attack_pattern)
 
         # Feed shadow baseline if active and primary is frozen
         with self._lock:

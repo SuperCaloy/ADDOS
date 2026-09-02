@@ -163,6 +163,7 @@ TEA_RELEARN_ALPHA = 0.15               # relearn EMA alpha; the drift cap is the
 TEA_RELEARN_MIN_CONFIDENCE = "moderate" # only relearn on moderate-confidence (not high/low)
 TEA_RELEARN_MAX_IF_ANOMALY_RATE = 0.3   # block relearn if IF anomaly rate > 30%
 TEA_RELEARN_MAX_CUMULATIVE_DRIFT = 0.20 # max total drift per relearn session (20%)
+TEA_HIGH_CONFIDENCE_INTERVALS = 3     # consecutive intervals for HIGH confidence
 TEA_RELEARN_BASELINE_DISTANCE_MAX = 2.0 # reject relearn if new baseline > 2x original
 # --- TEA latch max-hold valve (P3) ---
 TEA_LATCH_MAX_HOLD_S = 90.0
