@@ -195,8 +195,8 @@ class _AdaptiveBaseline:
             max_step = abs(self._mean) * max_drift_frac
             if abs(new_mean - self._mean) > max_step:
                 new_mean = self._mean + (max_step if new_mean > self._mean else -max_step)
-        self._mean = new_mean
         err            = (value - self._mean) ** 2
+        self._mean = new_mean
         self._variance = self._alpha * err + (1 - self._alpha) * self._variance
         self._baseline_history.append(self._mean)
         if len(self._baseline_history) > TEA_BASELINE_HISTORY_MAX:
@@ -773,6 +773,9 @@ class EntropyAnalyzer:
             and curr["uniform_share"] >= _cfg.TEA_UNIFORM_BACKSTOP_SHARE
             and curr["unique_ips"] >= _cfg.TEA_UNIFORM_BACKSTOP_MIN_IPS
         )
+        # Mahalanobis multi-dimensional detection (Daneshgadeh et al. 2018/2020)
+        mahal_attack = mahal_dist >= _cfg.TEA_MAHALANOBIS_ATTACK_THRESHOLD
+        mahal_crowd = mahal_dist >= _cfg.TEA_MAHALANOBIS_CROWD_THRESHOLD
         is_attack_pattern = (
             size_surge or intensity_surge or pps_surge
             or ((collapse_anomaly or mechanized_cluster) and volume_anomaly)
@@ -790,6 +793,10 @@ class EntropyAnalyzer:
                 )
             ):
                 confidence = "high"  # Multi-dimension confirmation
+            elif mahal_attack and (collapse_anomaly or mechanized_cluster):
+                confidence = "high"  # Mahalanobis confirms suspicious pattern
+            elif mahal_crowd:
+                confidence = "moderate"  # Mahalanobis crowd-level deviation
             else:
                 confidence = "moderate"  # Single dimension fired
 
