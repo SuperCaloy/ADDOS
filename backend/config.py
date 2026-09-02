@@ -218,6 +218,10 @@ TEA_FLASH_CROWD_IF_THRESHOLD = 0.3
 # Rolling window size for IF anomaly rate calculation
 TEA_FLASH_CROWD_IF_BUFFER_SIZE = 50
 
+# Temporal entropy: inter-arrival time distribution
+TEA_TEMPORAL_WINDOW_SIZE = 50        # number of inter-arrival times to track
+TEA_TEMPORAL_ENTROPY_BINS = 10       # number of bins for entropy calculation
+
 FLOW_FIELD_MAX = 1e9                    # clamp ceiling for pps/bps/count fields
 
 # --- API ---

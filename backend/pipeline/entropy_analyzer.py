@@ -32,6 +32,7 @@ from backend.config import (
     TEA_SHADOW_ENABLED,
     TEA_SHADOW_MIN_SAMPLES,
     TEA_SHADOW_MAX_AGE_S,
+    TEA_TEMPORAL_ENTROPY_BINS,
 )
 
 # Read-at-call-time constants (dual-feedback E2 guidance): accessed via the
@@ -262,6 +263,7 @@ class _GlobalEntropyState:
         self.share_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
         self.pps_base   = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True,
                                             min_learn_mean=TEA_LEARN_MIN_MEAN_PPS)
+        self.temporal_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
         self.last_result = {}
         self._shadow = None
 
@@ -298,6 +300,8 @@ class _GlobalEntropyState:
         if "mean_pps" in snapshot:
             self.pps_base.push(snapshot["mean_pps"], force=force,
                                max_drift_frac=_cfg.TEA_RELEARN_MAX_DRIFT_FRAC if capped else None)
+        self.temporal_base.push(snapshot.get("temporal_entropy", 0.0), force=force,
+                                max_drift_frac=_cfg.TEA_RELEARN_MAX_DRIFT_FRAC if capped else None)
 
     def push(self, snapshot: dict) -> None:
         self.observe(snapshot)
@@ -579,6 +583,17 @@ class EntropyAnalyzer:
         else:
             uniform_share = 0.0
 
+        # Temporal entropy: Shannon entropy of per-flow inter-packet arrival
+        # times (1/pps). Diverse pps patterns yield higher entropy.
+        if ppss:
+            iats = [1.0 / max(p, 1e-6) for p in ppss]
+            bins = np.histogram(iats, bins=_cfg.TEA_TEMPORAL_ENTROPY_BINS)
+            probs = bins[0] / max(1, sum(bins[0]))
+            probs = probs[probs > 0]
+            temporal_entropy = -np.sum(probs * np.log2(probs))
+        else:
+            temporal_entropy = 0.0
+
         snapshot = {
             "size_var":  size_var,
             "intensity_var": intensity_var,
@@ -586,6 +601,7 @@ class EntropyAnalyzer:
             "uniform_share": uniform_share,
             "unique_ips": len(unique_ips),
             "mean_pps": mean_pps,
+            "temporal_entropy": round(temporal_entropy, 4),
         }
 
         with self._lock:
@@ -792,6 +808,7 @@ class EntropyAnalyzer:
             "mean_pps":  round(curr["mean_pps"], 4),
             "pps_zscore":    round(pps_z, 4),
             "pps_baseline":  round(pps_base.mean, 4),
+            "temporal_entropy":  round(curr["temporal_entropy"], 4),
             "mechanized_cluster":    mechanized_cluster,
             "size_surge":    size_surge,
             "intensity_surge":   intensity_surge,
