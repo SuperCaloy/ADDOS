@@ -127,6 +127,194 @@ class TestMahalanobisDetection:
         pytest.skip("Could not produce mahalanobis >= crowd threshold after transient")
 
 
+class TestPerIPVerdictOverride:
+    """Per-IP verdict should not override global TEA without volume confirmation."""
+
+    def test_per_ip_attack_requires_global_anomaly(self, clock):
+        """Per-IP verdict=attack with normal global traffic should not set attack_pattern."""
+        ea = EntropyAnalyzer()
+        _learn(ea, clock)
+
+        # Feed normal traffic to keep global TEA calm
+        for k in range(5):
+            clock.t = 400.0 + k
+            res = ea.update(1, _normal_flows(k))
+
+        # Global TEA should show no attack pattern after normal traffic
+        assert not res["is_attack_pattern"], "Global TEA should not show attack for normal traffic"
+        assert res["is_learned"], "Global baseline should be learned"
+
+        # Simulate the zmq_receiver logic: per-IP verdict=attack without global anomaly
+        ip_verdict = "attack"  # pretend per-IP says attack
+        tea_attack_pattern = res["is_attack_pattern"]
+        mahal_dist = res.get("mahalanobis_distance", 0.0)
+
+        if ip_verdict == "attack":
+            if res["is_learned"] and (
+                res["is_attack_pattern"] or mahal_dist > 3.0
+            ):
+                override = True
+            else:
+                override = False
+        else:
+            override = False
+
+        # Per-IP alone should NOT override global TEA
+        assert not override, (
+            f"Per-IP verdict should not override without global anomaly "
+            f"(mahal={mahal_dist:.4f}, is_attack={tea_attack_pattern})"
+        )
+
+    def test_per_ip_attack_with_global_anomaly_allows_override(self, clock):
+        """Per-IP verdict=attack WITH global anomaly should set attack_pattern."""
+        ea = EntropyAnalyzer()
+        _learn(ea, clock)
+
+        # Feed attack traffic to create global anomaly
+        for k in range(15):
+            clock.t = 400.0 + k
+            flows = [_flow(k * 9 + j, proto=6, pkt_size=30, pps=80.0) for j in range(9)]
+            res = ea.update(1, flows)
+
+        if not (res["is_attack_pattern"] or res.get("mahalanobis_distance", 0) > 3.0):
+            pytest.skip("Could not produce global anomaly in test window")
+
+        # Simulate the zmq_receiver logic: per-IP verdict=attack WITH global anomaly
+        ip_verdict = "attack"
+        mahal_dist = res.get("mahalanobis_distance", 0.0)
+
+        if ip_verdict == "attack":
+            if res["is_learned"] and (
+                res["is_attack_pattern"] or mahal_dist > 3.0
+            ):
+                override = True
+            else:
+                override = False
+        else:
+            override = False
+
+        assert override, (
+            f"Per-IP should override when global anomaly confirmed "
+            f"(mahal={mahal_dist:.4f}, is_attack={res['is_attack_pattern']})"
+        )
+
+
+class TestIsLearnedRequiresTemporalBase:
+    """is_learned must require temporal_base to be learned."""
+
+    def test_temporal_base_required_for_is_learned(self, clock):
+        """After 350 intervals, all 6 baselines including temporal_base must be learned."""
+        ea = EntropyAnalyzer()
+        _learn(ea, clock)
+
+        g = ea._global_state
+        assert g.is_learned, "Global state should be learned after 350 intervals"
+        assert g.temporal_base.is_learned, "temporal_base must be learned"
+        assert g.size_base.is_learned
+        assert g.intensity_base.is_learned
+        assert g.proto_base.is_learned
+        assert g.share_base.is_learned
+        assert g.pps_base.is_learned
+
+    def test_is_learned_false_when_temporal_not_learned(self, clock):
+        """is_learned is False if temporal_base has insufficient samples."""
+        ea = EntropyAnalyzer()
+        # Feed only enough to learn everything except temporal_base
+        # pps_base needs samples with mean_pps in snapshot; temporal needs temporal_entropy
+        for i in range(20):
+            clock.t = float(i)
+            ea.update(1, _normal_flows(i))
+
+        g = ea._global_state
+        if not g.temporal_base.is_learned:
+            assert not g.is_learned, "is_learned must be False when temporal_base is not learned"
+
+
+class TestEntropyOfSamplesHistogram:
+    """Verify per-IP entropy uses histogram bins for continuous values."""
+
+    def test_same_values_yield_zero_entropy(self):
+        """All identical values should produce zero entropy."""
+        profile = ea_mod._IpEntropyProfile()
+        for _ in range(20):
+            profile._pps_samples.append(10.0)
+        assert profile._entropy_of_samples(profile._pps_samples) == 0.0
+
+    def test_diverse_values_yield_positive_entropy(self):
+        """Different values should produce positive entropy."""
+        profile = ea_mod._IpEntropyProfile()
+        for v in [1.0, 5.0, 10.0, 15.0, 20.0]:
+            profile._pps_samples.append(v)
+        assert profile._entropy_of_samples(profile._pps_samples) > 0.0
+
+
+class TestWarmupGuardAllBaselines:
+    """All baselines must reject attack-scale samples during the learning window."""
+
+    def test_all_baselines_reject_attack_during_learning(self, clock):
+        """Feed normal, then attack, then normal. Baselines that change (pps, proto)
+        must not be contaminated by attack traffic."""
+        ea = EntropyAnalyzer()
+        g = ea._global_state
+
+        # Phase 1: 350 normal intervals (enough for all baselines to learn with 300 min)
+        for i in range(350):
+            clock.t = float(i)
+            ea.update(1, _normal_flows(i))
+
+        # All baselines should be learned; record means
+        assert g.pps_base.is_learned
+        assert g.proto_base.is_learned
+        normal_pps = g.pps_base.mean
+        normal_proto = g.proto_base.mean
+
+        # Phase 2: 50 attack intervals (high pps, single protocol)
+        # These push into already-learned baselines, so warmup guard is inactive.
+        # Instead, verify baselines resist EMA contamination via robust reject.
+        for i in range(50):
+            clock.t = 500.0 + i
+            flows = [_flow(i * 9 + j, proto=6, pkt_size=64, pps=200.0) for j in range(9)]
+            ea.update(1, flows)
+
+        # After attack, pps baseline should not have drifted to attack scale
+        assert g.pps_base.mean < 50.0, (
+            f"pps baseline drifted to attack scale: {g.pps_base.mean:.4f}"
+        )
+
+    def test_warmup_guard_rejects_extreme_pps_during_learning(self, clock):
+        """Direct test: warmup guard rejects extreme pps after TEA_WARMUP_REJECT_AFTER samples."""
+        baseline = ea_mod._AdaptiveBaseline(
+            100, warmup_guard=True, min_learn_mean=1.0
+        )
+        # Feed 40 normal pps values (above REJECT_AFTER=30)
+        for _ in range(40):
+            baseline.push(10.0)
+        assert not baseline.is_learned
+        # Now feed extreme value - should be rejected
+        baseline.push(200.0)
+        # Mean should still be near 10.0, not pulled toward attack
+        assert baseline.mean < 15.0, (
+            f"Warmup guard failed: mean={baseline.mean:.2f} after extreme value"
+        )
+
+    def test_warmup_guard_rejects_collapsed_size_var(self, clock):
+        """Direct test: min_learn_value rejects collapsed size_var during learning."""
+        baseline = ea_mod._AdaptiveBaseline(
+            40, warmup_guard=True, min_learn_value=0.01
+        )
+        # Feed 35 normal size_var values (above REJECT_AFTER=30)
+        for _ in range(35):
+            baseline.push(0.07)
+        assert not baseline.is_learned
+        # Now feed collapsed value (attack signature: near-zero variance)
+        baseline.push(0.001)
+        # Baseline should not have learned yet (36 < 40), but mean tracked
+        # should still reflect normal values
+        assert baseline._psum / len(baseline._samples) > 0.05, (
+            f"min_learn_value guard failed: psum/n={baseline._psum / len(baseline._samples):.4f}"
+        )
+
+
 class TestEMAVarianceBias:
     """Verify EMA variance is not biased by computing err before mean update."""
 

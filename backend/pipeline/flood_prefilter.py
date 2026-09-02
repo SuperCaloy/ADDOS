@@ -89,8 +89,6 @@ class FloodPreFilter:
 
         # Session-cumulative counters (never reset until process restart)
         self._session_spike: int = 0
-        self._session_limit: int = 0
-        self._session_multi: int = 0
 
         # IPs detected on multiple protocols at once
         self._correlated: set[str] = set()
@@ -138,8 +136,6 @@ class FloodPreFilter:
                 self._flagged[key] = reason
                 if "burst" in reason.lower():
                     self._session_spike += 1
-                elif "limit" in reason.lower() or "window" in reason.lower():
-                    self._session_limit += 1
                 log.info("FloodPreFilter tripped: %s  proto=%s  reason=%s", src_ip, proto, reason)
                 self._check_correlation(src_ip, now)
                 return True
@@ -154,7 +150,6 @@ class FloodPreFilter:
         )
         if active >= _CORRELATION_THRESHOLD and src_ip not in self._correlated:
             self._correlated.add(src_ip)
-            self._session_multi += 1
             log.info("FloodPreFilter correlation: %s active on %d protocols", src_ip, active)
 
     def on_ack(self, src_ip: str) -> None:

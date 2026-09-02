@@ -953,9 +953,7 @@ var ExpertMetrics = {
       '<div class="expert-proto-row">' +
         '<span class="expert-proto-title">First Line of Defense</span>' +
         '<div class="expert-pf-stats">' +
-          '<div class="expert-pf-stat"><span class="expert-pf-label">Spike Detected</span><span class="expert-pf-val" id="ep-pf-burst" style="color:var(--amber)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">session total</span></div>' +
-          '<div class="expert-pf-stat"><span class="expert-pf-label">Over Rate Limit</span><span class="expert-pf-val" id="ep-pf-limit" style="color:var(--blue)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">session total</span></div>' +
-          '<div class="expert-pf-stat"><span class="expert-pf-label">Multi-Protocol</span><span class="expert-pf-val" id="ep-pf-corr" style="color:var(--red)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">session total</span></div>' +
+          '<div class="expert-pf-stat"><span class="expert-pf-label">Spikes Detected</span><span class="expert-pf-val" id="ep-pf-burst" style="color:var(--amber)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">session total</span></div>' +
         '</div>' +
       '</div>' +
       '<div class="expert-metrics-row">' +
@@ -1008,11 +1006,7 @@ var ExpertMetrics = {
     // Prefilter breakdown - use session cumulative data
     var pfSession = (pipeline && pipeline.flood_prefilter_session) || {};
     var pfBurst = document.getElementById('ep-pf-burst');
-    var pfLimit = document.getElementById('ep-pf-limit');
-    var pfCorr = document.getElementById('ep-pf-corr');
     if (pfBurst) pfBurst.textContent = pfSession.session_spike || 0;
-    if (pfLimit) pfLimit.textContent = pfSession.session_limit || 0;
-    if (pfCorr) pfCorr.textContent = pfSession.session_multi || 0;
 
     // IF anomaly rate
     var ifRateEl = document.getElementById('ep-if-rate');
@@ -1550,8 +1544,6 @@ var ExpertModals = {
 
     // Session summary
     var spikeCount = pfSession.session_spike || 0;
-    var limitCount = pfSession.session_limit || 0;
-    var multiCount = pfSession.session_multi || 0;
 
     // Per-protocol breakdown
     var protoHtml = '';
@@ -1603,9 +1595,7 @@ var ExpertModals = {
       '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">The first guard. It watches how many packets each source IP is sending, for each protocol (SYN, ICMP, UDP). It learns what is normal for each source over time using a moving average. If a source suddenly sends way more than usual, or if a huge burst arrives in a fraction of a second, that source gets flagged. If the same source is flagged on two or more protocols at the same time, it is likely a coordinated attack.</div></div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Session Summary</div>' +
         '<div style="display:flex;gap:12px;flex-wrap:wrap">' +
-          '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(245,158,11,0.15);color:var(--amber)">Spike: ' + spikeCount + '</span>' +
-          '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(96,180,255,0.15);color:var(--blue)">Over Limit: ' + limitCount + '</span>' +
-          '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(225,29,72,0.15);color:var(--red)">Multi-Protocol: ' + multiCount + '</span>' +
+          '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(245,158,11,0.15);color:var(--amber)">Spikes: ' + spikeCount + '</span>' +
         '</div>' +
       '</div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Detection by Protocol</div>' + protoHtml + '</div>' +

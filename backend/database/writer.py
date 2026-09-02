@@ -434,6 +434,28 @@ def flush_summary() -> None:
         log.exception("Failed to flush traffic_summary")
 
 
+def flush_global_counters() -> None:
+    """Persist packet-level counters to global_counters table."""
+    from backend.pipeline.decision_engine import get_stats
+    stats = get_stats()
+    try:
+        execute("""
+            UPDATE global_counters SET
+                total_packets = ?,
+                malicious_dropped = ?,
+                normal_packets = ?,
+                false_positives = ?
+            WHERE id = 1
+        """, (
+            stats.get("total_packets", 0),
+            stats.get("malicious_dropped", 0),
+            stats.get("normal_packets", 0),
+            stats.get("false_positives", 0),
+        ))
+    except Exception:
+        log.exception("Failed to flush global_counters")
+
+
 def start_flush_thread() -> None:
     import time
 
@@ -448,6 +470,10 @@ def start_flush_thread() -> None:
                 flush_detection_features()
             except Exception:
                 log.exception("detection_features flush failed")
+            try:
+                flush_global_counters()
+            except Exception:
+                log.exception("global_counters flush failed")
 
     t = threading.Thread(target=_loop, name="summary-flush", daemon=True)
     t.start()

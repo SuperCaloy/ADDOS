@@ -837,11 +837,10 @@ class EntropyAnalyzer:
                     and self._relearn_stable_streak >= TEA_RELEARN_STABLE_INTERVALS
                     and confidence == TEA_RELEARN_MIN_CONFIDENCE
                 )
-            # Always learn, but cap drift during attacks to prevent contamination.
-            # force=True bypasses the locked baseline so learning isn't frozen;
-            # the drift cap and robust reject still guard against poisoning.
+            # Always learn: force=True bypasses locked baselines so learning
+            # continues during attacks; capped=True limits drift to 1%/interval.
             with self._lock:
-                state.learn(snapshot, force=False, capped=is_attack_pattern)
+                state.learn(snapshot, force=True, capped=is_attack_pattern)
 
         # Feed shadow baseline if active and primary is frozen
         with self._lock:

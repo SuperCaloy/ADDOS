@@ -206,6 +206,12 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     true_neg  = sr.get("true_neg")    or 0
     fp_count  = sr.get("fp")          or 0
 
+    # Get packet-level metrics from global_counters
+    pkt_rows = query("SELECT total_packets, malicious_dropped FROM global_counters WHERE id = 1")
+    pkt_row  = pkt_rows[0] if pkt_rows else {}
+    tot_packets     = pkt_row.get("total_packets") or 0
+    malicious_pkts  = pkt_row.get("malicious_dropped") or 0
+
     if_m    = writer.get_if_metrics(start_str, end_str)
     fp_rate = if_m.get("fpr", 0)
 
@@ -223,12 +229,25 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ["Low Priority",            str(low_count)],
         ["Manual Releases",         str(manual_release)],
         ["Manual Blocks",           str(manual_block)],
-        ["Total Flows Observed",    str(tot_flows)],
-        ["True Negatives Passed",   str(true_neg)],
+        ["", ""],
+        ["ML Metrics",  "Value"],
         ["False Positives",         str(fp_count)],
         ["FP Rate",                 f"{fp_rate:.2f}%"],
+        ["IF Precision",            f"{if_m.get('precision',0):.2f}%"],
+        ["IF Recall",               f"{if_m.get('recall',0):.2f}%"],
+        ["IF F1-Score",             f"{if_m.get('f1',0):.2f}%"],
+        ["IF Accuracy",             f"{if_m.get('accuracy',0):.2f}%"],
+        ["", ""],
+        ["", ""],
+
     ]
     sum_right = [
+        ["Traffic Summary", "Count"],
+        ["Total Flows Observed",    str(tot_flows)],
+        ["Total Packets Analyzed",  str(tot_packets)],
+        ["Malicious Packets",       str(malicious_pkts)],
+        ["True Negatives Passed",   str(true_neg)],
+        ["", ""],
         ["Attack Vector", "Count"],
         ["ICMP Flood",  str(vectors.get("ICMP Flood", 0))],
         ["SYN Flood",   str(vectors.get("SYN Flood",  0))],
@@ -242,9 +261,10 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ["Released",    str(actions.get("Released",    0))],
     ]
 
-    def _kv_table(data, col_widths):
+    def _kv_table(data, col_widths, section_rows=None):
+        """Create a styled table with optional blue sub-header rows."""
         t = Table(data, colWidths=col_widths)
-        t.setStyle(TableStyle([
+        style_cmds = [
             ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
             ("BACKGROUND",    (0, 0), (-1, 0),  C_ACCENT),
             ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
@@ -256,14 +276,21 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
             ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
             ("FONTNAME",      (0, 1), (0, -1),  "Helvetica-Bold"),
             ("TEXTCOLOR",     (0, 1), (0, -1),  C_GRAY),
-        ]))
+        ]
+        # Style sub-header rows with blue background
+        if section_rows:
+            for row_idx in section_rows:
+                style_cmds.append(("BACKGROUND", (0, row_idx), (-1, row_idx), C_ACCENT))
+                style_cmds.append(("TEXTCOLOR", (0, row_idx), (-1, row_idx), C_WHITE))
+                style_cmds.append(("FONTNAME", (0, row_idx), (-1, row_idx), "Helvetica-Bold"))
+        t.setStyle(TableStyle(style_cmds))
         return t
 
     # Inner-table widths sum to match their outer container cells (8.7cm/8.0cm),
     # and the value column (4.2cm) fits the longest real value.
-    side_by_side = Table([[_kv_table(sum_left,  [4.5*cm, 4.2*cm]),
+    side_by_side = Table([[_kv_table(sum_left,  [4.5*cm, 4.2*cm], section_rows=[8]),
                             Spacer(0.3*cm, 1),
-                            _kv_table(sum_right, [5.0*cm, 3.0*cm])]],
+                            _kv_table(sum_right, [5.0*cm, 3.0*cm], section_rows=[0, 6, 12])]],
                          colWidths=[8.7*cm, 0.3*cm, 8*cm])
     # The outer wrapper's cell padding is zeroed so the inner tables keep the
     # full width allocated to them and do not overflow their cells.
@@ -275,6 +302,10 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     ]))
     story.append(side_by_side)
     story.append(Spacer(1, 0.6*cm))
+
+    # ── Page break before Performance Benchmark ────────────────────────────────
+    from reportlab.platypus import PageBreak
+    story.append(PageBreak())
 
     # ── Section 2: Performance Benchmark ─────────────────────────────────────
     story += _section_header("2.  Performance Benchmark", styles)

@@ -299,9 +299,9 @@ def on_result(src_ip: str, if_score, is_anomaly,
         # Write to traffic_summary so graph history shows traffic.
         # Attack IPs counted as incoming threats (visible on graph, no action).
         writer.log_traffic_summary(
-            total=_pkt_count,
-            threats=(_pkt_count if _is_attack else 0),
-            true_neg=(0 if _is_attack else _pkt_count),
+            total=1,
+            threats=(1 if _is_attack else 0),
+            true_neg=(0 if _is_attack else 1),
             fp=0,
         )
         return
@@ -362,7 +362,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         # IF: normal → TN if legit, FN if attacker (only if actively attacking)
         _is_attacker = src_ip in _get_gt()
         writer.log_traffic_summary(
-            total=_pkt_count, threats=0, true_neg=_pkt_count, fp=0,
+            total=1, threats=0, true_neg=1, fp=0,
             tn=(0 if _is_attacker else 1),
             fn=(1 if _is_attacker else 0),
             if_tn=(0 if _is_attacker else 1),
@@ -551,7 +551,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
         elif _expected_class == "UDP":  _rf_fn_udp  = 1
 
     writer.log_traffic_summary(
-        total=_threat_pps, threats=_threat_pps, true_neg=0, fp=0,
+        total=1, threats=1, true_neg=0, fp=0,
         tp=(1 if _is_tp else 0),
         if_tp=_if_tp, if_fp=_if_fp,
         rf_tp=_rf_tp, rf_fp=_rf_fp, rf_tn=_rf_tn, rf_fn=_rf_fn,

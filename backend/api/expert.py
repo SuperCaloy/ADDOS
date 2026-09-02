@@ -93,8 +93,6 @@ def _gather_prefilter_breakdown() -> dict:
 def _gather_prefilter_session() -> dict:
     return {
         "session_spike": flood_filter._session_spike,
-        "session_limit": flood_filter._session_limit,
-        "session_multi": flood_filter._session_multi,
     }
 
 

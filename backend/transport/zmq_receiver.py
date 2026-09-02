@@ -302,7 +302,11 @@ def _parse_and_route(raw: bytes) -> None:
         # but never acts, so no verdict exists without a calibrated baseline.
         ip_verdict = entropy_analyzer.get_ip_verdict(src_ip)
         if ip_verdict == "attack":
-            if tea_result["is_learned"]:
+            # Only override if global TEA also shows anomaly to reduce FPs
+            if tea_result["is_learned"] and (
+                tea_result["is_attack_pattern"]
+                or tea_result.get("mahalanobis_distance", 0) > 3.0
+            ):
                 flow_stats["tea_attack_pattern"] = True
                 flow_stats["tea_confidence"] = "moderate"
                 log.info("TEA per-IP attack detected: %s", src_ip)
