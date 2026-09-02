@@ -58,13 +58,14 @@ class TestMahalanobisDetection:
             flows = [_flow(k * 9 + j, proto=6, pkt_size=30, pps=80.0) for j in range(9)]
             res = ea.update(1, flows)
             if res["is_attack_pattern"] and res["mahalanobis_distance"] >= _cfg.TEA_MAHALANOBIS_ATTACK_THRESHOLD:
-                # Mahalanobis + volume anomaly should yield high confidence
                 if res.get("pps_surge") or res.get("size_surge") or res.get("intensity_surge"):
-                    assert res["confidence"] == "high", \
-                        f"Expected high confidence with Mahalanobis + volume anomaly, got {res['confidence']}"
-                    return
+                    # Need streak >= 3 for HIGH confidence (score-based: 2+ signals + sustained)
+                    if ea._multi_dim_streak >= _cfg.TEA_HIGH_CONFIDENCE_INTERVALS:
+                        assert res["confidence"] == "high", \
+                            f"Expected high confidence with Mahalanobis + volume anomaly + sustained, got {res['confidence']}"
+                        return
 
-        pytest.skip("Could not produce attack with high Mahalanobis + volume anomaly")
+        pytest.skip("Could not produce attack with high Mahalanobis + volume anomaly + sustained streak")
 
     def test_mahal_crowd_increases_confidence(self, clock):
         """Mahalanobis above crowd threshold should raise confidence to moderate."""

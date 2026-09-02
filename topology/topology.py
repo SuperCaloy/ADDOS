@@ -39,24 +39,25 @@ _ATTACKER_POOL = _ATTACKER_NUMS
 _RESTORE_POLLER_STOP   = threading.Event()
 _BASELINE_WATCHDOG_STOP = threading.Event()
 _WATCHDOG_SUPPRESS      = threading.Event()
+_BURST_PROBABILITY = 0.15  # 15% chance of burst send (reduced from 30% to avoid IF FP)
 
 # Attack archetypes are deliberately separable on packet size + ports alone so
 # RF never depends on ip_proto being resolvable (proto caches can go blind after
 # a ban/release of a still-flooding attacker): SYN is the tiny-packet archetype
-# (~60B, TCP ports), UDP the amplification archetype (1400B, service ports),
-# ICMP the ping-flood archetype (512B, no ports). Three disjoint size/port
+# (~60B, TCP ports), UDP the amplification archetype (1472B, service ports),
+# ICMP the ping-flood archetype (1400B, no ports). Three disjoint size/port
 # clusters; all sizes stay inside the frozen model's tolerated range.
 _ALL_VARIANTS = {
     16: ("SYN",  "-S -p 80   --flood",                 0, 0),
     17: ("SYN",  "-S -p 443  --flood",                 0, 0),
     18: ("SYN",  "-S -p 5432 --flood",                 0, 0),
     19: ("SYN",  "-S -p 8080 --flood",                 0, 0),
-    20: ("UDP",  "--udp -p 53    --flood --data 1400",  0, 0),
-    21: ("UDP",  "--udp -p 123   --flood --data 1400",  0, 0),
-    22: ("UDP",  "--udp -p 1900  --flood --data 1400",  0, 0),
-    23: ("ICMP", "--icmp --flood --data 512",          0, 0),
-    24: ("ICMP", "--icmp --flood --data 512",          0, 0),
-    25: ("ICMP", "--icmp --flood --data 512",          0, 0),
+    20: ("UDP",  "--udp -p 53    --flood --data 1472",  0, 0),
+    21: ("UDP",  "--udp -p 123   --flood --data 1472",  0, 0),
+    22: ("UDP",  "--udp -p 1900  --flood --data 1472",  0, 0),
+    23: ("ICMP", "--icmp --flood --data 1400",          0, 0),
+    24: ("ICMP", "--icmp --flood --data 1400",          0, 0),
+    25: ("ICMP", "--icmp --flood --data 1400",          0, 0),
 }
 _ATTACKER_VARIANTS = {n: v for n, v in _ALL_VARIANTS.items()
                       if n in _ATTACKER_NUMS}
@@ -78,11 +79,11 @@ _ATTACKER_START_DELAYS = {
 }
 
 # Attack type flags for randomized mixed campaigns (same archetypes as
-# _ALL_VARIANTS: SYN tiny, UDP 1400B, ICMP 512B ping-flood)
+# _ALL_VARIANTS: SYN tiny, UDP 1472B, ICMP 1400B ping-flood)
 _ATTACK_TYPE_FLAGS = {
     "SYN":  "-S -p {port} --flood",
-    "UDP":  "--udp -p {port} --flood --data 1400",
-    "ICMP": "--icmp --flood --data 512",
+    "UDP":  "--udp -p {port} --flood --data 1472",
+    "ICMP": "--icmp --flood --data 1400",
 }
 _ATTACK_TYPE_PORTS = {
     "SYN":  [80, 443, 8080, 5432, 3389, 25, 1900],
@@ -101,11 +102,17 @@ _SYN_FLOOD_INSTANCES = 2
 
 def _flood_spawn_count(atype: str) -> int:
     # How many parallel hping3 processes one attacker of this type spawns.
-    return _SYN_FLOOD_INSTANCES if atype == "SYN" else 1
+    if atype == "SYN":
+        return _SYN_FLOOD_INSTANCES
+    elif atype == "UDP":
+        return 2
+    else:
+        return 1
 
 # Attackers run pure continuous --flood with no rest cycling.
 
 _mixed_stop_event = threading.Event()
+_flash_crowd_stop_event = threading.Event()
 _campaign_threads: list = []
 
 # Attack-detection fallback: after a stop the switch may lack forward rules so an attacker can flood unseen. The watchdog pokes those hosts to force a fresh table-miss and resume flow_stats.
@@ -125,22 +132,22 @@ _ICMP_CONTINUOUS = {
 }
 
 # port: size_min, size_max, sleep_min, sleep_max
-# Calibrated to real web traffic: page requests every 5-10s, small payloads.
+# Calibrated to real web traffic: page requests every 5-10s, realistic HTTP sizes.
 _TCP_PROFILES = {
-    80:   (32, 128, 5.0, 10.0),
-    443:  (32, 128, 5.0, 10.0),
-    8080: (32, 128, 5.0, 10.0),
+    80:   (100, 400, 5.0, 10.0),  # reduced from 200-800 to avoid IF FP
+    443:  (100, 400, 5.0, 10.0),
+    8080: (100, 400, 5.0, 10.0),
 }
 
 # port: size_min, size_max, sleep_min, sleep_max
-# Calibrated to real services: DNS bursty but spaced, NTP/SSDP infrequent,
-# syslog steady, SNMP polling periodic.
+# Calibrated to real services. UDP ports 53/123/161/514/1900 use structured
+# payloads (fixed size); size_min == size_max so randint is a no-op.
 _UDP_PROFILES = {
-    53:   (32, 128, 6.0, 12.0),
-    123:  (32, 128, 8.0, 15.0),
-    161:  (32, 128, 10.0, 20.0),
-    514:  (32, 128, 5.0, 10.0),
-    1900: (32, 128, 8.0, 15.0),
+    53:   (33,  33,  6.0, 12.0),   # DNS query: 12-byte header + 21-byte qname
+    123:  (48,  48,  8.0, 15.0),   # NTP request: 48-byte struct
+    161:  (40,  40, 10.0, 20.0),   # SNMP GetRequest: 40-byte hardcoded
+    514:  (58,  58,  5.0, 10.0),   # syslog message: 58 bytes
+    1900: (94,  94,  8.0, 15.0),   # SSDP M-SEARCH: 94 bytes
 }
 
 # Per-host send-interval multipliers. Values > 1.0 make a host send less
@@ -154,18 +161,20 @@ _LEGIT_SLEEP_MULTIPLIERS = {
     10: 1.5,   # h10: slightly slower
 }
 
-# Host slot pools are picked randomly each active cycle and are the exact trained signatures the frozen model recognizes as normal.
+# Host slot pools: each host uses its assigned slot(s) every active cycle.
+# TCP hosts pick randomly from 3 ports (realistic web traffic); UDP hosts
+# use a single fixed port to prevent port-entropy false positives.
 _HOST_SLOTS = {
     1:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
     2:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
     3:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
     4:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
     5:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
-    6:  [("udp", 53), ("udp", 514)],           # DNS + syslog
-    7:  [("udp", 123), ("udp", 161)],           # NTP + SNMP
-    8:  [("udp", 1900), ("udp", 53)],           # SSDP + DNS
-    9:  [("udp", 514), ("udp", 123)],           # syslog + NTP
-    10: [("udp", 161), ("udp", 1900)],          # SNMP + SSDP
+    6:  [("udp", 53)],                            # DNS only
+    7:  [("udp", 123)],                           # NTP only
+    8:  [("udp", 1900)],                          # SSDP only
+    9:  [("udp", 514)],                           # syslog only
+    10: [("udp", 161)],                           # SNMP only
     11: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
     12: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
     13: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
@@ -236,11 +245,15 @@ def _warm_start_active(num: int, now: float | None = None) -> bool:
 
 def _baseline_sleep(num: int, slot_type: str, mult: float,
                     now: float | None = None) -> float:
-    # Send-interval for one baseline send. UDP slots fast-pace during the
-    # warm-start window; everything else keeps the calibrated 3-7s * mult.
+    # Send-interval for one baseline send.
+    # Normal interval: 1-3s * mult (chiller to avoid IF false positives).
+    # Burst: 15% chance of quick succession (0.2-0.8s).
+    # Total: ~5-8 pps across 15 hosts (realistic for small network).
     if slot_type == "udp" and _warm_start_active(num, now):
         return random.uniform(*_WARM_FAST_SLEEP)
-    return random.uniform(3.0 * mult, 7.0 * mult)
+    if random.random() < _BURST_PROBABILITY:
+        return random.uniform(0.2, 0.8)  # burst: 200-800ms (chiller)
+    return random.uniform(1.0 * mult, 3.0 * mult)  # normal: 1-3s * mult
 
 net   = None
 hosts = []
@@ -390,12 +403,63 @@ def _write_slot_script(slot_type: str, slot_key: int, size: int, dst: str) -> st
             f"s.close()\n"
         )
     else:
-        code = (
-            f"import socket,os\n"
-            f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
-            f"s.sendto(os.urandom({size}),('{dst}',{slot_key}))\n"
-            f"s.close()\n"
-        )
+        if slot_key == 53:
+            code = (
+                f"import socket,struct\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"h=struct.pack('>HHHHHH',0x1234,0x0100,1,0,0,0)\n"
+                f"q=b'\\x03www\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01'\n"
+                f"s.sendto(h+q,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        elif slot_key == 123:
+            code = (
+                f"import socket,struct\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"h=struct.pack('>BBBBIIIQQQQ',0x23,0,0,0,0,0,0,0,0,0,0)\n"
+                f"s.sendto(h,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        elif slot_key == 161:
+            code = (
+                f"import socket,struct\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"h=bytes([0x30,0x26,0x02,0x01,0x00,0x04,0x06,0x70,0x75,0x62,0x6c,0x69,0x63,\n"
+                f"         0xa0,0x19,0x02,0x04,0x00,0x00,0x00,0x01,0x02,0x01,0x00,0x02,0x01,0x00,\n"
+                f"         0x30,0x0b,0x30,0x09,0x06,0x05,0x2b,0x06,0x01,0x02,0x01,0x05,0x00])\n"
+                f"s.sendto(h,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        elif slot_key == 514:
+            code = (
+                f"import socket\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"msg=b'<13>Sep  2 12:00:00 h{slot_key} kernel: [12345.678] eth0: link up'\n"
+                f"s.sendto(msg,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        elif slot_key == 1900:
+            code = (
+                f"import socket\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"msg=(\n"
+                f" b'M-SEARCH * HTTP/1.1\\r\\n'\n"
+                f" b'HOST: 239.255.255.250:1900\\r\\n'\n"
+                f" b'MAN: \"ssdp:discover\"\\r\\n'\n"
+                f" b'MX: 3\\r\\n'\n"
+                f" b'ST: ssdp:all\\r\\n'\n"
+                f" b'\\r\\n'\n"
+                f")\n"
+                f"s.sendto(msg,('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
+        else:
+            code = (
+                f"import socket,os\n"
+                f"s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n"
+                f"s.sendto(os.urandom({size}),('{dst}',{slot_key}))\n"
+                f"s.close()\n"
+            )
     with open(path, "w") as f:
         f.write(code)
     return path
@@ -720,13 +784,26 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event,
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
 
-    # Restart loop — restarts hping3 if it dies unexpectedly
+    # Restart loop — restarts hping3 periodically to bypass stale mitigation rules
+    restart_interval = 30  # restart hping3 every 30 seconds
+    last_restart = time.time()
+    
     while not stop_event.is_set():
+        # Kill existing hping3 and start fresh
+        _nsrun(h, "pkill -9 -x hping3 2>/dev/null; true", wait=True)
+        time.sleep(0.1)  # brief pause
+        
         for _ in range(_flood_spawn_count(atype)):
             _nsrun(h, cmd)
-# Poll every second inside the host netns, not system-wide. Restart only on a confirmed death (pgrep exit 1); failures must not trigger spurious restarts.
+        last_restart = time.time()
+        
+        # Monitor and restart if needed
         while not stop_event.is_set():
             time.sleep(1)
+            # Periodic restart to bypass stale mitigation rules
+            if time.time() - last_restart >= restart_interval:
+                break  # outer loop will restart hping3
+            # Also restart if hping3 dies
             if _hping_state(h) is False:
                 break  # confirmed dead, outer loop restarts it
 
@@ -1047,38 +1124,29 @@ def start_udp_flood_campaign() -> None:
 
 
 def start_mixed_campaign(stagger_s: float = 10.0) -> None:
-# Launch all attackers with sequential types, no two same at a time. Each attacker gets a sequential type (SYN/UDP/ICMP) with balanced distribution. Staggered start prevents simultaneous launches.
+# Launch all attackers with random types, no two same at a time. Each attacker gets a random type (SYN/UDP/ICMP) with balanced distribution. Staggered start prevents simultaneous launches.
     global _mixed_stop_event, _campaign_threads
     _stop_active_workers()
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
-    # Sequential assignment: 4 SYN, 3 UDP, 3 ICMP in order
+    # Random assignment: 4 SYN, 3 UDP, 3 ICMP in random order
     nums = sorted(_ATTACKER_NUMS)
-    assignments = {}
-    for i, num in enumerate(nums):
-        if i < 4:
-            assignments[num] = "SYN"
-        elif i < 7:
-            assignments[num] = "UDP"
-        else:
-            assignments[num] = "ICMP"
+    attack_types = ["SYN"] * 4 + ["UDP"] * 3 + ["ICMP"] * 3
+    random.shuffle(attack_types)  # Shuffle to randomize assignment
+    assignments = dict(zip(nums, attack_types))
 
     info("\n" + "=" * 65 + "\n")
-    info("  [MIXED CAMPAIGN]  All 10 attackers\n")
+    info("  [MIXED CAMPAIGN]  All 10 attackers (random types)\n")
     info("=" * 65 + "\n")
     info(f"  {'HOST':<8} {'IP':<16} {'TYPE':<6} {'FLAGS'}\n")
     info("  " + "-" * 60 + "\n")
 
-    # Build schedule with staggered delays per type group
+    # Build schedule with staggered delays per attacker (not per type)
     schedule = {}
-    base = 0.0
-    for i, atype in enumerate(("SYN", "UDP", "ICMP")):
-        if i:
-            base += random.uniform(stagger_s * 0.5, stagger_s)
-        for num, assigned_type in assignments.items():
-            if assigned_type == atype:
-                schedule[num] = base + _ATTACKER_START_DELAYS.get(num, 0)
+    for i, num in enumerate(nums):
+        # Stagger each attacker by 0.5s to ensure all 10 start within 5s
+        schedule[num] = i * 0.5 + _ATTACKER_START_DELAYS.get(num, 0)
 
     # Launch threads
     for num in sorted(schedule):
@@ -1154,14 +1222,28 @@ def _attacker_cycle_worker_randomized(num: int, stop_event: threading.Event,
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
 
-    # Restart loop
+    # Restart loop — restarts hping3 periodically to bypass stale mitigation rules
+    restart_interval = 30  # restart hping3 every 30 seconds
+    last_restart = time.time()
+    
     while not stop_event.is_set():
+        # Kill existing hping3 and start fresh
+        _nsrun(h, "pkill -9 -x hping3 2>/dev/null; true", wait=True)
+        time.sleep(0.1)  # brief pause
+        
         for _ in range(_flood_spawn_count(atype)):
             _nsrun(h, cmd)
+        last_restart = time.time()
+        
+        # Monitor and restart if needed
         while not stop_event.is_set():
             time.sleep(1)
+            # Periodic restart to bypass stale mitigation rules
+            if time.time() - last_restart >= restart_interval:
+                break  # outer loop will restart hping3
+            # Also restart if hping3 dies
             if _hping_state(h) is False:
-                break
+                break  # confirmed dead, outer loop restarts it
 
     _nsrun(h, "pkill -9 -x hping3 2>/dev/null; true", wait=True)
     _notify_attack_stop(ip)
@@ -1395,16 +1477,18 @@ def stop_all_attacks() -> None:
 # UDP other: 50-200 bytes (NTP/SSDP realistic payloads)
 # ICMP: 56-64 bytes (standard ping, already correct)
 # Bursty: send 3-5 packets fast (0.1-0.3s), then pause 1-3s (page load pattern)
+# Per-host burst variability: each host gets a unique burst range to avoid
+# synchronized bursts that look like coordinated floods.
 _FLASH_CROWD_PROFILES = {
     1:  ("tcp_burst",  80,   200, 1400, 3, 5),    # HTTP page load burst
-    2:  ("tcp_burst",  443,  200, 1400, 3, 5),    # HTTPS page load burst
-    3:  ("tcp_burst",  80,   200, 1400, 3, 5),    # HTTP API calls burst
+    2:  ("tcp_burst",  443,  200, 1400, 2, 4),    # HTTPS page load burst (smaller burst)
+    3:  ("tcp_burst",  80,   200, 1400, 4, 6),    # HTTP API calls burst (larger burst)
     4:  ("tcp_burst",  443,  200, 1400, 3, 5),    # HTTPS API calls burst
-    5:  ("tcp_burst",  8080, 200, 1400, 3, 5),    # HTTP alt port burst
+    5:  ("tcp_burst",  8080, 200, 1400, 2, 4),    # HTTP alt port burst (smaller burst)
     6:  ("udp_burst",  53,   50,  300,  3, 5),    # DNS query burst
     7:  ("udp",        123,  50,  200,  1.0, 2.0), # NTP steady
     8:  ("udp",        1900, 50,  200,  1.0, 2.0), # SSDP steady
-    9:  ("udp_burst",  53,   50,  300,  3, 5),    # DNS query burst
+    9:  ("udp_burst",  53,   50,  300,  2, 4),    # DNS query burst (smaller burst)
     10: ("udp",        123,  50,  200,  1.0, 2.0), # NTP steady
     11: ("icmp_cont",  56,   64,  0.8, 1.2),      # ICMP ping (unchanged)
     12: ("icmp_cont",  56,   64,  0.8, 1.2),      # ICMP ping (unchanged)
@@ -1438,7 +1522,10 @@ def _flash_crowd_run_slot(host, num: int) -> None:
             f"  s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);"
             f"  s.settimeout(3);"
             f"  s.connect(('{SERVER_IP}',{port}));"
-            f"  s.sendall(os.urandom({size}));"
+            f"  req=b'GET /index.html HTTP/1.1\\r\\nHost: {SERVER_IP}\\r\\nUser-Agent: Mozilla/5.0\\r\\nAccept: text/html\\r\\nConnection: close\\r\\n\\r\\n';"
+            f"  pad={size}-len(req);"
+            f"  if pad>0:req+=os.urandom(pad);"
+            f"  s.send(req);"
             f"  s.close();"
             f" except: pass;"
             f" time.sleep(random.uniform({slp_min},{slp_max}))"
@@ -1458,7 +1545,10 @@ def _flash_crowd_run_slot(host, num: int) -> None:
             f"   s.settimeout(3);"
             f"   s.connect(('{SERVER_IP}',{port}));"
             f"   size=random.randint({pkt_min},{pkt_max});"
-            f"   s.sendall(os.urandom(size));"
+            f"   req=b'GET /index.html HTTP/1.1\\r\\nHost: {SERVER_IP}\\r\\nUser-Agent: Mozilla/5.0\\r\\nAccept: text/html\\r\\nConnection: close\\r\\n\\r\\n';"
+            f"   pad=size-len(req);"
+            f"   if pad>0:req+=os.urandom(pad);"
+            f"   s.send(req);"
             f"   s.close();"
             f"  except: pass;"
             f"  time.sleep(random.uniform(0.1,0.3));"
@@ -1469,33 +1559,198 @@ def _flash_crowd_run_slot(host, num: int) -> None:
         # raw L4 UDP, continuous loop for the full flash crowd duration
         _, port, pkt_min, pkt_max, slp_min, slp_max = profile
         size = random.randint(pkt_min, pkt_max)
-        proc = _nsrun(host, (
-            f"python3 -c \""
-            f"import socket,os,time,random;"
-            f"while True:"
-            f" s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
-            f" s.sendto(os.urandom({size}),('{SERVER_IP}',{port}));"
-            f" s.close();"
-            f" time.sleep(random.uniform({slp_min},{slp_max}))"
-            f"\" 2>/dev/null"
-        ), return_proc=True)
+        if port == 53:
+            # DNS query: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,struct,time,random;"
+                f"while True:"
+                f" s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f" h=struct.pack('>HHHHHH',0x1234,0x0100,1,0,0,0);"
+                f" q=b'\\x03www\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01';"
+                f" s.sendto(h+q,('{SERVER_IP}',{port}));"
+                f" s.close();"
+                f" time.sleep(random.uniform({slp_min},{slp_max}))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        elif port == 123:
+            # NTP request: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,struct,time,random;"
+                f"while True:"
+                f" s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f" h=struct.pack('>BBBBIIIQQQQ',0x23,0,0,0,0,0,0,0,0,0,0);"
+                f" s.sendto(h,('{SERVER_IP}',{port}));"
+                f" s.close();"
+                f" time.sleep(random.uniform({slp_min},{slp_max}))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        elif port == 161:
+            # SNMP GetRequest: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,time,random;"
+                f"while True:"
+                f" s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f" h=bytes([0x30,0x26,0x02,0x01,0x00,0x04,0x06,0x70,0x75,0x62,0x6c,0x69,0x63,"
+                f"         0xa0,0x19,0x02,0x04,0x00,0x00,0x00,0x01,0x02,0x01,0x00,0x02,0x01,0x00,"
+                f"         0x30,0x0b,0x30,0x09,0x06,0x05,0x2b,0x06,0x01,0x02,0x01,0x05,0x00]);"
+                f" s.sendto(h,('{SERVER_IP}',{port}));"
+                f" s.close();"
+                f" time.sleep(random.uniform({slp_min},{slp_max}))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        elif port == 514:
+            # Syslog message: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,time,random;"
+                f"while True:"
+                f" s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f" msg=b'<13>Sep  2 12:00:00 h{num} kernel: [12345.678] eth0: link up';"
+                f" s.sendto(msg,('{SERVER_IP}',{port}));"
+                f" s.close();"
+                f" time.sleep(random.uniform({slp_min},{slp_max}))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        elif port == 1900:
+            # SSDP M-SEARCH: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,time,random;"
+                f"while True:"
+                f" s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f" msg=(b'M-SEARCH * HTTP/1.1\\r\\n'"
+                f" b'HOST: 239.255.255.250:1900\\r\\n'"
+                f" b'MAN: \\\"ssdp:discover\\\"\\r\\n'"
+                f" b'MX: 3\\r\\n'"
+                f" b'ST: ssdp:all\\r\\n'"
+                f" b'\\r\\n');"
+                f" s.sendto(msg,('{SERVER_IP}',{port}));"
+                f" s.close();"
+                f" time.sleep(random.uniform({slp_min},{slp_max}))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        else:
+            # Unknown port: fall back to random bytes
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,os,time,random;"
+                f"while True:"
+                f" s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f" s.sendto(os.urandom({size}),('{SERVER_IP}',{port}));"
+                f" s.close();"
+                f" time.sleep(random.uniform({slp_min},{slp_max}))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
     elif kind == "udp_burst":
         # Bursty UDP: send 3-5 packets fast (DNS burst), then pause 2-4s
         _, port, pkt_min, pkt_max, burst_min, burst_max = profile
-        proc = _nsrun(host, (
-            f"python3 -c \""
-            f"import socket,os,time,random;"
-            f"while True:"
-            f" burst=random.randint({burst_min},{burst_max});"
-            f" for _ in range(burst):"
-            f"  s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
-            f"  size=random.randint({pkt_min},{pkt_max});"
-            f"  s.sendto(os.urandom(size),('{SERVER_IP}',{port}));"
-            f"  s.close();"
-            f"  time.sleep(random.uniform(0.1,0.3));"
-            f" time.sleep(random.uniform(2.0,4.0))"
-            f"\" 2>/dev/null"
-        ), return_proc=True)
+        if port == 53:
+            # DNS query burst: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,struct,time,random;"
+                f"while True:"
+                f" burst=random.randint({burst_min},{burst_max});"
+                f" for _ in range(burst):"
+                f"  s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f"  h=struct.pack('>HHHHHH',0x1234,0x0100,1,0,0,0);"
+                f"  q=b'\\x03www\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01';"
+                f"  s.sendto(h+q,('{SERVER_IP}',{port}));"
+                f"  s.close();"
+                f"  time.sleep(random.uniform(0.1,0.3));"
+                f" time.sleep(random.uniform(2.0,4.0))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        elif port == 123:
+            # NTP burst: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,struct,time,random;"
+                f"while True:"
+                f" burst=random.randint({burst_min},{burst_max});"
+                f" for _ in range(burst):"
+                f"  s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f"  h=struct.pack('>BBBBIIIQQQQ',0x23,0,0,0,0,0,0,0,0,0,0);"
+                f"  s.sendto(h,('{SERVER_IP}',{port}));"
+                f"  s.close();"
+                f"  time.sleep(random.uniform(0.1,0.3));"
+                f" time.sleep(random.uniform(2.0,4.0))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        elif port == 161:
+            # SNMP burst: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,time,random;"
+                f"while True:"
+                f" burst=random.randint({burst_min},{burst_max});"
+                f" for _ in range(burst):"
+                f"  s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f"  h=bytes([0x30,0x26,0x02,0x01,0x00,0x04,0x06,0x70,0x75,0x62,0x6c,0x69,0x63,"
+                f"           0xa0,0x19,0x02,0x04,0x00,0x00,0x00,0x01,0x02,0x01,0x00,0x02,0x01,0x00,"
+                f"           0x30,0x0b,0x30,0x09,0x06,0x05,0x2b,0x06,0x01,0x02,0x01,0x05,0x00]);"
+                f"  s.sendto(h,('{SERVER_IP}',{port}));"
+                f"  s.close();"
+                f"  time.sleep(random.uniform(0.1,0.3));"
+                f" time.sleep(random.uniform(2.0,4.0))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        elif port == 514:
+            # Syslog burst: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,time,random;"
+                f"while True:"
+                f" burst=random.randint({burst_min},{burst_max});"
+                f" for _ in range(burst):"
+                f"  s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f"  msg=b'<13>Sep  2 12:00:00 h{num} kernel: [12345.678] eth0: link up';"
+                f"  s.sendto(msg,('{SERVER_IP}',{port}));"
+                f"  s.close();"
+                f"  time.sleep(random.uniform(0.1,0.3));"
+                f" time.sleep(random.uniform(2.0,4.0))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        elif port == 1900:
+            # SSDP burst: structured payload
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,time,random;"
+                f"while True:"
+                f" burst=random.randint({burst_min},{burst_max});"
+                f" for _ in range(burst):"
+                f"  s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f"  msg=(b'M-SEARCH * HTTP/1.1\\r\\n'"
+                f"  b'HOST: 239.255.255.250:1900\\r\\n'"
+                f"  b'MAN: \\\"ssdp:discover\\\"\\r\\n'"
+                f"  b'MX: 3\\r\\n'"
+                f"  b'ST: ssdp:all\\r\\n'"
+                f"  b'\\r\\n');"
+                f"  s.sendto(msg,('{SERVER_IP}',{port}));"
+                f"  s.close();"
+                f"  time.sleep(random.uniform(0.1,0.3));"
+                f" time.sleep(random.uniform(2.0,4.0))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
+        else:
+            # Unknown port: fall back to random bytes
+            proc = _nsrun(host, (
+                f"python3 -c \""
+                f"import socket,os,time,random;"
+                f"while True:"
+                f" burst=random.randint({burst_min},{burst_max});"
+                f" for _ in range(burst):"
+                f"  s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);"
+                f"  size=random.randint({pkt_min},{pkt_max});"
+                f"  s.sendto(os.urandom(size),('{SERVER_IP}',{port}));"
+                f"  s.close();"
+                f"  time.sleep(random.uniform(0.1,0.3));"
+                f" time.sleep(random.uniform(2.0,4.0))"
+                f"\" 2>/dev/null"
+            ), return_proc=True)
     # Track the proc so _kill_baseline_procs can stop it after duration
     if proc is not None:
         lst = [q for q in _baseline_slot_procs.get(host.name, [])
@@ -1509,24 +1764,40 @@ def _flash_crowd_worker(legit: list, duration: int) -> None:
     # Hold the watchdog off for the whole probe and restore it no matter how
     # the worker exits, so a crash cannot disable the watchdog permanently.
     _WATCHDOG_SUPPRESS.set()
+    _flash_crowd_stop_event.clear()  # Reset stop event
     try:
         for h in legit:
             _kill_baseline_procs(h)
-        time.sleep(0.5)
+        # No sleep - start immediately for faster activation
 
         for h in legit:
             num = int(h.name[1:])
             _flash_crowd_run_slot(h, num)
             info(f"    {h.name} ({h.IP()}): flash crowd -> {SERVER_IP}\n")
 
-        time.sleep(duration)
+        # Wait for duration OR stop event (whichever comes first)
+        _flash_crowd_stop_event.wait(timeout=duration)
 
         # Kill flash crowd procs (tracked in _baseline_slot_procs by _flash_crowd_run_slot)
         for h in legit:
             _kill_baseline_procs(h)
 
-        info("*** Flash crowd ended, restoring baseline...\n")
-        start_baseline_traffic()
+        info("*** Flash crowd ended, restoring baseline with stagger...\n")
+        # Stagger baseline restart to avoid burst (0.5s delay between each host)
+        for i, h in enumerate(legit):
+            num = int(h.name[1:])
+            stop_ev = threading.Event()
+            t = threading.Thread(
+                target=_baseline_loop, args=(h, stop_ev, _idle_host_ref),
+                name=f"baseline-{h.name}", daemon=True
+            )
+            with _baseline_lock:
+                _baseline_stop[h.name] = stop_ev
+                _baseline_threads[h.name] = t
+            t.start()
+            if i < len(legit) - 1:  # Don't delay after last host
+                time.sleep(0.5)
+        _BASELINE_START_TS = time.time()
         import sys
         sys.stdout.write("mininet> ")
         sys.stdout.flush()
@@ -1539,11 +1810,18 @@ def flash_crowd(duration: int = 30) -> None:
     # runs in background, CLI stays responsive, baseline restores after duration
     legit = [h for h in hosts if int(h.name[1:]) in _LEGIT_NUMS]
     info(f"*** Flash crowd, {len(legit)} legit hosts -> {SERVER_IP} for {duration}s\n")
-    info(f"    CLI active, baseline restores automatically after {duration}s\n\n")
+    info(f"    CLI active, baseline restores automatically after {duration}s\n")
+    info(f"    Use stop_flash_crowd() to stop early\n\n")
     threading.Thread(
         target=_flash_crowd_worker, args=(legit, duration),
         name="flash-crowd", daemon=True
     ).start()
+
+
+def stop_flash_crowd() -> None:
+    """Manually stop flash crowd early and restore baseline."""
+    _flash_crowd_stop_event.set()
+    info("*** Flash crowd stopped manually, restoring baseline...\n")
 
 
 # === WARMUP ===

@@ -110,9 +110,6 @@ class _AdaptiveBaseline:
         alpha = TEA_EMA_ALPHA_MAX - cv * (TEA_EMA_ALPHA_MAX - TEA_EMA_ALPHA_MIN)
         return max(TEA_EMA_ALPHA_MIN, min(TEA_EMA_ALPHA_MAX, alpha))
 
-    def _variance_stable(self) -> bool:
-        return False
-
     def _warmup_reject(self, value: float) -> bool:
         """Provisional guard during the learning phase.
 
@@ -363,8 +360,9 @@ class _ShadowState:
         log.info("TEA shadow discarded: %s", reason)
 
 
-IP_PROFILE_MIN_SAMPLES = 10
-IP_PROFILE_WINDOW      = 50
+IP_PROFILE_MIN_SAMPLES = 30
+IP_PROFILE_WINDOW      = 100
+IP_PROFILE_MAX_ENTRIES = 50000
 
 class _IpEntropyProfile:
     def __init__(self):
@@ -397,15 +395,7 @@ class _IpEntropyProfile:
         return float(-np.sum(probs * np.log2(probs)))
 
     def verdict(self) -> str:
-        """
-        Evaluate traffic profile for a specific IP.
-        
-        Note: The per-IP verdict relies on fine-grained trend/entropy analysis
-        over a short sliding window, whereas the global gate (is_attack_pattern) 
-        relies on aggregate variance collapse across all traffic. They are kept
-        separate because the global gate detects the onset of a large attack, 
-        while this method tracks individual IP behavior.
-        """
+
         if len(self._pps_samples) < IP_PROFILE_MIN_SAMPLES:
             return "uncertain"
 
@@ -433,11 +423,7 @@ class _IpEntropyProfile:
         declining = pps_trend < -(pps_mean * trend_threshold)
         low_mean  = pps_mean < (sum(list(self._pps_samples)[:3]) / 3 + 1e-9) * 0.5
 
-        if rising and repetitive:
-            self._last_verdict = "attack"
-            return "attack"
-
-        if rising or repetitive:
+        if rising:
             self._last_verdict = "attack"
             return "attack"
 
@@ -525,6 +511,7 @@ class EntropyAnalyzer:
                 and self._global_state.proto_base.locked
                 and self._global_state.share_base.locked
                 and self._global_state.pps_base.locked
+                and self._global_state.temporal_base.locked
             )
 
     def update(self, dpid: int, flows: list[dict]) -> dict:
@@ -539,13 +526,14 @@ class EntropyAnalyzer:
             self._eval_seq += 1
             current_flows = list(self._flow_buffer)
             self._flow_buffer.clear()
+            # Snapshot last_result under lock for idle-path use
+            prev_result = self._global_state.last_result
 
         if not current_flows:
             # Idle gap: preserve the previous result verbatim rather than
             # overwriting it with a neutral learned=False verdict.
-            prev = self._global_state.last_result
-            if prev:
-                res = dict(prev)
+            if prev_result:
+                res = dict(prev_result)
                 res["idle"] = True
                 return res
             return self._neutral(0.0, 0.0, learned=False)
@@ -628,23 +616,6 @@ class EntropyAnalyzer:
             mean_pps,
             temporal_entropy,
         ])
-        # Compute distance against existing baseline before appending
-        if len(self._snapshot_history) >= 30:
-            history_array = np.array(self._snapshot_history)
-            mean_vec = np.mean(history_array, axis=0)
-            cov_matrix = np.cov(history_array.T)
-            try:
-                cov_inv = np.linalg.inv(cov_matrix + np.eye(6) * 1e-6)
-                diff = vector - mean_vec
-                mahal_dist = float(np.sqrt(diff @ cov_inv @ diff))
-            except np.linalg.LinAlgError:
-                mahal_dist = 0.0
-        else:
-            mahal_dist = 0.0
-        # Only add to baseline history if not an extreme outlier, to prevent
-        # attack traffic from contaminating the covariance matrix.
-        if mahal_dist < _cfg.TEA_MAHALANOBIS_ATTACK_THRESHOLD * 2.0:
-            self._snapshot_history.append(vector)
 
         with self._lock:
             state = self._global_state
@@ -667,6 +638,22 @@ class EntropyAnalyzer:
 
             curr = state.latest()
             prev = state.previous()
+
+            # Mahalanobis distance (thread-safe: snapshot_history accessed under lock)
+            if len(self._snapshot_history) >= 30:
+                history_array = np.array(self._snapshot_history)
+                mean_vec = np.mean(history_array, axis=0)
+                cov_matrix = np.cov(history_array.T)
+                try:
+                    cov_inv = np.linalg.pinv(cov_matrix + np.eye(6) * 1e-6)
+                    diff = vector - mean_vec
+                    mahal_dist = float(np.sqrt(diff @ cov_inv @ diff))
+                except np.linalg.LinAlgError:
+                    mahal_dist = 0.0
+            else:
+                mahal_dist = 0.0
+            if mahal_dist < _cfg.TEA_MAHALANOBIS_ATTACK_THRESHOLD * 2.0:
+                self._snapshot_history.append(vector)
 
             if not is_learned:
                 size_z  = 0.0
@@ -739,23 +726,42 @@ class EntropyAnalyzer:
                     if self._extreme_z_streak >= _cfg.TEA_EXTREME_Z_RESTART_INTERVALS:
                         log.warning(
                             "TEA extreme-z restart: |z| >= %.0f for %d intervals - "
-                            "baseline miscalibrated, wiping and relearning",
+                            "baseline miscalibrated, using shadow promotion",
                             _cfg.TEA_EXTREME_Z_SIGMA, self._extreme_z_streak,
                         )
-                        # When wiping baselines, also discard any shadow
-                        if self._global_state.shadow:
-                            self._global_state.discard_shadow("extreme-z wipe")
-                        self._global_state = _GlobalEntropyState(TEA_WINDOW_SIZE)
                         self._extreme_z_streak = 0
                         self._tea_attack_streak = 0
                         self._relearn_stable_streak = 0
+
+                        # Try shadow promotion first (old baselines stay active)
+                        if state.shadow and state.shadow.is_ready():
+                            if self._shadow_health_check(state.shadow):
+                                log.info("TEA extreme-z: shadow promoted (replaces miscalibrated baselines)")
+                                old_state = state
+                                self._global_state = state.shadow.baselines
+                                # Reset window (old window mixed with new baselines causes incorrect z-scores)
+                                self._global_state.window = deque(maxlen=TEA_WINDOW_SIZE)
+                                self._global_state.last_result = old_state.last_result
+                                old_state._shadow = None
+                                # Refresh state reference to point to new baselines
+                                state = self._global_state
+                            else:
+                                log.info("TEA extreme-z: shadow failed health check, discarding")
+                                state.discard_shadow("health check failed")
+                                # Activate new shadow for background learning
+                                if not state.shadow:
+                                    state.start_shadow()
+                        else:
+                            # No shadow available: activate one for background learning
+                            # Old baselines stay active for IF detection
+                            if not state.shadow:
+                                state.start_shadow()
+                                log.info("TEA extreme-z: shadow activated (old baselines still active)")
+                            else:
+                                log.info("TEA extreme-z: shadow exists but not ready, waiting")
+
                         self._set_latch(False, "extreme-z baseline restart",
                                         caller_holds_lock=True)
-                        res = self._neutral(size_var, intensity_var, learned=False)
-                        res["eval_seq"] = self._eval_seq
-                        res["baseline_restart"] = True
-                        state.last_result = res
-                        return res
 
         size_delta  = curr["size_var"]  - prev["size_var"]
         intensity_delta = curr["intensity_var"] - prev["intensity_var"]
@@ -780,8 +786,20 @@ class EntropyAnalyzer:
         volume_anomaly = size_surge or intensity_surge or pps_surge
         collapse_anomaly = size_collapsed or intensity_collapsed or proto_collapsed
 
-        # Track sustained multi-dimension confirmation
-        if (size_surge and intensity_surge) or (mechanized_cluster and volume_anomaly):
+        # Mahalanobis multi-dimensional detection (Daneshgadeh et al. 2018/2020)
+        # Computed early for streak and confidence logic
+        mahal_attack = mahal_dist >= _cfg.TEA_MAHALANOBIS_ATTACK_THRESHOLD
+        mahal_crowd = mahal_dist >= _cfg.TEA_MAHALANOBIS_CROWD_THRESHOLD
+
+        # Track sustained multi-dimension confirmation (score-based: 2+ signals)
+        attack_signals = sum([
+            size_surge,
+            intensity_surge,
+            pps_surge,
+            mechanized_cluster,
+            mahal_attack,
+        ])
+        if attack_signals >= 2:
             self._multi_dim_streak += 1
         else:
             self._multi_dim_streak = 0
@@ -800,9 +818,6 @@ class EntropyAnalyzer:
             and curr["uniform_share"] >= _cfg.TEA_UNIFORM_BACKSTOP_SHARE
             and curr["unique_ips"] >= _cfg.TEA_UNIFORM_BACKSTOP_MIN_IPS
         )
-        # Mahalanobis multi-dimensional detection (Daneshgadeh et al. 2018/2020)
-        mahal_attack = mahal_dist >= _cfg.TEA_MAHALANOBIS_ATTACK_THRESHOLD
-        mahal_crowd = mahal_dist >= _cfg.TEA_MAHALANOBIS_CROWD_THRESHOLD
         is_attack_pattern = (
             size_surge or intensity_surge or pps_surge
             or ((collapse_anomaly or mechanized_cluster) and volume_anomaly)
@@ -810,20 +825,22 @@ class EntropyAnalyzer:
         ) if not degenerate else False
 
         if is_attack_pattern:
-            # HIGH confidence requires sustained multi-dimension evidence
+            # Score-based confidence: count attack signals for flexibility
+            attack_signals = sum([
+                size_surge,
+                intensity_surge,
+                pps_surge,
+                mechanized_cluster,
+                mahal_attack,
+            ])
+            # HIGH requires sustained (3+ intervals) AND 2+ signals
             if self._multi_dim_streak >= _cfg.TEA_HIGH_CONFIDENCE_INTERVALS:
-                if (size_surge and intensity_surge) or (mechanized_cluster and volume_anomaly):
-                    confidence = "high"
-                elif mahal_attack and (collapse_anomaly or mechanized_cluster):
+                if attack_signals >= 2:
                     confidence = "high"
                 else:
                     confidence = "moderate"
-            elif uniform_backstop and not volume_anomaly:
-                confidence = "moderate"  # many-source uniform flood, no volume surge
-            elif mahal_crowd:
-                confidence = "moderate"  # Mahalanobis crowd-level deviation
             else:
-                confidence = "moderate"  # Single dimension fired
+                confidence = "moderate"
 
         # Supervised relearning (P2): a stable TEA-side "new normal" force-learns
         # the frozen baselines without IF confirmation (REG-1 caps drift and excludes
@@ -837,10 +854,11 @@ class EntropyAnalyzer:
                     and self._relearn_stable_streak >= TEA_RELEARN_STABLE_INTERVALS
                     and confidence == TEA_RELEARN_MIN_CONFIDENCE
                 )
-            # Always learn: force=True bypasses locked baselines so learning
-            # continues during attacks; capped=True limits drift to 1%/interval.
+            # Always learn: no gate on is_attack_pattern; robust reject (z >= 3.5)
+            # in push() blocks attack-scale values from updating baselines.
+            # Capped drift during attacks as defense in depth.
             with self._lock:
-                state.learn(snapshot, force=True, capped=is_attack_pattern)
+                state.learn(snapshot, force=False, capped=is_attack_pattern)
 
         # Feed shadow baseline if active and primary is frozen
         with self._lock:
@@ -1068,8 +1086,8 @@ class EntropyAnalyzer:
         # Swap: shadow becomes primary
         old_state = state
         self._global_state = state.shadow.baselines
-        # Carry over window, last_result from old state
-        self._global_state.window = old_state.window
+        # Reset window (old window mixed with new baselines causes incorrect z-scores)
+        self._global_state.window = deque(maxlen=TEA_WINDOW_SIZE)
         self._global_state.last_result = old_state.last_result
         # Clear shadow reference
         old_state._shadow = None
@@ -1108,6 +1126,32 @@ class EntropyAnalyzer:
             self._if_normal_streak += 1
             self._try_unlock()
 
+    def _has_attack_signals(self) -> bool:
+        """Check if the last TEA result has actual attack signals (volume/mechanized).
+        Returns True if traffic is genuinely anomalous, False if frozen-baseline mismatch."""
+        last = self._global_state.last_result
+        if not last:
+            return False
+        return (
+            last.get("size_surge", False)
+            or last.get("intensity_surge", False)
+            or last.get("pps_surge", False)
+            or last.get("mechanized_cluster", False)
+        )
+
+    def _auto_heal_baselines(self) -> None:
+        """Gradually heal frozen baselines when traffic is normal but baselines are stale.
+        Called when TEA reports Anomaly with no real attack signals (frozen-baseline state).
+        Uses drift-capped EMA to slowly adapt baselines to current traffic."""
+        state = self._global_state
+        if not state.window:
+            return
+        latest = state.latest()
+        # Drift-capped learn: max 2% per interval, max 30% total per heal session
+        state.learn(latest, force=False, capped=True)
+        log.debug("TEA auto-heal: baselines adjusted (pps=%.2f, size_var=%.4f)",
+                  latest.get("mean_pps", 0), latest.get("size_var", 0))
+
     def feedback_tea(self, is_attack: bool, confidence: str = "low",
                      eval_seq: int | None = None) -> None:
         """Per-eval-interval TEA verdict feedback driving the latch.
@@ -1137,6 +1181,11 @@ class EntropyAnalyzer:
                 # frozen-baseline FP signature that builds the stability counter.
                 self._relearn_stable_streak += 1
                 self._last_moderate_ts = time.monotonic()
+                # Auto-heal: if 8+ stable intervals AND no real attack signals,
+                # heal baselines (frozen-baseline state, not real attack)
+                if (self._relearn_stable_streak >= TEA_RELEARN_STABLE_INTERVALS
+                        and not self._has_attack_signals()):
+                    self._auto_heal_baselines()
                 return
 
             if is_attack or confidence == "high":
@@ -1240,6 +1289,14 @@ class EntropyAnalyzer:
     def update_ip(self, src_ip: str, pps: float, bps: float) -> None:
         with self._lock:
             if src_ip not in self._ip_profiles:
+                # Hard cap: evict oldest profiles when limit reached
+                if len(self._ip_profiles) >= IP_PROFILE_MAX_ENTRIES:
+                    stale = sorted(
+                        self._ip_profiles.items(),
+                        key=lambda x: x[1]._last_update
+                    )[:len(self._ip_profiles) // 10]
+                    for ip, _ in stale:
+                        del self._ip_profiles[ip]
                 self._ip_profiles[src_ip] = _IpEntropyProfile()
             self._ip_profiles[src_ip].update(pps, bps)
 
@@ -1274,6 +1331,8 @@ class EntropyAnalyzer:
             "mean_pps":  0.0,
             "pps_zscore":    0.0,
             "pps_baseline":  0.0,
+            "temporal_entropy":  0.0,
+            "mahalanobis_distance": 0.0,
             "mechanized_cluster":    False,
             "size_surge":    False,
             "intensity_surge":   False,
@@ -1286,6 +1345,7 @@ class EntropyAnalyzer:
             "is_flash_crowd":     False,
             "is_learned":         learned,
             "confidence":         "low",
+            "eval_seq":           0,
         }
 
 # Module-level singleton

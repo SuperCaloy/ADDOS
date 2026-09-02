@@ -79,10 +79,4 @@ def _bucket_rows(rows: list[dict],
         buckets[idx]["blocked"]   += row["threats_mitigated"]
         buckets[idx]["forwarded"] += row["true_negatives_passed"]
 
-    # Normalize to pps — divide accumulated counts by bucket duration
-    for b in buckets:
-        b["incoming"]  = round(b["incoming"]  / bucket_size_s, 2)
-        b["blocked"]   = round(b["blocked"]   / bucket_size_s, 2)
-        b["forwarded"] = round(b["forwarded"] / bucket_size_s, 2)
-
     return buckets
