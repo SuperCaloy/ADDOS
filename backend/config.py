@@ -203,14 +203,6 @@ TEA_EMA_ALPHA_MAX = 0.10
 # Robust scale estimator rejection threshold (MAD-based, 3.0-3.5; literature Apply)
 TEA_ROBUST_REJECT_SIGMA = 3.5
 
-# --- TEA supervised relearn / hysteresis (moved from entropy_analyzer.py) ---
-# Idle time to force-unlock latch (literature Apply: 30-60s)
-TEA_IDLE_UNLOCK_S = 45.0
-# Per-IP profile TTL (literature Apply: 60-120s)
-TEA_IP_PROFILE_TTL_S = 90
-# Bounded max-hold safety valve (literature Apply: 90-120s)
-TEA_LATCH_MAX_HOLD_S = 105.0
-
 # --- TEA flash crowd guidance (Phase 4) ---
 # IF anomaly rate above this threshold overrides flash crowd detection
 # (mixed-protocol attack disguised as flash crowd)
