@@ -52,11 +52,10 @@ def _push_expert_event(payload: dict) -> None:
 
 TEA_VARIANCE_STABLE_THRESHOLD = 0.01
 TEA_BASELINE_HISTORY_MAX = 60
-# Warmup provisional rejection: after this many accepted samples the pps
-# baseline holds a provisional mean and rejects attack-scale volume outliers
-# (multiplicative factor from config). Variance-type baselines are NOT
-# guarded: their small-window values are heavy-tailed (legit 5-8x swings),
-# so any statistical guard over-rejects and stalls learning.
+# Warmup provisional rejection: after this many accepted samples each baseline
+# holds a provisional mean and rejects outlier warmup samples (multiplicative
+# factor from config). PPS uses an additional absolute dynamic cap; other
+# baselines use relative-ratio rejection plus optional min_learn_value floors.
 TEA_WARMUP_REJECT_AFTER = 30
 
 
@@ -75,7 +74,8 @@ def _shannon_entropy(values: list[float]) -> float:
 
 class _AdaptiveBaseline:
     def __init__(self, learn_samples: int, warmup_guard: bool = False,
-                 min_learn_mean: float | None = None):
+                 min_learn_mean: float | None = None,
+                 min_learn_value: float | None = None):
         self._learn_n      = learn_samples
         self._samples      = []
         self._mean         = None
@@ -86,10 +86,16 @@ class _AdaptiveBaseline:
         self._baseline_history = []
         # Learning window: wall-clock anchor set at the first warmup sample.
         self._learn_started_at: float | None = None
-        # Volume guard (pps only): reject attack-scale warmup samples.
+        # Warmup guard: reject attack-scale samples during learning.
+        # All baselines get the dynamic cap; PPS also gets a relative ratio
+        # guard via min_learn_mean. Non-PPS baselines can optionally use
+        # min_learn_value to reject collapsed values during learning.
         self._warmup_guard = warmup_guard
         # Validity gate (pps only): refuse to finalize below this mean.
         self._min_learn_mean = min_learn_mean
+        # Minimum value gate: reject samples below this during learning (e.g.
+        # size_var/intensity_var collapse during attack yields near-zero values).
+        self._min_learn_value = min_learn_value
         # Provisional running sum for the warmup guard.
         self._psum = 0.0
 
@@ -108,35 +114,36 @@ class _AdaptiveBaseline:
         return False
 
     def _warmup_reject(self, value: float) -> bool:
-        """Provisional volume guard during the learning phase (pps only).
+        """Provisional guard during the learning phase.
 
-        Two rules:
-        - absolute: per-flow pps above the dynamic cap is flood scale,
-          rejected regardless of the provisional mean. The cap scales with
-          observed traffic: max(floor, provisional_mean * factor);
-        - relative: once the provisional mean has crossed the validity gate
-          (a calibrated regime exists), values deviating more than
-          TEA_WARMUP_REJECT_FACTOR are rejected. Below the gate the baseline
-          is not yet calibrated, so only the absolute cap applies and a
-          legitimate idle-to-active transition is not stalled.
+        Three rules (applied in order):
+        - min_learn_value: reject values below this floor (e.g. size_var /
+          intensity_var collapse to near-zero during attack);
+        - absolute cap: per-flow value above the dynamic cap is flood scale,
+          rejected regardless of the provisional mean;
+        - relative (PPS only): once the provisional mean has crossed the
+          validity gate, values deviating more than TEA_WARMUP_REJECT_FACTOR
+          are rejected.
 
         A sustained attack simply delays learning until it stops, which is
-        the conservative outcome: no calibration under fire. An attack
-        present from the very first packets can still seed the provisional
-        window; the flood prefilter and IF cover that case.
+        the conservative outcome: no calibration under fire.
         """
         if not self._warmup_guard or len(self._samples) < TEA_WARMUP_REJECT_AFTER:
             return False
-        # Dynamic cap: scales with observed traffic
         mean = self._psum / len(self._samples)
+        # Minimum value gate: reject collapsed values (attack signature)
+        if self._min_learn_value is not None and value < self._min_learn_value:
+            return True
+        # Dynamic cap: scales with observed traffic
         dynamic_cap = max(_cfg.TEA_LEARN_CAP_FLOOR_PPS, mean * _cfg.TEA_LEARN_CAP_FACTOR)
         if value > dynamic_cap:
             return True
+        # PPS-only relative guard: skip when mean is below the validity gate
         if self._min_learn_mean is None:
             return False
         if mean < self._min_learn_mean:
             return False
-        ratio = value / mean
+        ratio = value / (mean + 1e-9)
         return ratio > _cfg.TEA_WARMUP_REJECT_FACTOR or ratio < 1 / _cfg.TEA_WARMUP_REJECT_FACTOR
 
     def push(self, value: float, force: bool = False,
@@ -233,7 +240,9 @@ class _AdaptiveBaseline:
     def z_score(self, value: float) -> float:
         if not self._learned:
             return 0.0
-        return (value - self._mean) / self._std
+        # Floor: std >= 10% of mean (prevents z-score explosion from tiny variance)
+        effective_std = max(self._std, abs(self._mean) * _cfg.TEA_MIN_STD_FLOOR)
+        return (value - self._mean) / effective_std
 
     def is_low(self, value: float, sigma: float) -> bool:
         return self._learned and self.z_score(value) <= -sigma
@@ -257,13 +266,13 @@ class _AdaptiveBaseline:
 class _GlobalEntropyState:
     def __init__(self, window_size: int):
         self.window    = deque(maxlen=window_size)
-        self.size_base  = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
-        self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
-        self.proto_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
-        self.share_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
+        self.size_base  = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True)
+        self.intensity_base  = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True)
+        self.proto_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True)
+        self.share_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True)
         self.pps_base   = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True,
                                             min_learn_mean=TEA_LEARN_MIN_MEAN_PPS)
-        self.temporal_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES)
+        self.temporal_base = _AdaptiveBaseline(TEA_LEARN_MIN_SAMPLES, warmup_guard=True)
         self.last_result = {}
         self._shadow = None
 
@@ -324,6 +333,7 @@ class _GlobalEntropyState:
             and self.proto_base.is_learned
             and self.share_base.is_learned
             and self.pps_base.is_learned
+            and self.temporal_base.is_learned
         )
 
 
@@ -379,9 +389,12 @@ class _IpEntropyProfile:
 
     def _entropy_of_samples(self, samples: deque) -> float:
         vals = list(samples)
-        if not vals:
+        if not vals or len(vals) < 2:
             return 0.0
-        return _shannon_entropy(vals)
+        bins = np.histogram(vals, bins=min(10, len(vals)))
+        probs = bins[0] / max(1, sum(bins[0]))
+        probs = probs[probs > 0]
+        return float(-np.sum(probs * np.log2(probs)))
 
     def verdict(self) -> str:
         """
@@ -674,8 +687,14 @@ class EntropyAnalyzer:
                 size_collapsed  = size_base.is_low(curr["size_var"], attack_sigma)
                 intensity_collapsed = intensity_base.is_low(curr["intensity_var"], attack_sigma)
                 proto_collapsed = proto_base.is_low(curr["proto_entropy"], attack_sigma)  # protocol concentration lowers entropy
-                size_surge = size_base.is_high(curr["size_var"], attack_sigma)
-                intensity_surge = intensity_base.is_high(curr["intensity_var"], attack_sigma)
+                size_surge = (
+                    size_base.is_high(curr["size_var"], attack_sigma)
+                    and curr["size_var"] > size_base.mean * _cfg.TEA_SURGE_MIN_MAGNITUDE
+                )
+                intensity_surge = (
+                    intensity_base.is_high(curr["intensity_var"], attack_sigma)
+                    and curr["intensity_var"] > intensity_base.mean * _cfg.TEA_SURGE_MIN_MAGNITUDE
+                )
                 share_z = share_base.z_score(curr["uniform_share"])
                 # P1: uniformity at sigma 2.0 with an absolute share floor,
                 # so only strongly-uniform traffic is even considered.

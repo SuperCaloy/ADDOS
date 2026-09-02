@@ -192,6 +192,10 @@ TEA_SHADOW_MIN_SAMPLES = 60            # shadow samples before promotion (reduce
 TEA_SHADOW_MAX_AGE_S = 120.0           # discard shadow if older (reduced from 600)
 TEA_SHADOW_PROMOTE_MIN_CONFIDENCE = "moderate"
 
+# --- TEA false positive fix (Phase 1: std floor + magnitude check) ---
+TEA_MIN_STD_FLOOR = 0.10        # std floor as fraction of mean (prevents tiny-variance FP)
+TEA_SURGE_MIN_MAGNITUDE = 2.0   # value must be 2x baseline mean to count as surge
+
 # --- TEA detection thresholds (moved from entropy_analyzer.py for single source of truth) ---
 # z-score for attack variance collapse detection
 TEA_ATTACK_SIGMA = 2.5
