@@ -10,6 +10,13 @@ connectSSE();
 setInterval(fetchStats,      POLL_MS);   /* stats cards + chart — every 2s */
 setInterval(fetchQuarantine, POLL_MS);   /* watchlist table    — every 2s */
 
+/* ── Tab visibility: reset chart delta on return ───────────────────────────── */
+/* Browsers throttle setInterval in background tabs. When the user returns,
+ * the first poll would see a huge delta from all missed traffic. Skip it. */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') _resetPrev = true;
+});
+
 /* ── Row-click delegation ──────────────────────────────────────────────────── */
 /* Single listener per tbody — survives innerHTML updates, skips button clicks */
 (function _attachRowDelegation() {

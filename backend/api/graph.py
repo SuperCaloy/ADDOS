@@ -39,7 +39,7 @@ def graph_history():
     end_str   = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     rows = query("""
-        SELECT timestamp, total_flows_observed, threats_mitigated, true_negatives_passed
+        SELECT timestamp, total_packets, malicious_dropped, normal_packets
         FROM traffic_summary
         WHERE timestamp >= ? AND timestamp <= ?
         ORDER BY timestamp ASC
@@ -75,14 +75,8 @@ def _bucket_rows(rows: list[dict],
             continue
         offset_s = (row_dt - start_dt).total_seconds()
         idx = min(int(offset_s / bucket_size_s), n_buckets - 1)
-        buckets[idx]["incoming"]  += row["total_flows_observed"]
-        buckets[idx]["blocked"]   += row["threats_mitigated"]
-        buckets[idx]["forwarded"] += row["true_negatives_passed"]
-
-    # Normalize to pps — divide accumulated counts by bucket duration
-    for b in buckets:
-        b["incoming"]  = round(b["incoming"]  / bucket_size_s, 2)
-        b["blocked"]   = round(b["blocked"]   / bucket_size_s, 2)
-        b["forwarded"] = round(b["forwarded"] / bucket_size_s, 2)
+        buckets[idx]["incoming"]  += row["total_packets"] or 0
+        buckets[idx]["blocked"]   += row["malicious_dropped"] or 0
+        buckets[idx]["forwarded"] += row["normal_packets"] or 0
 
     return buckets

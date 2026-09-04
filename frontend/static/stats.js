@@ -1,4 +1,6 @@
 let prev = { t: 0, m: 0, n: 0 };
+let _resetPrev = false;  // flag: reset prev on next poll to avoid backgrounding spike
+let _lastFetchTs = 0;    // timestamp of last successful fetchStats call (ms)
 
 /* Shared IF threshold — set once by fetchModelInfo, read by mitigation.js */
 let ifThr = 0;
@@ -43,6 +45,19 @@ async function fetchStats() {
     if (range === 'Live') {
       const lm     = s.live_malicious || 0;
       const ln     = s.live_normal    || 0;
+      const nowMs  = Date.now();
+
+      /* After tab was backgrounded, skip one delta to avoid a spike.
+       * Also skip if elapsed time since last fetch is > 5s (browser throttled
+       * the interval while tab was hidden — the delta would be inflated). */
+      const elapsed = _lastFetchTs > 0 ? (nowMs - _lastFetchTs) : 0;
+      if (_resetPrev || elapsed > 5000) {
+        _resetPrev = false;
+        prev = { t: ct, m: cm, n: cn };
+        _lastFetchTs = nowMs;
+        return;
+      }
+
       const deltaM = prev.m > 0 ? Math.max(lm - prev.m, 0) : 0;
       const deltaN = prev.n > 0 ? Math.max(ln - prev.n, 0) : 0;
       const deltaT = deltaM + deltaN;
@@ -52,6 +67,7 @@ async function fetchStats() {
 
     /* Save for next poll delta calculation */
     prev = { t: ct, m: cm, n: cn };
+    _lastFetchTs = Date.now();
 
   } catch (_) {}
 }

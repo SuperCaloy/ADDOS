@@ -81,8 +81,9 @@ def _gather_prefilter_breakdown() -> dict:
         flagged_snapshot = list(flood_filter._flagged.items())
     for (ip, proto), reason in flagged_snapshot:
         if proto not in breakdown:
-            breakdown[proto] = {"flagged_ips": 0, "burst": 0, "limit": 0, "correlated": 0}
+            breakdown[proto] = {"flagged_ips": 0, "burst": 0, "limit": 0, "correlated": 0, "flagged_ips_list": []}
         breakdown[proto]["flagged_ips"] += 1
+        breakdown[proto]["flagged_ips_list"].append({"ip": ip, "reason": reason})
         if "burst" in reason.lower():
             breakdown[proto]["burst"] += 1
         elif "limit" in reason.lower() or "window" in reason.lower():
@@ -93,6 +94,7 @@ def _gather_prefilter_breakdown() -> dict:
 def _gather_prefilter_session() -> dict:
     return {
         "session_spike": flood_filter._session_spike,
+        "session_flagged_by_proto": dict(flood_filter._session_flagged_by_proto),
     }
 
 
@@ -147,13 +149,28 @@ def _gather_tea_data() -> dict:
         size_base = state.size_base
         int_base = state.intensity_base
         proto_base = state.proto_base
+        attack_sigma = size_base.dynamic_attack_sigma()
+        crowd_sigma = size_base.dynamic_crowd_sigma()
+        tea_global = {
+            "learned": state.is_learned,
+            "dynamic_attack_sigma": round(attack_sigma, 2),
+            "dynamic_crowd_sigma": round(crowd_sigma, 2),
+            "learning_interval": len(size_base._samples) if not size_base.is_learned else None,
+            "learning_intervals": size_base._learn_n,
+            "learning_rejected": size_base.rejected_count if not size_base.is_learned else None,
+            "_locked": entropy_analyzer.is_locked,
+            "_attack_latched": entropy_analyzer.attack_latched,
+            "_fb_normal_streak": entropy_analyzer.fb_normal_streak,
+            "_tea_normal_streak": entropy_analyzer.tea_normal_streak,
+            "_would_block_count": entropy_analyzer.would_block_count,
+            "alpha": round(size_base.alpha, 4),
+            "size_baseline_history": [round(v, 4) for v in size_base.baseline_history],
+            "intensity_baseline_history": [round(v, 4) for v in int_base.baseline_history],
+            "proto_baseline_history": [round(v, 4) for v in proto_base.baseline_history],
+        }
         curr = getattr(state, 'last_result', {})
         if curr:
-            attack_sigma = size_base.dynamic_attack_sigma()
-            crowd_sigma = size_base.dynamic_crowd_sigma()
-            confidence = curr.get("confidence", "low").upper()
-            tea_global = {
-                "learned": state.is_learned,
+            tea_global.update({
                 "size_var": round(curr.get("size_var", 0), 4),
                 "intensity_var": round(curr.get("intensity_var", 0), 4),
                 "proto_entropy": round(curr.get("proto_entropy", 0), 4),
@@ -171,22 +188,10 @@ def _gather_tea_data() -> dict:
                 "pps_z": round(curr.get("pps_zscore", 0), 2),
                 "pps_baseline": round(curr.get("pps_baseline", 0), 4),
                 "pps_surge": curr.get("pps_surge", False),
+                "size_surge": curr.get("size_surge", False),
+                "intensity_surge": curr.get("intensity_surge", False),
                 "unique_ips": curr.get("unique_ips", 0),
-                "learning_interval": len(size_base._samples) if not size_base.is_learned else None,
-                "learning_intervals": size_base._learn_n,
-                "_locked": entropy_analyzer.is_locked,
-                "_attack_latched": entropy_analyzer.attack_latched,
-                "_fb_normal_streak": entropy_analyzer.fb_normal_streak,
-                "_tea_normal_streak": entropy_analyzer.tea_normal_streak,
-                "_would_block_count": entropy_analyzer.would_block_count,
-                "dynamic_attack_sigma": round(attack_sigma, 2),
-                "dynamic_crowd_sigma": round(crowd_sigma, 2),
-                "alpha": round(size_base.alpha, 4),
-                "confidence": confidence,
-                "size_baseline_history": [round(v, 4) for v in size_base.baseline_history],
-                "intensity_baseline_history": [round(v, 4) for v in int_base.baseline_history],
-                "proto_baseline_history": [round(v, 4) for v in proto_base.baseline_history],
-            }
+            })
 
         # Shadow baseline state
         shadow = state.shadow

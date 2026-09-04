@@ -98,10 +98,15 @@ class _AdaptiveBaseline:
         self._min_learn_value = min_learn_value
         # Provisional running sum for the warmup guard.
         self._psum = 0.0
+        self._rejected_count = 0
 
     @property
     def is_learned(self) -> bool:
         return self._learned
+
+    @property
+    def rejected_count(self) -> int:
+        return self._rejected_count
 
     def _compute_alpha(self) -> float:
         if self._variance is None or self._mean is None or self._mean == 0:
@@ -154,6 +159,7 @@ class _AdaptiveBaseline:
                 self._learn_started_at = now
             if self._warmup_reject(value):
                 log.debug("TEA warmup volume reject: value=%.4f", value)
+                self._rejected_count += 1
                 return
             self._samples.append(value)
             self._psum += value

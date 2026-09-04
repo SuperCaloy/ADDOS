@@ -3,27 +3,59 @@ from backend.pipeline.decision_engine import get_stats, get_scan_log, clear_conf
 from backend.pipeline.flow_tracker import tracker
 from backend.transport.zmq_receiver import get_raw_counts
 from backend.models import loader
-from backend.database.db import query
+from backend.database.db import query, execute
 import threading
 import time
+import logging
+
+log = logging.getLogger(__name__)
 
 bp = Blueprint("stats", __name__)
 
-# Ground truth store — populated by topology when attacks start/stop
+# Ground truth store — populated by topology when attacks start/stop.
+# Persisted to DB so it survives backend restarts (fixes RF metrics going to 0
+# when the topology sent notifications before the backend was listening).
 _gt_lock:  threading.Lock = threading.Lock()
-# ip -> (attack_type, started_wall_clock). Entries carry their start time so a
-# TTL can expire them if the stop notification is lost, and a cutoff keeps a
-# batched stop_all race-safe against a newer campaign for the same IP.
 _active_attacks: dict[str, tuple[str, float]] = {}
+_gt_loaded = False  # one-shot flag: load from DB on first access
 
 GT_TTL_S = 3600  # stale-after-crash backstop; must exceed the LONGEST
 # legitimate continuous session (mixed campaigns run 30-45+ min), so a
 # mid-demo purge can never crater accuracy accounting while traffic flows
 
 
+def _load_gt_from_db() -> None:
+    """Load active (non-stopped) ground truth entries from DB into memory."""
+    global _gt_loaded
+    try:
+        rows = query(
+            "SELECT src_ip, attack_type, started_at FROM ground_truth "
+            "WHERE stopped_at IS NULL"
+        )
+        now = time.time()
+        loaded = 0
+        for r in rows:
+            ip      = r["src_ip"]
+            atype   = r["attack_type"]
+            started = float(r["started_at"])
+            # Skip expired entries (TTL check)
+            if now - started > GT_TTL_S:
+                continue
+            _active_attacks[ip] = (atype, started)
+            loaded += 1
+        if loaded:
+            log.info("Ground truth loaded from DB: %d active entries", loaded)
+    except Exception:
+        log.exception("Failed to load ground truth from DB")
+    finally:
+        _gt_loaded = True
+
+
 def get_active_attacks() -> dict[str, str]:
     now = time.time()
     with _gt_lock:
+        if not _gt_loaded:
+            _load_gt_from_db()
         expired = [ip for ip, (_, started) in _active_attacks.items()
                    if now - started > GT_TTL_S]
         for ip in expired:
@@ -33,13 +65,15 @@ def get_active_attacks() -> dict[str, str]:
 
 @bp.get("/api/stats")
 def stats():
-    # decision_engine.get_stats() is the single source of truth
-    # It applies: raw_total floor, OVS drop accounting, normal = total - dropped
-    session = get_stats()
-
-    total    = session["total_packets"]
-    malicious = session["malicious_dropped"]
-    normal   = session["normal_packets"]
+    # Read from in-memory counters for real-time display (no 5s DB flush lag)
+    try:
+        mem_stats = get_stats()
+        total     = mem_stats.get("total_packets", 0)
+        malicious = mem_stats.get("malicious_dropped", 0)
+        normal    = mem_stats.get("normal_packets", 0)
+        active    = mem_stats.get("active_threats", 0)
+    except Exception:
+        total, malicious, normal, active = 0, 0, 0, 0
 
     # Historical latency from mitigation_events (all-time, like other cards)
     try:
@@ -69,7 +103,7 @@ def stats():
         fpr = 0.0
 
     return jsonify({
-        # Summary cards
+        # Summary cards (in-memory, real-time)
         "total_packets":     total,
         "malicious_dropped": malicious,
         "normal_packets":    normal,
@@ -80,14 +114,13 @@ def stats():
         "live_normal":       normal,
 
         # Session metrics
-        "active_threats":    session.get("active_threats", 0),
-        "avg_latency_ms":    session.get("avg_latency_ms", 0),
+        "active_threats":    active,
+        "avg_latency_ms":    hist_detect_ms,
         "fp_rate":           fpr,
 
         # Historical latency (all-time from DB, persistent across sessions)
-        # Fall back to session-based avg_latency_ms if DB has no data yet
-        "detection_ms":      hist_detect_ms or session.get("avg_latency_ms", 0),
-        "mitigation_ms":     hist_mitig_ms or session.get("avg_latency_ms", 0),
+        "detection_ms":      hist_detect_ms,
+        "mitigation_ms":     hist_mitig_ms,
     })
 
 
@@ -179,8 +212,17 @@ def gt_start():
     atype = body.get("attack_type")  # "SYN", "ICMP", "UDP"
     if not ip or not atype:
         return jsonify({"error": "ip and attack_type required"}), 400
+    now = time.time()
     with _gt_lock:
-        _active_attacks[ip] = (atype, time.time())
+        _active_attacks[ip] = (atype, now)
+    # Persist to DB so ground truth survives backend restarts
+    try:
+        execute(
+            "INSERT INTO ground_truth (src_ip, attack_type, started_at) VALUES (?, ?, ?)",
+            (ip, atype, now),
+        )
+    except Exception:
+        log.exception("Failed to persist ground truth start for %s", ip)
     return jsonify({"ok": True})
 
 
@@ -200,6 +242,17 @@ def gt_stop():
         if isinstance(cutoff, (int, float)) and entry[1] > cutoff:
             return jsonify({"ok": True, "ignored": "newer campaign"})
         del _active_attacks[ip]
+    # Mark as stopped in DB
+    try:
+        now = time.time()
+        execute(
+            "UPDATE ground_truth SET stopped_at = ? "
+            "WHERE src_ip = ? AND stopped_at IS NULL "
+            "ORDER BY id DESC LIMIT 1",
+            (now, ip),
+        )
+    except Exception:
+        log.exception("Failed to persist ground truth stop for %s", ip)
     return jsonify({"ok": True})
 
 
@@ -218,6 +271,22 @@ def gt_stop_all():
             victims = list(_active_attacks.keys())
         for ip in victims:
             del _active_attacks[ip]
+    # Mark all stopped entries in DB
+    try:
+        now = time.time()
+        if isinstance(cutoff, (int, float)) and cutoff > 0:
+            execute(
+                "UPDATE ground_truth SET stopped_at = ? "
+                "WHERE stopped_at IS NULL AND started_at <= ?",
+                (now, cutoff),
+            )
+        else:
+            execute(
+                "UPDATE ground_truth SET stopped_at = ? WHERE stopped_at IS NULL",
+                (now,),
+            )
+    except Exception:
+        log.exception("Failed to persist ground truth stop_all")
     # Clear the confidence lock so stale high-confidence classifications
     # from the previous campaign cannot ratchet over fresh RF results.
     clear_confidence_lock()

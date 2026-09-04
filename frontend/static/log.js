@@ -6,6 +6,16 @@
 const _logRows = new Map();
 let logCt = 0;
 
+/* Sort state for audit log */
+let logSortAsc = false;
+
+/* Dynamic audit log count */
+function updateLogCount(delta) {
+  logCt += delta;
+  const el = document.getElementById('log-ct');
+  if (el) el.textContent = logCt;
+}
+
 /* Infinite scroll state */
 let logLoading = false;
 let logAllLoaded = false;
@@ -35,24 +45,19 @@ function addLogRow(ev) {
     <td>${renderPriority(ev.priority      || 'Low')}</td>
     <td>${renderAction(actionLabel)}</td>`;
 
-  /* Same incident -- update in-place with flash */
+  /* Incident key: same IP + event_type = same incident row (update in-place).
+   * After a release, key is deleted so next detection starts a new row. */
   const key = ip + '|' + (ev.event_type || 'transition');
   const isRelease = ev.event_type === 'released' || (ev.event_type === 'manual' && /release/i.test(newAction));
 
   if (_logRows.has(key)) {
     const existing = _logRows.get(key);
-    // Overwrite the existing row for the session, even if action escalates
-    existing.tr.dataset.ip         = ip;
-    existing.tr.innerHTML          = html;
-    existing.tr.style.transition   = 'background 0.3s';
-    existing.tr.style.background   = 'rgba(61,108,255,0.15)';
+    existing.tr.innerHTML = html;
+    existing.tr.style.transition = 'background 0.3s';
+    existing.tr.style.background = 'rgba(61,108,255,0.15)';
     setTimeout(() => { existing.tr.style.background = ''; }, 600);
     existing.action = newAction;
-    
-    /* Released events end an incident; clear key so next attack creates a fresh row */
-    if (isRelease) {
-      _logRows.delete(key);
-    }
+    if (isRelease) _logRows.delete(key);
     return;
   }
 
@@ -60,13 +65,11 @@ function addLogRow(ev) {
   if (MAX_LOG > 0 && logCt >= MAX_LOG) {
     const oldest = tb.querySelector('tr:last-child');
     if (oldest) {
-      const oldIp = oldest.querySelector('.ip');
-      if (oldIp) _logRows.delete(oldIp.textContent.trim() + '|' + (oldest.dataset.eventType || 'transition'));
+      if (oldest.dataset.rowKey) _logRows.delete(oldest.dataset.rowKey);
       oldest.remove();
     }
-  } else {
-    logCt++;
   }
+  logCt++;
   set('log-ct', logCt.toString());
 
   /* Insert new row at top */
@@ -74,6 +77,7 @@ function addLogRow(ev) {
   tr.className  = 'row-in tr-clickable';
   tr.dataset.ip = ip;
   tr.dataset.eventType = ev.event_type || 'transition';
+  tr.dataset.rowKey = key;
   tr.innerHTML  = html;
   
   if (!isRelease) {
@@ -117,6 +121,7 @@ function prependOlderRows(events) {
     tr.className  = 'tr-clickable';
     tr.dataset.ip = ip;
     tr.dataset.eventType = ev.event_type || 'transition';
+    tr.dataset.rowKey = key;
     tr.innerHTML  = html;
 
     if (!isRelease) {
@@ -146,15 +151,39 @@ function connectSSE() {
   es.onerror   = ()  => { es.close(); setTimeout(connectSSE, 3000); };
 }
 
+/* Sort audit log rows by timestamp */
+function sortLogRows(asc) {
+  const tb = document.getElementById('log-body');
+  if (!tb) return;
+  const rows = Array.from(tb.querySelectorAll('tr'));
+  rows.sort((a, b) => {
+    const tsA = a.querySelector('td')?.textContent?.trim() || '';
+    const tsB = b.querySelector('td')?.textContent?.trim() || '';
+    return asc ? tsA.localeCompare(tsB) : tsB.localeCompare(tsA);
+  });
+  rows.forEach(tr => tb.appendChild(tr));
+}
+
+/* Toggle sort on timestamp header click */
+function toggleLogSort() {
+  logSortAsc = !logSortAsc;
+  sortLogRows(logSortAsc);
+  const arrow = document.querySelector('#log-sort-arrow');
+  if (arrow) arrow.textContent = logSortAsc ? '▲' : '▼';
+}
+
 /* Replay last 100 events on page load so log is not empty on first visit */
 async function fetchRecentEvents() {
   try {
     const events = await apiFetch('/api/recent_events?limit=100');
     events.forEach(ev => addLogRow(ev));
+    /* Sort after loading so latest is always on top */
+    sortLogRows(false);
     /* Track oldest timestamp for infinite scroll */
     if (events.length > 0) {
       logOldestTimestamp = events[0].timestamp;
     }
+    set('log-ct', logCt.toString());
   } catch (_) {}
 }
 
@@ -185,6 +214,8 @@ async function loadOlderEvents() {
 
       /* Prepend older rows */
       prependOlderRows(olderEvents);
+      /* Re-sort after adding older rows */
+      sortLogRows(logSortAsc);
 
       /* Update cursor to oldest loaded event */
       logOldestTimestamp = olderEvents[0].timestamp;

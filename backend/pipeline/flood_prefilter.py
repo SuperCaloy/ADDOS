@@ -89,6 +89,7 @@ class FloodPreFilter:
 
         # Session-cumulative counters (never reset until process restart)
         self._session_spike: int = 0
+        self._session_flagged_by_proto: dict[str, int] = {"SYN": 0, "ICMP": 0, "UDP": 0}
 
         # IPs detected on multiple protocols at once
         self._correlated: set[str] = set()
@@ -134,6 +135,7 @@ class FloodPreFilter:
 
             if reason:
                 self._flagged[key] = reason
+                self._session_flagged_by_proto[proto] = self._session_flagged_by_proto.get(proto, 0) + 1
                 if "burst" in reason.lower():
                     self._session_spike += 1
                 log.info("FloodPreFilter tripped: %s  proto=%s  reason=%s", src_ip, proto, reason)

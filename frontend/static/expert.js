@@ -77,13 +77,21 @@ async function fetchExpert() {
     ExpertMetrics.updateStats(data.pipeline, data.tea, data.if, data.state_machine);
     ExpertPipeline.updateNodeGlow(data);
 
-    if (data.if && data.if.recent_scores) {
-      var scores = data.if.recent_scores.map(function(s) { return s.score; });
-      ExpertState.ifHistory = scores.slice(-ExpertState.maxHistory);
+    if (data.if && data.if.recent_scores && data.if.recent_scores.length > 0) {
+      var latest = data.if.recent_scores[0];
+      var lastIf = ExpertState.ifHistory.length > 0 ? ExpertState.ifHistory[ExpertState.ifHistory.length - 1] : -1;
+      if (latest.score !== lastIf) {
+        ExpertState.ifHistory.push(latest.score);
+        if (ExpertState.ifHistory.length > ExpertState.maxHistory) ExpertState.ifHistory = ExpertState.ifHistory.slice(-ExpertState.maxHistory);
+      }
     }
-    if (data.rf && data.rf.recent_classifications) {
-      var confs = data.rf.recent_classifications.map(function(c) { return c.conf; });
-      ExpertState.rfHistory = confs.slice(-ExpertState.maxHistory);
+    if (data.rf && data.rf.recent_classifications && data.rf.recent_classifications.length > 0) {
+      var latestRf = data.rf.recent_classifications[0];
+      var lastRf = ExpertState.rfHistory.length > 0 ? ExpertState.rfHistory[ExpertState.rfHistory.length - 1] : -1;
+      if (latestRf.is_anomaly && latestRf.conf > 0 && latestRf.conf !== lastRf) {
+        ExpertState.rfHistory.push(latestRf.conf);
+        if (ExpertState.rfHistory.length > ExpertState.maxHistory) ExpertState.rfHistory = ExpertState.rfHistory.slice(-ExpertState.maxHistory);
+      }
     }
     ExpertMetrics.updateTrend(ExpertState.ifHistory, ExpertState.rfHistory);
   } catch (e) {
@@ -953,7 +961,7 @@ var ExpertMetrics = {
       '<div class="expert-proto-row">' +
         '<span class="expert-proto-title">First Line of Defense</span>' +
         '<div class="expert-pf-stats">' +
-          '<div class="expert-pf-stat"><span class="expert-pf-label">Spikes Detected</span><span class="expert-pf-val" id="ep-pf-burst" style="color:var(--amber)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">session total</span></div>' +
+          '<div class="expert-pf-stat"><span class="expert-pf-label">Spikes Detected</span><span class="expert-pf-val" id="ep-pf-burst" style="color:var(--amber)">0</span><span class="expert-pf-label" style="margin-top:2px;font-size:9px">total</span></div>' +
         '</div>' +
       '</div>' +
       '<div class="expert-metrics-row">' +
@@ -1124,40 +1132,32 @@ function renderMLPanel(ifData, rfData, teaData) {
   </div>`;
   if (ifWrap) ifWrap.innerHTML = ifHtml;
 
-  // RF Traffic Composition Bar
-  const dist = rfData.class_distribution || { 'SYN Flood': 0, 'ICMP Flood': 0, 'UDP Flood': 0, 'Uncertain': 0 };
-  const total = Object.values(dist).reduce((a, b) => a + b, 0) || 1;
+  // RF Traffic Composition Bar — only SYN/ICMP/UDP (RF's actual decisions among IF-flagged anomalies)
+  const dist = rfData.class_distribution || { 'SYN Flood': 0, 'ICMP Flood': 0, 'UDP Flood': 0 };
+  const attackOnly = (dist['SYN Flood'] || 0) + (dist['ICMP Flood'] || 0) + (dist['UDP Flood'] || 0);
+  const total = attackOnly || 1;
 
   const synPct = (dist['SYN Flood'] || 0) / total * 100;
   const icmpPct = (dist['ICMP Flood'] || 0) / total * 100;
   const udpPct = (dist['UDP Flood'] || 0) / total * 100;
-  const uncertainPct = (dist['Uncertain'] || 0) / total * 100;
-  const normalPct = (dist['Normal'] || 0) / total * 100;
-  const attackTotal = synPct + icmpPct + udpPct + uncertainPct;
 
-  // Frontend-only: when IF says normal, show green Normal regardless of RF's stale Uncertain
-  const showNormalIdle = !isAnom;
+  const hasAttacks = attackOnly > 0;
 
   let rfHtml = `<div class="ml-section">
     <div class="ml-section-title"><span class="accent-dot rf-dot"></span>Random Forest (RF) Composition</div>
     <div class="rf-segmented-bar">
-      ${showNormalIdle ? `
-      <div class="rf-segment normal" style="width:100%">100%</div>
-      ` : attackTotal > 0 ? `
+      ${hasAttacks ? `
       ${synPct > 0 ? `<div class="rf-segment syn"    style="width: ${synPct}%">${synPct > 10 ? synPct.toFixed(0) + '%' : ''}</div>` : ''}
       ${icmpPct > 0 ? `<div class="rf-segment icmp"   style="width: ${icmpPct}%">${icmpPct > 10 ? icmpPct.toFixed(0) + '%' : ''}</div>` : ''}
       ${udpPct > 0 ? `<div class="rf-segment udp"    style="width: ${udpPct}%">${udpPct > 10 ? udpPct.toFixed(0) + '%' : ''}</div>` : ''}
-      ${uncertainPct > 0 ? `<div class="rf-segment uncertain" style="width: ${uncertainPct}%">${uncertainPct > 10 ? uncertainPct.toFixed(0) + '%' : ''}</div>` : ''}
       ` : `
-      <div class="rf-segment normal" style="width:100%">${normalPct > 0 ? 'Normal' : 'No data'}</div>
+      <div class="rf-segment" style="width:100%;background:var(--track-bg);color:var(--sub2)">No anomalies</div>
       `}
     </div>
     <div class="rf-legend">
       <div class="rf-legend-item"><span class="rf-legend-dot" style="background:var(--amber)"></span>SYN</div>
       <div class="rf-legend-item"><span class="rf-legend-dot" style="background:#f472b6"></span>ICMP</div>
       <div class="rf-legend-item"><span class="rf-legend-dot" style="background:#60b4ff"></span>UDP</div>
-      <div class="rf-legend-item"><span class="rf-legend-dot" style="background:var(--sub2,#6b7280)"></span>Uncertain</div>
-      <div class="rf-legend-item"><span class="rf-legend-dot" style="background:#2f9e6e"></span>Normal</div>
     </div>
   </div>`;
   if (rfWrap) rfWrap.innerHTML = rfHtml;
@@ -1183,10 +1183,6 @@ function renderMLPanel(ifData, rfData, teaData) {
       // Single threshold marker position (attack sigma)
       const attackSigma = teaGlobal.dynamic_attack_sigma || 2.5;
       const thresholdPct = Math.min(Math.max((attackSigma + 3) / 6 * 100, 0), 100);
-
-      // Confidence chip
-      const confidence = teaGlobal.confidence || 'LOW';
-      const confidenceClass = confidence === 'HIGH' ? 'conf-high' : confidence === 'MODERATE' ? 'conf-moderate' : 'conf-low';
 
       // Learning progress
       const learningInterval = teaGlobal.learning_interval;
@@ -1232,7 +1228,6 @@ function renderMLPanel(ifData, rfData, teaData) {
               <div class="tea-switch-header">
                 <span class="tea-switch-title">Aggregation</span>
                 <span class="tea-switch-status ${statusClass}">${statusText}</span>
-                <span class="tea-confidence-chip ${confidenceClass}">${confidence}</span>
                 ${learningProgress ? '<span class="tea-learning-progress">' + learningProgress + '</span>' : ''}
               </div>
               <div class="zscore-container">
@@ -1247,7 +1242,6 @@ function renderMLPanel(ifData, rfData, teaData) {
                   </div>
                   <div class="zscore-stats">
                     <span>Z-score: ${maxSizeZ >= 0 ? '+' : ''}${maxSizeZ.toFixed(1)}z</span>
-                    <span>Threshold: ${attackSigma.toFixed(1)}σ</span>
                   </div>
                 </div>
                 <div class="zscore-row" id="tea-int">
@@ -1261,7 +1255,6 @@ function renderMLPanel(ifData, rfData, teaData) {
                   </div>
                   <div class="zscore-stats">
                     <span>Z-score: ${maxIntZ >= 0 ? '+' : ''}${maxIntZ.toFixed(1)}z</span>
-                    <span>Threshold: ${attackSigma.toFixed(1)}σ</span>
                   </div>
                 </div>
               </div>
@@ -1280,10 +1273,10 @@ function renderMLPanel(ifData, rfData, teaData) {
           </div>`;
     } else {
       const statusEl = existingCard.querySelector('.tea-switch-status');
-      const confEl = existingCard.querySelector('.tea-confidence-chip');
+      // confidence chip removed; signal chips handled in updateTEASwitch
       const progEl = existingCard.querySelector('.tea-learning-progress');
       if (statusEl) { statusEl.className = `tea-switch-status ${statusClass}`; statusEl.textContent = statusText; }
-      if (confEl) { confEl.className = `tea-confidence-chip ${confidenceClass}`; confEl.textContent = confidence; }
+      // signal chips are live-updated in updateTEASwitch(); nothing to patch here
       if (progEl) { progEl.textContent = learningProgress; progEl.style.display = learningProgress ? 'inline' : 'none'; }
 
       const sizeRow = document.getElementById('tea-size');
@@ -1370,6 +1363,7 @@ function updateTEASwitch(tea) {
       statusEl.textContent = 'NORMAL';
     }
   }
+
 }
 
 function updateIFBar(inf) {
@@ -1443,27 +1437,24 @@ function renderMitigationPanel(smStates, deception, rg) {
   if (ipListEl) {
     const activeIPs = Object.entries(smStates);
     const renderIPs = activeIPs.slice(0, 20);
-    const currentCount = ipListEl.children.length;
-    if (currentCount !== renderIPs.length || renderIPs.length === 0) {
-      let ipHtml = '';
-      renderIPs.forEach(([ip, s]) => {
-        const now = new Date().toLocaleTimeString('en-US', { hour12: false });
-        const pri = s.priority || 'Low';
-        const priClass = pri === 'Critical' ? 't-crit' : pri === 'High' ? 't-alert' : pri === 'Medium' ? 't-stat' : '';
-        ipHtml += `
-          <div class="terminal-line">
-            <span class="t-time">[${now}]</span>
-            <span class="t-ip">${ip}</span>
-            ${priClass ? `<span class="${priClass}">${pri.toUpperCase()}</span>` : `<span class="t-stat">${pri.toUpperCase()}</span>`}
-            <span class="t-crit">PHASE_${s.phase}</span>
-            <span class="t-stat">IF=${s.if_score.toFixed(4)}</span>
-            <span class="t-stat">PPS=${(s.recent_pps || 0).toFixed(1)}</span>
-            <span class="t-alert">ACT=${s.action.toUpperCase()}</span>
-            ${s.ttl_sec != null ? `<span class="t-stat">TTL=${s.ttl_sec}s</span>` : ''}
-          </div>`;
-      });
-      ipListEl.innerHTML = ipHtml;
-    }
+    let ipHtml = '';
+    renderIPs.forEach(([ip, s]) => {
+      const now = new Date().toLocaleTimeString('en-US', { hour12: false });
+      const pri = s.priority || 'Low';
+      const priClass = pri === 'Critical' ? 't-crit' : pri === 'High' ? 't-alert' : pri === 'Medium' ? 't-stat' : '';
+      ipHtml += `
+        <div class="terminal-line">
+          <span class="t-time">[${now}]</span>
+          <span class="t-ip">${ip}</span>
+          ${priClass ? `<span class="${priClass}">${pri.toUpperCase()}</span>` : `<span class="t-stat">${pri.toUpperCase()}</span>`}
+          <span class="t-crit">PHASE_${s.phase}</span>
+          <span class="t-stat">IF=${s.if_score.toFixed(4)}</span>
+          <span class="t-stat">PPS=${(s.recent_pps || 0).toFixed(1)}</span>
+          <span class="t-alert">ACT=${s.action.toUpperCase()}</span>
+          ${s.ttl_sec != null ? `<span class="t-stat">TTL=${s.ttl_sec}s</span>` : ''}
+        </div>`;
+    });
+    ipListEl.innerHTML = ipHtml;
   }
 }
 
@@ -1545,22 +1536,20 @@ var ExpertModals = {
     // Session summary
     var spikeCount = pfSession.session_spike || 0;
 
-    // Per-protocol breakdown
+    // Per-protocol breakdown — session-cumulative counts (persist across attack lifecycle)
+    var sessionByProto = pfSession.session_flagged_by_proto || {};
     var protoHtml = '';
     ['SYN', 'ICMP', 'UDP'].forEach(function(proto) {
-      var bd = pf[proto] || { flagged_ips: 0, burst: 0, limit: 0 };
-      var hasData = bd.flagged_ips > 0 || bd.burst > 0 || bd.limit > 0;
+      var count = sessionByProto[proto] || 0;
+      var hasData = count > 0;
       protoHtml += '<div style="margin-bottom:12px;padding:12px 16px;background:var(--surface);border:1px solid var(--border);border-radius:10px">' +
         '<div style="display:flex;align-items:center;justify-content:space-between">' +
           '<span style="font-size:16px;font-weight:800;font-family:var(--mono)">' + proto + '</span>' +
-          '<span style="font-size:15px;font-weight:700;color:' + (hasData ? 'var(--red)' : 'var(--green)') + '">' + bd.flagged_ips + ' flagged</span>' +
+          '<span style="font-size:15px;font-weight:700;color:' + (hasData ? 'var(--red)' : 'var(--green)') + '">' + count + ' flagged</span>' +
         '</div>' +
         (hasData ?
-          '<div style="display:flex;gap:10px;margin-top:6px;font-size:13px">' +
-            (bd.burst > 0 ? '<span style="padding:2px 8px;border-radius:5px;background:rgba(245,158,11,0.15);color:var(--amber);font-weight:600">' + bd.burst + ' spike</span>' : '') +
-            (bd.limit > 0 ? '<span style="padding:2px 8px;border-radius:5px;background:rgba(96,180,255,0.15);color:var(--blue);font-weight:600">' + bd.limit + ' over limit</span>' : '') +
-          '</div>'
-        : '<div style="font-size:13px;color:var(--sub2);margin-top:4px">No flagged sources</div>') +
+          '<div style="font-size:13px;color:var(--sub2);margin-top:4px">' + count + ' source' + (count !== 1 ? 's' : '') + ' detected this session</div>'
+        : '<div style="font-size:13px;color:var(--sub2);margin-top:4px">No detections yet</div>') +
       '</div>';
     });
 
@@ -1571,23 +1560,21 @@ var ExpertModals = {
       var proto = entry[0];
       var bd = entry[1];
       if (bd.flagged_ips_list) {
-        bd.flagged_ips_list.forEach(function(ip) {
-          if (!seen[ip]) seen[ip] = { protocols: [], burst: 0, limit: 0 };
-          seen[ip].protocols.push(proto);
-          seen[ip].burst += bd.burst || 0;
-          seen[ip].limit += bd.limit || 0;
+        bd.flagged_ips_list.forEach(function(item) {
+          var ipAddr = typeof item === 'string' ? item : item.ip;
+          if (!seen[ipAddr]) seen[ipAddr] = [];
+          if (seen[ipAddr].indexOf(proto) === -1) seen[ipAddr].push(proto);
         });
       }
     });
-    var entries = Object.entries(seen).sort(function(a, b) { return b[1].protocols.length - a[1].protocols.length; }).slice(0, 10);
+    var entries = Object.entries(seen).slice(0, 20);
     if (entries.length === 0) {
-      flaggedHtml = '<div style="font-size:15px;color:var(--sub2);padding:12px 0">No flagged sources</div>';
+      flaggedHtml = '<div style="font-size:15px;color:var(--sub2);padding:12px 0">No active flagged sources</div>';
     } else {
       entries.forEach(function(e) {
-        var ip = e[0], info = e[1];
-        var reason = info.burst > 0 ? 'spike' : info.limit > 0 ? 'over limit' : 'flagged';
-        var multi = info.protocols.length > 1 ? ' <span style="color:var(--red);font-weight:700">MULTI-PROTOCOL</span>' : '';
-        flaggedHtml += '<div class="expert-modal-signal-row"><span style="font-weight:700;min-width:130px">' + ip + '</span><span style="min-width:80px">' + info.protocols.join('+') + '</span><span>' + reason + '</span>' + multi + '</div>';
+        var ip = e[0], protos = e[1];
+        var multi = protos.length > 1 ? ' <span style="color:var(--red);font-weight:700">MULTI</span>' : '';
+        flaggedHtml += '<div class="expert-modal-signal-row"><span style="font-weight:700;min-width:130px;font-family:var(--mono)">' + ip + '</span><span style="min-width:80px">' + protos.join('+') + '</span>' + multi + '</div>';
       });
     }
 
@@ -1617,7 +1604,7 @@ var ExpertModals = {
     var thrPct = Math.min(Math.max((attackSigma + 3) / 6 * 100, 0), 100);
     var isAttack = !!g.is_attack;
     var locked = !!g._locked;
-    var confidence = g.confidence || 'LOW';
+    var confidence = g.confidence || 'LOW'; // retained for other consumers; TEA UI uses detection signals below
     var learned = !!g.learned;
     var learningInterval = g.learning_interval || 0;
     var learningIntervals = g.learning_intervals || 15;
@@ -1665,10 +1652,17 @@ var ExpertModals = {
         '<div style="font-size:15px;color:var(--sub2);margin-top:12px">Center line = normal baseline. Bars going left = less diversity (flood). Red line = attack threshold.</div>' +
       '</div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Status</div>' +
-        '<div style="display:flex;gap:12px;flex-wrap:wrap">' +
+        '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:14px">' +
           '<span style="padding:6px 14px;border-radius:8px;font-size:15px;font-weight:700;background:' + statusColor + '22;color:' + statusColor + ';border:1px solid ' + statusColor + '44">' + statusText + '</span>' +
-          '<span style="padding:6px 14px;border-radius:8px;font-size:15px;font-weight:700;background:var(--surface);border:1px solid var(--border);color:var(--text)">Confidence: ' + confidence + '</span>' +
         '</div>' +
+        (learned ?
+          '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 24px;margin-bottom:14px">' +
+            '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:14px;color:var(--sub);min-width:100px">Verdict</span><span style="padding:3px 10px;border-radius:6px;font-size:13px;font-weight:700;font-family:var(--mono);background:' + (isAttack ? 'var(--red-g)' : 'var(--green-g)') + ';color:' + (isAttack ? 'var(--red)' : 'var(--green)') + ';border:1px solid ' + (isAttack ? 'rgba(225,29,72,0.3)' : 'rgba(46,204,113,0.3)') + '">' + (isAttack ? 'ATTACK' : 'NORMAL') + '</span></div>' +
+            '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:14px;color:var(--sub);min-width:100px">Size diversity</span><span style="padding:3px 10px;border-radius:6px;font-size:13px;font-weight:700;font-family:var(--mono);background:' + (g.size_surge ? 'var(--amber-g)' : 'var(--track-bg)') + ';color:' + (g.size_surge ? 'var(--amber)' : 'var(--sub2)') + ';border:1px solid ' + (g.size_surge ? 'rgba(245,158,11,0.3)' : 'var(--border2)') + '">' + (g.size_surge ? 'SURGE' : 'OK') + '</span></div>' +
+            '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:14px;color:var(--sub);min-width:100px">Intensity</span><span style="padding:3px 10px;border-radius:6px;font-size:13px;font-weight:700;font-family:var(--mono);background:' + (g.intensity_surge ? 'var(--amber-g)' : 'var(--track-bg)') + ';color:' + (g.intensity_surge ? 'var(--amber)' : 'var(--sub2)') + ';border:1px solid ' + (g.intensity_surge ? 'rgba(245,158,11,0.3)' : 'var(--border2)') + '">' + (g.intensity_surge ? 'SURGE' : 'OK') + '</span></div>' +
+            '<div style="display:flex;align-items:center;gap:8px"><span style="font-size:14px;color:var(--sub);min-width:100px">PPS</span><span style="padding:3px 10px;border-radius:6px;font-size:13px;font-weight:700;font-family:var(--mono);background:' + (g.pps_surge ? 'var(--amber-g)' : 'var(--track-bg)') + ';color:' + (g.pps_surge ? 'var(--amber)' : 'var(--sub2)') + ';border:1px solid ' + (g.pps_surge ? 'rgba(245,158,11,0.3)' : 'var(--border2)') + '">' + (g.pps_surge ? 'SURGE' : 'OK') + '</span></div>' +
+          '</div>'
+        : '') +
         learningHtml +
         shadowHtml +
       '</div>' +
@@ -1695,6 +1689,8 @@ var ExpertModals = {
     var dist = ifData.score_distribution || { normal: 0, anomaly: 0 };
     var total = (dist.normal || 0) + (dist.anomaly || 0);
     var anomPct = total > 0 ? Math.round((dist.anomaly || 0) / total * 100) : 0;
+    var normalCount = dist.normal || 0;
+    var anomalyCount = dist.anomaly || 0;
     var highestScore = 0;
     var isAnom = false;
     if (recentScores.length > 0) {
@@ -1756,19 +1752,14 @@ var ExpertModals = {
       '</div>' +
 
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Score Distribution (last ' + total + ' flows)</div>' +
-        '<div style="display:flex;gap:20px;align-items:center">' +
-          '<div style="flex:1">' +
-            '<div class="expert-modal-gauge-track" style="height:18px">' +
-              '<div class="expert-modal-gauge-fill" style="width:' + (100 - anomPct) + '%;background:var(--green);border-radius:8px 0 0 8px"></div>' +
-              '<div class="expert-modal-gauge-fill" style="width:' + anomPct + '%;background:var(--red);border-radius:0 8px 8px 0"></div>' +
-            '</div>' +
-          '</div>' +
-          '<div style="display:flex;gap:20px;font-size:15px;flex-shrink:0">' +
-            '<span style="color:var(--green);font-weight:700">' + (100 - anomPct) + '% normal</span>' +
-            '<span style="color:var(--red);font-weight:700">' + anomPct + '% anomalous</span>' +
-          '</div>' +
+        '<div class="expert-modal-gauge-track" style="height:20px;display:flex;overflow:hidden">' +
+          '<div class="expert-modal-gauge-fill" style="width:' + (100 - anomPct) + '%;background:var(--green);border-radius:' + (anomPct === 0 ? '8px' : '8px 0 0 8px') + '"></div>' +
+          '<div class="expert-modal-gauge-fill" style="width:' + anomPct + '%;background:var(--red);border-radius:' + ((100 - anomPct) === 0 ? '8px' : '0 8px 8px 0') + '"></div>' +
         '</div>' +
-        '<div style="font-size:14px;color:var(--sub2);margin-top:8px">How many recent flows were classified as normal vs anomalous.</div>' +
+        '<div style="display:flex;gap:24px;font-size:13px;margin-top:14px">' +
+          '<span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block"></span><span style="color:var(--sub2)">' + normalCount + ' normal (' + (100 - anomPct) + '%)</span></span>' +
+          '<span style="display:flex;align-items:center;gap:6px"><span style="width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block"></span><span style="color:var(--sub2)">' + anomalyCount + ' anomalous (' + anomPct + '%)</span></span>' +
+        '</div>' +
       '</div>' +
 
       (sparkHtml ? '<div class="expert-modal-section"><div class="expert-modal-section-title">Recent Scores (last 20)</div>' +
@@ -1790,13 +1781,12 @@ var ExpertModals = {
     var dist = rf.class_distribution || {};
     var gate = rf.conf_gate || 0.6;
     var recent = rf.recent_classifications || [];
-    var total = Object.values(dist).reduce(function(a, b) { return a + b; }, 0) || 1;
+    var attackOnly = (dist['SYN Flood'] || 0) + (dist['ICMP Flood'] || 0) + (dist['UDP Flood'] || 0);
+    var total = attackOnly || 1;
     var segs = [
       { key: 'SYN Flood', color: 'var(--amber)', label: 'SYN' },
       { key: 'ICMP Flood', color: '#f472b6', label: 'ICMP' },
       { key: 'UDP Flood', color: '#60b4ff', label: 'UDP' },
-      { key: 'Uncertain', color: 'var(--sub2)', label: 'Uncertain' },
-      { key: 'Normal', color: 'var(--green)', label: 'Normal' }
     ];
     var barHtml = '';
     var legendHtml = '';
@@ -1816,17 +1806,17 @@ var ExpertModals = {
       '<span style="min-width:110px;font-size:13px;color:var(--sub2);text-transform:uppercase;letter-spacing:.06em">Classification</span>' +
       '<span style="font-size:13px;color:var(--sub2);text-transform:uppercase;letter-spacing:.06em">Confidence</span>' +
     '</div>';
-    var anomalyOnly = recent.filter(function(c) { return c.is_anomaly; });
     var rowsHtml = headerRow;
-    anomalyOnly.slice(0, 8).forEach(function(c) {
-      var confVal = typeof c.conf === 'number' ? (c.conf <= 1 ? Math.round(c.conf * 100) : Math.round(c.conf)) : 0;
+    var classified = recent.filter(function(c) { return c.attack_class && c.attack_class !== 'Uncertain'; });
+    classified.slice(0, 10).forEach(function(c) {
+      var confVal = typeof c.conf === 'number' ? (c.conf <= 1 ? (c.conf * 100).toFixed(2) : Number(c.conf).toFixed(2)) : '0.00';
       rowsHtml += '<div class="expert-modal-signal-row">' +
         '<span style="font-weight:700;min-width:130px">' + c.src_ip + '</span>' +
-        '<span style="min-width:110px">' + (c.attack_class || 'unknown') + '</span>' +
+        '<span style="min-width:110px;color:var(--red)">' + c.attack_class + '</span>' +
         '<span>' + confVal + '%</span>' +
       '</div>';
     });
-    if (anomalyOnly.length === 0) rowsHtml += '<div style="font-size:15px;color:var(--sub2);padding:12px 0">No anomalies detected yet - RF activates when IF flags a flow</div>';
+    if (classified.length === 0) rowsHtml += '<div style="font-size:15px;color:var(--sub2);padding:12px 0">Waiting for first classification...</div>';
 
     el.innerHTML =
       '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Takes suspicious flows from the previous step and figures out what kind of attack it is. Many small decision trees each look at different features and vote on the attack type. The final answer is whichever type got the most votes.</div></div>' +
