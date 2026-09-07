@@ -11,6 +11,20 @@ _tray: list = []
 _thread: threading.Thread | None = None
 _stats = {"batches": 0, "items": 0}
 
+_CALM_WINDOW_MS = 20
+_BALANCED_WINDOW_MS = 100
+_WAVE_WINDOW_MS = 300
+
+
+def _adaptive_window_ms() -> int:
+    from backend.pipeline import worker
+    depth = worker.get_queue_depth()
+    if depth < 10:
+        return _CALM_WINDOW_MS
+    if depth < 50:
+        return _BALANCED_WINDOW_MS
+    return _WAVE_WINDOW_MS
+
 
 def ensure_started() -> None:
     global _thread
@@ -30,8 +44,8 @@ def infer(vec_scaled) -> Future:
 
 
 def _loop() -> None:
-    window_s = RF_BATCH_WINDOW_MS / 1000.0
     while True:
+        window_s = _adaptive_window_ms() / 1000.0
         with _cond:
             while not _tray:
                 _cond.wait()

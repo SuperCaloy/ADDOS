@@ -2,7 +2,7 @@ import math
 import time
 import threading
 import numpy as np
-from collections import deque
+from collections import OrderedDict, deque
 from backend.config import (
     TEA_WINDOW_SIZE,
     TEA_LEARN_MIN_SAMPLES,
@@ -458,6 +458,44 @@ class _IpEntropyProfile:
         return "uncertain"
 
 
+class TeaResultCache:
+    """Thread-safe LRU cache for TEA results, keyed by dpid.
+
+    Stores the most recent TEA result per switch. Workers read from this
+    cache instead of calling TEA.update() inline, decoupling the
+    receiver thread from the 5-15ms TEA computation.
+    """
+
+    def __init__(self, maxsize: int = 50):
+        self._maxsize = maxsize
+        self._lock = threading.Lock()
+        self._cache: OrderedDict[int, dict] = OrderedDict()
+
+    def put(self, dpid: int, result: dict) -> None:
+        with self._lock:
+            if dpid in self._cache:
+                self._cache.move_to_end(dpid)
+            self._cache[dpid] = result
+            if len(self._cache) > self._maxsize:
+                self._cache.popitem(last=False)
+
+    def get(self, dpid: int, current_eval_seq: int) -> dict | None:
+        with self._lock:
+            result = self._cache.get(dpid)
+            if result is None:
+                return None
+            if result.get("eval_seq", 0) < current_eval_seq:
+                return None
+            return result
+
+    def clear(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
+
+tea_cache = TeaResultCache()
+
+
 class EntropyAnalyzer:
 
     def __init__(self):
@@ -539,6 +577,7 @@ class EntropyAnalyzer:
             self._flow_buffer.extend(flows)
 
             if now - self._last_eval_time < self._eval_interval and self._global_state.last_result:
+                tea_cache.put(dpid, self._global_state.last_result)
                 return self._global_state.last_result
 
             self._last_eval_time = now
@@ -553,8 +592,11 @@ class EntropyAnalyzer:
             if prev:
                 res = dict(prev)
                 res["idle"] = True
+                tea_cache.put(dpid, res)
                 return res
-            return self._neutral(0.0, 0.0, learned=False)
+            neutral = self._neutral(0.0, 0.0, learned=False)
+            tea_cache.put(dpid, neutral)
+            return neutral
 
         eps = 1e-9
         sizes = []
@@ -669,6 +711,7 @@ class EntropyAnalyzer:
                 res = self._neutral(size_var, intensity_var, learned=False)
                 res["eval_seq"] = self._eval_seq
                 state.last_result = res
+                tea_cache.put(dpid, res)
                 return res
 
             curr = state.latest()
@@ -761,6 +804,7 @@ class EntropyAnalyzer:
                         res["eval_seq"] = self._eval_seq
                         res["baseline_restart"] = True
                         state.last_result = res
+                        tea_cache.put(dpid, res)
                         return res
 
         size_delta  = curr["size_var"]  - prev["size_var"]
@@ -775,6 +819,7 @@ class EntropyAnalyzer:
             res["eval_seq"] = self._eval_seq
             with self._lock:
                 state.last_result = res
+            tea_cache.put(dpid, res)
             return res
 
         # Degenerate-interval guard: too few flows yield meaningless aggregate
@@ -923,6 +968,8 @@ class EntropyAnalyzer:
 
         with self._lock:
             state.last_result = result
+
+        tea_cache.put(dpid, result)
         return result
 
     def should_submit(self, tea_result: dict, is_flood_prefilter_flagged: bool) -> bool:

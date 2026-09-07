@@ -247,20 +247,31 @@ def _parse_and_route(raw: bytes) -> None:
         if pkt_count_cumulative < 1:
             return
 
-        # Phase 2/3: skip TEA but still score via IF/RF for lightweight tracking.
-        # This prevents frozen if_score during ban, so probation has live evidence.
-        _skip_tea = False
+        # Tiered banned-IP handling (Fix3 - reduce GIL waste):
+        #   phase 0/1 (normal/learning): full pipeline (TEA + IF/RF)
+        #   phase 2   (time ban):        TEA evidence refresh only, no IF/RF.
+        #                                 Worker rechecks every 10s via
+        #                                 time_in_phase_sec() % 10 window.
+        #   phase 3   (blackhole):       traffic dropped at switch; skip
+        #                                 submission entirely (0 GIL cost).
+        _ip_phase = 0
         try:
             from backend.mitigation.state_machine import state_machine as _sm
             _ip_state = _sm.get_state(src_ip)
-            if _ip_state is not None and _ip_state.phase in (2, 3):
-                _skip_tea = True
+            if _ip_state is not None:
+                _ip_phase = _ip_state.phase
         except Exception:
             pass
 
-        if _skip_tea:
-            # TEA-silent path: never forward an attacker-supplied eval_seq,
-            # or a crafted value could dedup-blackout the global feedback.
+        if _ip_phase == 3:
+            # Blackhole: traffic is dropped at the OVS switch.
+            # No flow_stats should arrive, but if they do, skip entirely.
+            return
+
+        if _ip_phase == 2:
+            # Time ban: refresh TEA evidence (pps, confidence) for the
+            # ban-expiry safety net, but skip expensive IF/RF inference.
+            # Worker rechecks every 10s via time_in_phase_sec() % 10.
             flow_stats.pop("tea_eval_seq", None)
             flow_stats["tea_attack_pattern"] = False
             flow_stats["tea_flash_crowd"]    = False

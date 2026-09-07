@@ -1046,7 +1046,7 @@ def start_udp_flood_campaign() -> None:
     info("=" * 55 + "\n\n")
 
 
-def start_mixed_campaign(stagger_s: float = 10.0) -> None:
+def start_mixed_campaign(stagger_s: float = 2.0) -> None:
 # Launch all attackers with sequential types, no two same at a time. Each attacker gets a sequential type (SYN/UDP/ICMP) with balanced distribution. Staggered start prevents simultaneous launches.
     global _mixed_stop_event, _campaign_threads
     _stop_active_workers()
