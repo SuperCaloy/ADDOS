@@ -1088,7 +1088,7 @@ def start_mixed_campaign(stagger_s: float = 2.0) -> None:
             port=random.choice(_ATTACK_TYPE_PORTS[atype])
         )
         delay = schedule[num]
-        info(f"  h{num:<5} ({h.IP()})  {atype:<6} {flags}  +{delay:.1f}s\n")
+        info(f"  h{num:<5} ({h.IP()})  {atype:<6} {flags}\n")
 
         thread = threading.Thread(
             target=_attacker_cycle_worker_randomized,

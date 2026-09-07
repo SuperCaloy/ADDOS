@@ -11,9 +11,9 @@ _tray: list = []
 _thread: threading.Thread | None = None
 _stats = {"batches": 0, "items": 0}
 
-_CALM_WINDOW_MS = 20
-_BALANCED_WINDOW_MS = 100
-_WAVE_WINDOW_MS = 300
+_CALM_WINDOW_MS = 5
+_BALANCED_WINDOW_MS = 10
+_WAVE_WINDOW_MS = 20
 
 
 def _adaptive_window_ms() -> int:
