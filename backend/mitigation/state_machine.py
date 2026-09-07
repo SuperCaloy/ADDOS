@@ -14,15 +14,16 @@ from backend.mitigation.traffic_filter import (
     SINKHOLE_CONFIDENCE_THRESHOLD,
 )
 from backend.mitigation import behavioral
-from backend.config import SIMULATION_MODE
+
 
 log = logging.getLogger(__name__)
 
 # ── Phase 1 observation durations ─────────────────────────────────────────
+# Strategy 2: Shorter quarantine, longer sinkhole (same for simulation & production)
 PHASE1_DURATION_LOW      = 10.0
-PHASE1_DURATION_MEDIUM   = 15.0
-PHASE1_DURATION_HIGH     = 20.0
-PHASE1_DURATION_CRITICAL = 5.0
+PHASE1_DURATION_MEDIUM   = 10.0
+PHASE1_DURATION_HIGH     = 10.0
+PHASE1_DURATION_CRITICAL = 10.0
 
 MIN_QUARANTINE_CONFIDENCE = 0.70
 CONFIDENCE_LOCK_THRESHOLD = 0.80

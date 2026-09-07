@@ -158,6 +158,11 @@ class FatTreeController(app_manager.RyuApp):
         # Rate limiter for OFP error-message logging
         self._last_err_log_ts = 0.0
 
+        # Per-IP meter tracking (ResourceGuard integration)
+        self._installed_meter_ips: dict = {}  # src_ip -> meter_id
+        self._PER_IP_METER_ID_BASE = 1000
+        self._PER_IP_PRIORITY = 75
+
     # ── OpenFlow handshake ─────────────────────────────────────────────────
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
@@ -187,6 +192,9 @@ class FatTreeController(app_manager.RyuApp):
 # The flush above is a non-strict wildcard DELETE, so it also wipes p10 forward rules. Their dedup entries must die with them, or presumed-live swallows packet-ins against an empty table.
         self._recent_installs.pop(dp.id, None)
         self._install_budget.pop(dp.id, None)
+
+        # Clean up any orphaned per-IP meters from previous session
+        self._remove_per_ip_meters(dp, ofp, parser)
 
         # Install table-miss rule at priority=1 — sends unknown flows to controller
         actions = [parser.OFPActionOutput(ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER)]
@@ -704,6 +712,23 @@ class FatTreeController(app_manager.RyuApp):
                       "rate_limit"):
             self._forget_install_all(src_ip)
 
+# Per-IP meter actions (no src_ip needed)
+        if action == "per_ip_meters":
+            ips = cmd.get("ips", [])
+            rate = cmd.get("rate_pps", 100)
+            for dp in self._datapaths.values():
+                ofp = dp.ofproto
+                parser = dp.ofproto_parser
+                self._install_per_ip_meters(dp, ofp, parser, ips, rate_pps=rate)
+            return
+
+        if action == "remove_per_ip_meters":
+            for dp in self._datapaths.values():
+                ofp = dp.ofproto
+                parser = dp.ofproto_parser
+                self._remove_per_ip_meters(dp, ofp, parser)
+            return
+
 # Resolve target switches: ALL switches for every action, mitigation and clear alike.
         target_dps = self._resolve_target_switches(src_ip, action)
 
@@ -998,3 +1023,66 @@ class FatTreeController(app_manager.RyuApp):
             self._tel_sock.send_json(msg, zmq.NOBLOCK)
         except zmq.Again:
             pass
+
+    # ── Per-IP meter management (ResourceGuard integration) ─────────────────
+
+    def _install_per_ip_meters(self, dp, ofp, parser, ip_list: list[str],
+                               rate_pps: int = 100) -> None:
+        for src_ip in ip_list:
+            if src_ip in self._installed_meter_ips:
+                continue
+
+            meter_id = self._PER_IP_METER_ID_BASE + len(self._installed_meter_ips)
+            self._installed_meter_ips[src_ip] = meter_id
+
+            bands = [parser.OFPMeterBandDrop(
+                type_=ofp.OFPMBT_DROP,
+                rate=rate_pps,
+                burst_size=rate_pps // 5,
+            )]
+            dp.send_msg(parser.OFPMeterMod(
+                datapath=dp, command=ofp.OFPMC_ADD,
+                flags=ofp.OFPMF_PKTPS,
+                meter_id=meter_id,
+                bands=bands,
+            ))
+
+            match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
+            inst = [
+                parser.OFPInstructionMeter(meter_id),
+                parser.OFPInstructionActions(
+                    ofp.OFPIT_APPLY_ACTIONS,
+                    [parser.OFPActionOutput(ofp.OFPP_NORMAL)],
+                ),
+            ]
+            dp.send_msg(parser.OFPFlowMod(
+                datapath=dp, priority=self._PER_IP_PRIORITY,
+                idle_timeout=60,
+                hard_timeout=300,
+                match=match, instructions=inst,
+            ))
+
+    def _remove_per_ip_meters(self, dp, ofp, parser) -> None:
+        for src_ip, meter_id in list(self._installed_meter_ips.items()):
+            try:
+                dp.send_msg(parser.OFPMeterMod(
+                    datapath=dp, command=ofp.OFPMC_DELETE,
+                    flags=ofp.OFPMF_PKTPS,
+                    meter_id=meter_id,
+                ))
+            except Exception:
+                pass
+
+            try:
+                match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
+                dp.send_msg(parser.OFPFlowMod(
+                    datapath=dp,
+                    command=ofp.OFPFC_DELETE_STRICT,
+                    priority=self._PER_IP_PRIORITY,
+                    out_port=ofp.OFPP_ANY, out_group=ofp.OFPG_ANY,
+                    match=match,
+                ))
+            except Exception:
+                pass
+
+        self._installed_meter_ips.clear()

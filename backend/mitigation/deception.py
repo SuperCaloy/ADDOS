@@ -16,8 +16,8 @@ log = logging.getLogger(__name__)
 # Silent dummy host, must match h27 in topology.py.
 SINKHOLE_IP = "10.0.0.27"
 
-# Observation window before escalate/release decision
-SINKHOLE_OBSERVE_SECONDS = 30.0
+# Observation window before escalate/release decision (Strategy 2: longer sinkhole)
+SINKHOLE_OBSERVE_SECONDS = 20.0
 
 # PPS above this after observation window → escalate to Phase 1
 SINKHOLE_PPS_ESCALATE_THRESHOLD = 1.0
