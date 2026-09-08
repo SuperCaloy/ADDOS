@@ -28,7 +28,19 @@ N_EDGE           = 8
 N_HOSTS          = 27
 SERVER_IP        = "10.0.0.26"   # h26, victim server
 SINKHOLE_IP      = "10.0.0.27"   # h27, dummy sinkhole host
-ATTACK_PKT_COUNT = 5000
+# Per-type packet counts calibrated to produce comparable bandwidth impact.
+# SYN: tiny packets (~60B) need high count; UDP: large payload (1400B) needs fewer;
+# ICMP: medium payload (512B) needs moderate count.
+ATTACK_PKT_COUNTS = {
+    "SYN":  20000,
+    "UDP":   8000,
+    "ICMP": 12000,
+}
+
+
+def _attack_pkt_count(atype: str) -> int:
+    """Return the configured packet count for a given attack type."""
+    return ATTACK_PKT_COUNTS.get(atype, 10000)
 
 # 15 legit (h1-h15); 10 attackers (h16-h25); h26 server; h27 sinkhole.
 _LEGIT_NUMS    = frozenset(range(1, 16))
@@ -51,9 +63,9 @@ _ALL_VARIANTS = {
     17: ("SYN",  "-S -p 443  --flood",                 0, 0),
     18: ("SYN",  "-S -p 5432 --flood",                 0, 0),
     19: ("SYN",  "-S -p 8080 --flood",                 0, 0),
-    20: ("UDP",  "--udp -p 53    --flood --data 800",  0, 0),
-    21: ("UDP",  "--udp -p 123   --flood --data 800",  0, 0),
-    22: ("UDP",  "--udp -p 1900  --flood --data 800",  0, 0),
+    20: ("UDP",  "--udp -p 53    --flood --data 1400",  0, 0),
+    21: ("UDP",  "--udp -p 123   --flood --data 1400",  0, 0),
+    22: ("UDP",  "--udp -p 1900  --flood --data 1400",  0, 0),
     23: ("ICMP", "--icmp --flood --data 512",          0, 0),
     24: ("ICMP", "--icmp --flood --data 512",          0, 0),
     25: ("ICMP", "--icmp --flood --data 512",          0, 0),
@@ -81,7 +93,7 @@ _ATTACKER_START_DELAYS = {
 # _ALL_VARIANTS: SYN tiny, UDP 1400B, ICMP 512B ping-flood)
 _ATTACK_TYPE_FLAGS = {
     "SYN":  "-S -p {port} --flood",
-    "UDP":  "--udp -p {port} --flood --data 800",
+    "UDP":  "--udp -p {port} --flood --data 1400",
     "ICMP": "--icmp --flood --data 512",
 }
 _ATTACK_TYPE_PORTS = {
@@ -706,7 +718,7 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event,
     ip    = h.IP()
 
     # Wait for the stagger delay, polling stop every 0.1s so short delays
-    # work and stops stay fast.
+    # work and stays fast.
     waited = 0.0
     while waited < delay:
         if stop_event.is_set():
@@ -715,7 +727,8 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event,
         waited += 0.1
 
     atype, _, _, _ = _ATTACKER_VARIANTS.get(num, ("SYN", "", 5000, 0.20))
-    cmd = _hping_cmd(num, SERVER_IP)
+    count = _attack_pkt_count(atype)
+    cmd = _hping_cmd(num, SERVER_IP, count)
 
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
@@ -779,24 +792,27 @@ def launch_attack(sustained: bool = True) -> None:
 
 def launch_syn_flood(attacker_name="h16") -> None:
     attacker = net.get(attacker_name)
-    cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, ATTACK_PKT_COUNT)
-    info(f"*** SYN burst ({ATTACK_PKT_COUNT:,} pkts): {attacker_name} -> {SERVER_IP}\n")
+    count = _attack_pkt_count("SYN")
+    cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, count)
+    info(f"*** SYN burst ({count:,} pkts): {attacker_name} -> {SERVER_IP}\n")
     _notify_attack_start(attacker.IP(), "SYN")
     _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
 
 
 def launch_icmp_flood(attacker_name="h23") -> None:
     attacker = net.get(attacker_name)
-    cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, ATTACK_PKT_COUNT)
-    info(f"*** ICMP burst ({ATTACK_PKT_COUNT:,} pkts): {attacker_name} -> {SERVER_IP}\n")
+    count = _attack_pkt_count("ICMP")
+    cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, count)
+    info(f"*** ICMP burst ({count:,} pkts): {attacker_name} -> {SERVER_IP}\n")
     _notify_attack_start(attacker.IP(), "ICMP")
     _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
 
 
 def launch_udp_flood(attacker_name="h20") -> None:
     attacker = net.get(attacker_name)
-    cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, ATTACK_PKT_COUNT)
-    info(f"*** UDP burst ({ATTACK_PKT_COUNT:,} pkts): {attacker_name} -> {SERVER_IP}\n")
+    count = _attack_pkt_count("UDP")
+    cmd = _hping_cmd(int(attacker_name[1:]), SERVER_IP, count)
+    info(f"*** UDP burst ({count:,} pkts): {attacker_name} -> {SERVER_IP}\n")
     _notify_attack_start(attacker.IP(), "UDP")
     _nsrun(attacker, f"{cmd} > /dev/null 2>&1")
 
@@ -1149,7 +1165,8 @@ def _attacker_cycle_worker_randomized(num: int, stop_event: threading.Event,
         time.sleep(0.1)
         waited += 0.1
 
-    cmd = _hping_cmd_randomized(num, SERVER_IP, atype)
+    count = _attack_pkt_count(atype)
+    cmd = _hping_cmd_randomized(num, SERVER_IP, atype, count)
 
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
@@ -1841,9 +1858,9 @@ def _print_banner(edge_switches: list) -> None:
     info("  COMMANDS\n")
     info("  " + "-" * 65 + "\n")
     info("  ── BURST (finite) ────────────────────────────────────────────\n")
-    info(f"  py launch_syn_flood()                  # {ATTACK_PKT_COUNT:,} pkts, h16\n")
-    info(f"  py launch_icmp_flood()                 # {ATTACK_PKT_COUNT:,} pkts, h23\n")
-    info(f"  py launch_udp_flood()                  # {ATTACK_PKT_COUNT:,} pkts, h20\n\n")
+    info(f"  py launch_syn_flood()                  # {ATTACK_PKT_COUNTS['SYN']:,} pkts, h16\n")
+    info(f"  py launch_icmp_flood()                 # {ATTACK_PKT_COUNTS['ICMP']:,} pkts, h23\n")
+    info(f"  py launch_udp_flood()                  # {ATTACK_PKT_COUNTS['UDP']:,} pkts, h20\n\n")
     info("  ── SUSTAINED (unlimited) ─────────────────────────────────────\n")
     info("  py launch_syn_flood_sustained()        # h16\n")
     info("  py launch_icmp_flood_sustained()       # h23\n")
