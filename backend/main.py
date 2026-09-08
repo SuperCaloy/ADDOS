@@ -107,7 +107,17 @@ def create_app() -> Flask:
 
 
 if __name__ == "__main__":
+    import atexit
     from backend.config import FLASK_HOST, FLASK_PORT
     app = create_app()
+
+    def _shutdown_inference():
+        try:
+            from backend.pipeline.inference_process import inference_process
+            inference_process.stop()
+        except Exception:
+            pass
+    atexit.register(_shutdown_inference)
+
     # threaded=True required for SSE streaming to work alongside other endpoints
     app.run(host=FLASK_HOST, port=FLASK_PORT, threaded=True, debug=False)

@@ -28,7 +28,7 @@ N_EDGE           = 8
 N_HOSTS          = 27
 SERVER_IP        = "10.0.0.26"   # h26, victim server
 SINKHOLE_IP      = "10.0.0.27"   # h27, dummy sinkhole host
-ATTACK_PKT_COUNT = 10000
+ATTACK_PKT_COUNT = 5000
 
 # 15 legit (h1-h15); 10 attackers (h16-h25); h26 server; h27 sinkhole.
 _LEGIT_NUMS    = frozenset(range(1, 16))
@@ -51,9 +51,9 @@ _ALL_VARIANTS = {
     17: ("SYN",  "-S -p 443  --flood",                 0, 0),
     18: ("SYN",  "-S -p 5432 --flood",                 0, 0),
     19: ("SYN",  "-S -p 8080 --flood",                 0, 0),
-    20: ("UDP",  "--udp -p 53    --flood --data 1400",  0, 0),
-    21: ("UDP",  "--udp -p 123   --flood --data 1400",  0, 0),
-    22: ("UDP",  "--udp -p 1900  --flood --data 1400",  0, 0),
+    20: ("UDP",  "--udp -p 53    --flood --data 800",  0, 0),
+    21: ("UDP",  "--udp -p 123   --flood --data 800",  0, 0),
+    22: ("UDP",  "--udp -p 1900  --flood --data 800",  0, 0),
     23: ("ICMP", "--icmp --flood --data 512",          0, 0),
     24: ("ICMP", "--icmp --flood --data 512",          0, 0),
     25: ("ICMP", "--icmp --flood --data 512",          0, 0),
@@ -81,7 +81,7 @@ _ATTACKER_START_DELAYS = {
 # _ALL_VARIANTS: SYN tiny, UDP 1400B, ICMP 512B ping-flood)
 _ATTACK_TYPE_FLAGS = {
     "SYN":  "-S -p {port} --flood",
-    "UDP":  "--udp -p {port} --flood --data 1400",
+    "UDP":  "--udp -p {port} --flood --data 800",
     "ICMP": "--icmp --flood --data 512",
 }
 _ATTACK_TYPE_PORTS = {

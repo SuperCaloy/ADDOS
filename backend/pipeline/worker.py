@@ -11,6 +11,7 @@ from backend.config import (
     IF_BATCH_ENABLED, IF_BATCH_WINDOW_MS,
     DEADLINE_ADMISSION_ENABLED, DEADLINE_ADMISSION_MARGIN_S,
     SVC_EMA_ALPHA, SVC_EMA_FALLBACK_MS,
+    INFERENCE_SUBPROCESS_ENABLED,
 )
 from backend.models import if_pipeline, rf_pipeline, loader
 from backend.pipeline.flow_tracker import tracker
@@ -101,20 +102,40 @@ def get_admission_counters() -> dict:
         return dict(_admission_counters)
 
 
+# Admission control cache
+_admission_cache = {}  # src_ip -> (is_exempt, timestamp)
+_admission_cache_ttl = 0.1  # 100ms
+
+# Batched feedback state
+_feedback_batch_lock = threading.Lock()
+_feedback_batch = []  # list of (is_anomaly, flow_stats)
+_feedback_last_flush = time.monotonic()
+_FEEDBACK_FLUSH_INTERVAL_S = 0.1  # 100ms
+_FEEDBACK_MAX_BATCH = 50
+
+
 # --- Service-time EMA (S7) ---
 # Per-origin EMA over full-inference samples only; skip/cached/low-rate
 # branches never update it, so it tracks real occupancy for deadline admission.
 _svc_ema_lock = threading.Lock()
 _svc_ema = {"full": None}
+_svc_ema_batch = []
+_svc_ema_BATCH_SIZE = 100
 
 
 def _record_svc_ema(ms: float) -> None:
+    """Accumulate service times and update EMA every 100 samples."""
+    _svc_ema_batch.append(ms)
+    if len(_svc_ema_batch) < _svc_ema_BATCH_SIZE:
+        return
+    avg = sum(_svc_ema_batch) / len(_svc_ema_batch)
+    _svc_ema_batch.clear()
     with _svc_ema_lock:
         current = _svc_ema["full"]
         if current is None:
-            _svc_ema["full"] = ms
+            _svc_ema["full"] = avg
         else:
-            _svc_ema["full"] = SVC_EMA_ALPHA * ms + (1 - SVC_EMA_ALPHA) * current
+            _svc_ema["full"] = SVC_EMA_ALPHA * avg + (1 - SVC_EMA_ALPHA) * current
 
 
 def get_svc_ema_ms() -> float:
@@ -133,14 +154,26 @@ def _effective_workers() -> int:
 
 
 def _is_exempt_ip(src_ip: str) -> bool:
-    """Phase >= 2 IPs (Time Ban / Blackhole) bypass admission shedding so
-    probation and ban-expiry keep receiving live evidence (RT-J)."""
+    """Phase >= 2 IPs bypass admission shedding. Cached for 100ms."""
+    now = time.monotonic()
+    cached = _admission_cache.get(src_ip)
+    if cached is not None:
+        is_exempt, ts = cached
+        if now - ts < _admission_cache_ttl:
+            return is_exempt
     try:
         from backend.mitigation.state_machine import state_machine
         ip_state = state_machine._states.get(src_ip)
-        return ip_state is not None and ip_state.phase >= 2
+        is_exempt = ip_state is not None and ip_state.phase >= 2
     except Exception:
-        return False
+        is_exempt = False
+    _admission_cache[src_ip] = (is_exempt, now)
+    # Evict stale entries periodically
+    if len(_admission_cache) > 200:
+        stale = [k for k, (_, ts) in _admission_cache.items() if now - ts > 1.0]
+        for k in stale:
+            del _admission_cache[k]
+    return is_exempt
 
 
 _stage_lock = threading.Lock()
@@ -174,36 +207,52 @@ def _next_seq() -> int:
         return _seq_counter
 
 
-def _emit_feedback(is_anomaly: bool, flow_stats: dict | None) -> None:
-    """Dual TEA feedback emission.
-
-    IF channel: per-flow, streak-only, never locks baselines.
-    TEA channel: attached per-interval verdict, deduped by eval_seq so a
-    cached verdict shared by N flows still counts as one interval.
-    Never raises - feedback must not take down inference.
-    """
+def _flush_feedback_batch_items(items: list) -> None:
+    """Send a list of (is_anomaly, flow_stats) to TEA. Shared by emit and idle-flush."""
     try:
         from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
-        _tea.feedback_if(is_anomaly)
-        fs = flow_stats or {}
-        if "tea_eval_seq" in fs or "tea_attack_pattern" in fs or "tea_confidence" in fs:
-            eval_seq = fs.get("tea_eval_seq")
-            # P6: a malformed seq (bool, non-int, negative) could dedup-out
-            # all later eval intervals; drop the TEA channel, keep IF feedback.
-            seq_ok = (
-                eval_seq is None
-                or (not isinstance(eval_seq, bool)
-                    and isinstance(eval_seq, int)
-                    and eval_seq >= 0)
-            )
-            if seq_ok:
-                _tea.feedback_tea(
-                    bool(fs.get("tea_attack_pattern", False)),
-                    str(fs.get("tea_confidence", "low")),
-                    eval_seq=eval_seq,
+        for is_anom, fs in items:
+            _tea.feedback_if(is_anom)
+            fs = fs or {}
+            if "tea_eval_seq" in fs or "tea_attack_pattern" in fs or "tea_confidence" in fs:
+                eval_seq = fs.get("tea_eval_seq")
+                seq_ok = (
+                    eval_seq is None
+                    or (not isinstance(eval_seq, bool)
+                        and isinstance(eval_seq, int)
+                        and eval_seq >= 0)
                 )
+                if seq_ok:
+                    _tea.feedback_tea(
+                        bool(fs.get("tea_attack_pattern", False)),
+                        str(fs.get("tea_confidence", "low")),
+                        eval_seq=eval_seq,
+                    )
     except Exception:
         pass
+
+
+def _emit_feedback(is_anomaly: bool, flow_stats: dict | None) -> None:
+    """Batched dual TEA feedback emission.
+
+    Accumulates feedback entries and flushes every 100ms or when batch
+    reaches 50 items. Reduces per-item overhead from try/except + import
+    to amortized batch cost.
+    """
+    global _feedback_last_flush
+    with _feedback_batch_lock:
+        _feedback_batch.append((is_anomaly, flow_stats))
+        should_flush = (
+            len(_feedback_batch) >= _FEEDBACK_MAX_BATCH
+            or (time.monotonic() - _feedback_last_flush) >= _FEEDBACK_FLUSH_INTERVAL_S
+        )
+        if not should_flush:
+            return
+        batch = _feedback_batch[:]
+        _feedback_batch.clear()
+        _feedback_last_flush = time.monotonic()
+
+    _flush_feedback_batch_items(batch)
 
 
 def submit(src_ip: str, flow_stats: dict, switch_stats: dict) -> None:
@@ -276,6 +325,61 @@ def _infer_rf(rf_vec):
     except Exception:
         _inc_batch_fallback("rf")
         return rf_pipeline.run_rf_inference(rf_vec)
+
+
+def _submit_and_poll_subprocess(src_ip, if_vec, rf_vec, flow_stats, switch_stats,
+                                is_flagged, enqueued_at, inf_start):
+    """Submit features to inference subprocess and poll for results. Returns True if handled."""
+    from backend.pipeline.inference_process import inference_process
+    if not inference_process.is_ready():
+        return False
+
+    inference_process.submit(
+        src_ip, if_vec, rf_vec,
+        meta={"flow_stats": flow_stats, "switch_stats": switch_stats,
+               "is_flagged": is_flagged, "enqueued_at": enqueued_at}
+    )
+
+    for result in inference_process.poll_results():
+        r_ip, r_if_score, r_is_anomaly, r_class, r_conf, r_meta, r_err = result
+        if r_err:
+            log.debug("Subprocess error for %s: %s", r_ip, r_err)
+            continue
+        try:
+            from backend.pipeline.decision_engine import push_scan_result
+            _rpps = float((r_meta.get("flow_stats") or {}).get("packet_count_per_second", 0.0))
+            push_scan_result(r_ip, _rpps, 0.0,
+                             r_if_score, loader.if_threshold, r_is_anomaly,
+                             r_class, r_conf)
+        except Exception:
+            log.exception("Error pushing subprocess result for %s", r_ip)
+        if not HOTPATH_QUIET:
+            _rconf = f"{r_conf*100:.1f}%" if r_is_anomaly else "—"
+            log.info(
+                "[SCAN] %-15s  pps=%7.1f  IF=%.4f(thr=%.4f)  "
+                "anomaly=%-5s  RF=%-12s  conf=%s",
+                r_ip, _rpps, r_if_score, loader.if_threshold,
+                str(r_is_anomaly), r_class if r_is_anomaly else "—", _rconf
+            )
+        # Fire the result callback so on_result updates dashboard counters,
+        # state machine, writer, and all other downstream consumers.
+        r_flow = (r_meta or {}).get("flow_stats") or {}
+        r_swch = (r_meta or {}).get("switch_stats") or {}
+        r_ea   = (r_meta or {}).get("enqueued_at")
+        if _result_callback:
+            try:
+                _result_callback(
+                    r_ip, r_if_score, r_is_anomaly,
+                    r_class, r_conf,
+                    flow_stats=r_flow, switch_stats=r_swch,
+                    timed_out=False, enqueued_at=r_ea,
+                    origin="full",
+                )
+            except Exception:
+                log.exception("Worker error in subprocess result callback for %s", r_ip)
+
+    _record_worker_latency((time.monotonic() - inf_start) * 1000)
+    return True
 
 
 def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
@@ -413,6 +517,29 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         # None = near-zero duration flow — skip scoring, treat as normal
         if if_vec is None:
             return
+
+        # --- Subprocess path ---
+        if INFERENCE_SUBPROCESS_ENABLED:
+            rf_vec = None
+            try:
+                rf_switch = {}
+                if switch_stats:
+                    rf_switch.update(switch_stats)
+                if flow_stats:
+                    rf_switch.update(flow_stats)
+                _flow_proto = int((flow_stats or {}).get("ip_proto", 0))
+                if _flow_proto:
+                    rf_switch["ip_proto"] = _flow_proto
+                rf_vec = rf_pipeline.extract_rf_features(rf_switch)
+            except Exception:
+                rf_vec = None
+
+            if _submit_and_poll_subprocess(
+                src_ip, if_vec, rf_vec, flow_stats, switch_stats,
+                is_flagged, enqueued_at, _inf_start
+            ):
+                return
+
         if_score, is_anomaly = _infer_if(if_vec)
         _record_worker_latency((time.monotonic() - _inf_start) * 1000)
 
@@ -533,6 +660,18 @@ def _process_item_with_metrics(priority: int, seq: int, src_ip: str,
         _record_service_time((time.monotonic() - _t0) * 1000.0)
 
 
+def _flush_pending_feedback() -> None:
+    """Force-flush any pending feedback batch on worker idle."""
+    global _feedback_last_flush
+    with _feedback_batch_lock:
+        if not _feedback_batch:
+            return
+        batch = _feedback_batch[:]
+        _feedback_batch.clear()
+        _feedback_last_flush = time.monotonic()
+    _flush_feedback_batch_items(batch)
+
+
 def _worker_loop() -> None:
     while True:
         try:
@@ -548,6 +687,7 @@ def _worker_loop() -> None:
             # Periodic cleanup when queue is idle
             tracker.purge_expired_cache()
             flood_filter.purge_stale()
+            _flush_pending_feedback()
 
 
 RYU_PINNED_THREADS = 2  # Ryu pinned to 1 core; assume 2 logical threads reserved
@@ -566,6 +706,12 @@ def start(num_workers: int = None) -> None:
     if num_workers is None:
         num_workers = _default_num_workers()
     _num_workers = num_workers
+
+    # Start inference subprocess if enabled
+    if INFERENCE_SUBPROCESS_ENABLED:
+        from backend.pipeline.inference_process import inference_process
+        inference_process.start()
+
     for i in range(num_workers):
         t = threading.Thread(target=_worker_loop, name=f"pipeline-worker-{i}", daemon=True)
         t.start()

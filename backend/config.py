@@ -47,7 +47,7 @@ ZMQ_COMMAND_ADDR   = "tcp://127.0.0.1:5556"   # Backend PUSH → Ryu PULL
 # --- Pipeline tuning ---
 FLOW_TRACKER_CAP        = 500
 INFERENCE_CACHE_TTL_S   = 1.0
-WORKER_QUEUE_MAXSIZE    = 300
+WORKER_QUEUE_MAXSIZE    = 500
 WORKER_ITEM_TIMEOUT_S   = 3.0
 EXTRACTION_TRIGGER_PKTS = 1
 EXTRACTION_TRIGGER_S    = 0.05
@@ -55,12 +55,12 @@ EXTRACTION_TRIGGER_S    = 0.05
 # --- RF micro-batching (B1) ---
 RF_BATCH_ENABLED  = True
 RF_BATCH_MAX      = 16
-RF_BATCH_WINDOW_MS = 10
+RF_BATCH_WINDOW_MS = 25
 
 # --- IF micro-batching (L1, default off) ---
 IF_BATCH_ENABLED  = True
 IF_BATCH_MAX      = 16
-IF_BATCH_WINDOW_MS = 10
+IF_BATCH_WINDOW_MS = 25
 
 # --- Worker admission control (V2) ---
 ADMISSION_CONTROL_ENABLED = True
@@ -82,6 +82,9 @@ SIMULATION_MODE = True
 
 # --- ML Engine toggle ---
 ML_ENABLED = True
+
+# --- Inference subprocess (bypass GIL for IF+RF) ---
+INFERENCE_SUBPROCESS_ENABLED = True
 
 # --- Flood pre-filter
 FLOOD_SYN_LIMIT     = 100

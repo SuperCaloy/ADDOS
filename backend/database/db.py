@@ -257,6 +257,14 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             drops TEXT, submit_counters TEXT, admission_counters TEXT,
             service TEXT, batch_fallback TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS ground_truth (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            src_ip TEXT NOT NULL,
+            attack_type TEXT NOT NULL,
+            started_at REAL NOT NULL,
+            stopped_at REAL
+        );
     """)
 
 

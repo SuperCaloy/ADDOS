@@ -336,6 +336,7 @@ def test_low_rate_path_feeds_if_feedback(isolated_ea, monkeypatch):
         "flow_duration_sec": 2.5,
     }
     worker._process_item(1, 1, "10.0.0.7", flow, {}, time.monotonic(), 0)
+    worker._flush_pending_feedback()
     assert isolated_ea.if_normal_streak == 1
 
 
@@ -363,6 +364,8 @@ def test_full_inference_path_feeds_both_channels(isolated_ea, monkeypatch):
         "tea_confidence": "moderate",
     }
     worker._process_item(1, 1, "10.0.0.7", flow, {}, time.monotonic(), 0)
+    # Flush batched feedback so the streak updates immediately in tests.
+    worker._flush_pending_feedback()
     # IF channel: scored normal → streak up, never locks.
     assert isolated_ea.if_normal_streak == 1
     assert isolated_ea.is_locked is False
