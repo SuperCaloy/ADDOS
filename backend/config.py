@@ -55,12 +55,12 @@ EXTRACTION_TRIGGER_S    = 0.05
 # --- RF micro-batching (B1) ---
 RF_BATCH_ENABLED  = True
 RF_BATCH_MAX      = 16
-RF_BATCH_WINDOW_MS = 25
+RF_BATCH_WINDOW_MS = 10
 
 # --- IF micro-batching (L1, default off) ---
 IF_BATCH_ENABLED  = True
 IF_BATCH_MAX      = 16
-IF_BATCH_WINDOW_MS = 25
+IF_BATCH_WINDOW_MS = 10
 
 # --- Worker admission control (V2) ---
 ADMISSION_CONTROL_ENABLED = True
@@ -84,7 +84,7 @@ SIMULATION_MODE = True
 ML_ENABLED = True
 
 # --- Inference subprocess (bypass GIL for IF+RF) ---
-INFERENCE_SUBPROCESS_ENABLED = True
+INFERENCE_SUBPROCESS_ENABLED = False
 
 # --- Flood pre-filter
 FLOOD_SYN_LIMIT     = 100
