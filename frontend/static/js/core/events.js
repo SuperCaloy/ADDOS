@@ -1,13 +1,15 @@
-/* events.js: Unified Server-Sent Events (SSE) EventBus
- * Maintains a single EventSource connection to /api/events and dispatches
- * typed payloads to subscribed listeners, eliminating duplicate network streams. */
+// Unified Server-Sent Events (SSE) EventBus managing the live telemetry stream.
+// Maintains a single EventSource connection and dispatches typed payloads to avoid redundant HTTP requests.
 
 (function () {
+  // Internal connection handle, reconnection timer, and topic subscriber map.
   let _es = null;
   let _reconnectTimer = null;
   const _listeners = new Map();
   let _status = 'disconnected';
 
+  // Registers an event listener callback for a designated topic channel.
+  // Enables modular UI components to observe streaming telemetry independently.
   function on(type, callback) {
     if (!_listeners.has(type)) {
       _listeners.set(type, new Set());
@@ -15,12 +17,16 @@
     _listeners.get(type).add(callback);
   }
 
+  // Unregisters an existing event listener callback from a topic channel.
+  // Cleans up event bindings when components or visualizers are torn down.
   function off(type, callback) {
     if (_listeners.has(type)) {
       _listeners.get(type).delete(callback);
     }
   }
 
+  // Dispatches an event payload to all callbacks subscribed to the specified topic.
+  // Isolates callback execution inside try-catch blocks to prevent broken subscribers from halting the bus.
   function emit(type, data) {
     if (_listeners.has(type)) {
       _listeners.get(type).forEach(cb => {
@@ -29,6 +35,8 @@
     }
   }
 
+  // Establishes a persistent Server-Sent Events stream to the backend /api/events endpoint.
+  // Parses incoming JSON payloads, demultiplexes expert telemetry from audit events, and schedules reconnection on error.
   function connect() {
     if (_es) return;
     const apiUrl = window.API_URL || (typeof API !== 'undefined' ? API : '');
@@ -70,6 +78,8 @@
     };
   }
 
+  // Closes the active EventSource stream and notifies subscribers of the disconnected state.
+  // Halts background network consumption when live streaming is no longer required.
   function disconnect() {
     if (_es) {
       _es.close();
@@ -88,3 +98,4 @@
     getStatus: () => _status,
   };
 })();
+

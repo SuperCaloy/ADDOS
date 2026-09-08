@@ -1,16 +1,20 @@
-/* calendar.js: Custom date-picker calendar widget for PDF report generation */
+// Interactive date-picker calendar widget for forensic PDF report generation.
+// Visualizes dates with recorded traffic logs and enforces start and end boundary rules.
 
+// Set of database dates with historical logs and active month-selection state for date pickers.
 let _calDates = new Set();
 let _calState = {
   start: { year: 0, month: 0, selected: '' },
   end:   { year: 0, month: 0, selected: '' },
 };
 
+// Converts a JavaScript Date object into an ISO YYYY-MM-DD date string.
 function _isoDate(dt) {
   return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
 }
 
-/* Render calendar grid for 'start' or 'end' picker */
+// Generates the monthly calendar grid indicating available data days, disabled future dates, and selection states.
+// Injects button elements with accessibility labels for each day of the rendered month.
 function _renderCal(which) {
   const s      = _calState[which];
   const today  = new Date();
@@ -51,6 +55,7 @@ function _renderCal(which) {
   grid.innerHTML = html;
 }
 
+// Navigates the month of the selected calendar picker forward or backward across year boundaries.
 function calNav(which, dir) {
   const s = _calState[which];
   s.month += dir;
@@ -60,6 +65,7 @@ function calNav(which, dir) {
   if (window.event) window.event.stopPropagation();
 }
 
+// Updates the chosen date string for a picker, synchronizes its input field, and closes the popup.
 function calSelect(which, ds) {
   _calState[which].selected = ds;
   document.getElementById(`r-${which}`).value = ds;
@@ -67,6 +73,7 @@ function calSelect(which, ds) {
   document.getElementById(`cal-${which}-popup`).classList.remove('open');
 }
 
+// Toggles visibility of the calendar popup for start or end date fields, closing the other picker.
 function toggleCal(which) {
   const popup = document.getElementById(`cal-${which}-popup`);
   const other = which === 'start' ? 'end' : 'start';
@@ -76,13 +83,13 @@ function toggleCal(which) {
   if (window.event) window.event.stopPropagation();
 }
 
-/* Close calendar popups on outside click */
+// Closes all open calendar dropdown popups when the operator clicks outside picker boundaries.
 document.addEventListener('click', () => {
   document.getElementById('cal-start-popup')?.classList.remove('open');
   document.getElementById('cal-end-popup')?.classList.remove('open');
 });
 
-/* Validate typed YYYY-MM-DD and sync calendar state */
+// Validates manually typed ISO date strings and updates corresponding calendar state if valid.
 function onDateType(which, val) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(val)) {
     const dt = new Date(val + 'T00:00:00');
@@ -95,6 +102,7 @@ function onDateType(which, val) {
   }
 }
 
+// Queries the backend API for dates containing historical traffic logs to highlight in the calendar grid.
 async function _loadHistoryDates() {
   try {
     const r = await apiFetch('/api/history_dates');
@@ -102,6 +110,7 @@ async function _loadHistoryDates() {
   } catch (_) { _calDates = new Set(); }
 }
 
+// Initializes calendar state objects and renders grid views for start and end date pickers.
 function _initCals(startS, endS) {
   const s = new Date(startS + 'T00:00:00');
   const e = new Date(endS   + 'T00:00:00');
@@ -111,7 +120,8 @@ function _initCals(startS, endS) {
   _renderCal('end');
 }
 
-/* Open modal: reset fields, load history dates, init calendars */
+// Opens the PDF report modal dialog initialized to a default 7-day retrospective window.
+// Queries historical date availability and renders both calendar pickers.
 async function openModal() {
   const today   = new Date();
   const endS    = _isoDate(today);
@@ -126,3 +136,4 @@ async function openModal() {
   await _loadHistoryDates();
   _initCals(startS, endS);
 }
+

@@ -1,8 +1,8 @@
-/* store.js: Centralized frontend state store
- * Encapsulates cross-module shared state (IF threshold, chart range, theme)
- * with explicit getters, setters, and event notifications. */
+// Centralized frontend reactive state store with publish-subscribe notification channels.
+// Decouples shared state management across telemetry cards, charts, theme toggles, and expert view.
 
 (function () {
+  // Reactive property dictionary and topic subscriber registry.
   const _state = {
     ifThreshold: 0,
     chartRange: 'Live',
@@ -12,12 +12,16 @@
 
   const _subscribers = new Map();
 
+  // Binds an observer callback to a designated state key, returning an unsubscribe cleanup closure.
+  // Allows modular UI controllers to react to state changes without direct cross-module coupling.
   function subscribe(key, callback) {
     if (!_subscribers.has(key)) _subscribers.set(key, new Set());
     _subscribers.get(key).add(callback);
     return () => _subscribers.get(key).delete(callback);
   }
 
+  // Dispatches updated property values to all callbacks registered for that key.
+  // Safeguards the notification loop by catching and logging individual subscriber errors.
   function _notify(key, value) {
     if (_subscribers.has(key)) {
       _subscribers.get(key).forEach(cb => {
@@ -26,6 +30,7 @@
     }
   }
 
+  // Public accessors and mutators synchronizing state values, storage persistence, and subscriber updates.
   const Store = {
     getIfThreshold: () => _state.ifThreshold,
     setIfThreshold: (val) => {
@@ -60,3 +65,4 @@
 
   window.Store = Store;
 })();
+

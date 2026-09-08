@@ -1,6 +1,12 @@
-/* expert-canvas.js: Interactive HTML5 Canvas visualization for Expert Mode
- * Renders topology nodes, bezier data paths, particle animations, and live glows. */
+/**
+ * Interactive HTML5 Canvas visualization engine for Expert Mode.
+ * Renders topology nodes, bezier data paths, particle animations, and live activity glows.
+ */
 
+/**
+ * Pre-renders a radial glow sprite onto an off-screen canvas to optimize rendering performance.
+ * Avoids expensive per-frame shadowBlur calculations during the main animation loop.
+ */
 function _createGlowSprite(size, radius, color, shadowBlur, fillStyle) {
   var c = document.createElement('canvas');
   c.width = size;
@@ -15,6 +21,7 @@ function _createGlowSprite(size, radius, color, shadowBlur, fillStyle) {
   return c;
 }
 
+// Interactive pipeline topology manager and animation state coordinator.
 var ExpertPipeline = {
   canvas: null,
   ctx: null,
@@ -59,6 +66,10 @@ var ExpertPipeline = {
 
   nodeGlow: {},
 
+  /**
+   * Initializes canvas contexts, pre-renders glow sprites, and sets up observers and listeners.
+   * Starts the continuous rendering cycle and binds click events for stage selection.
+   */
   init: function() {
     this.canvas = document.getElementById('expert-pipeline-canvas');
     if (!this.canvas) return;
@@ -128,12 +139,20 @@ var ExpertPipeline = {
     this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
   },
 
+  /**
+   * Resizes the canvas buffer to match the parent container dimensions.
+   * Guarantees a minimum height while maintaining responsive scaling ratios.
+   */
   resize: function() {
     if (!this.container || !this.canvas) return;
     this.canvas.width = this.container.clientWidth;
     this.canvas.height = Math.max(380, this.container.clientHeight);
   },
 
+  /**
+   * Maps virtual design coordinate space to actual rendered canvas pixel coordinates.
+   * Ensures topology layout scales proportionally across varying display resolutions.
+   */
   _coords: function(nx, ny) {
     return {
       x: nx * (this.canvas.width / this.VIRTUAL_W),
@@ -141,6 +160,10 @@ var ExpertPipeline = {
     };
   },
 
+  /**
+   * Spawns forward data flow particles reflecting real-time inference telemetry.
+   * Staggers animation delays across pipeline stages to visualize progressive analysis.
+   */
   spawnParticleFromEvent: function(inferencePayload) {
     if (this.reducedMotion) return;
     var isAnomaly = inferencePayload.is_anomaly;
@@ -175,11 +198,19 @@ var ExpertPipeline = {
     }.bind(this));
   },
 
+  /**
+   * Reserved feedback particle spawn handler for future inference hooks.
+   * Normal telemetry avoids feedback particles, which are reserved for mitigation actions.
+   */
   spawnFeedbackParticle: function() {
     // Normal inference does not emit decisions to Ryu.
     // Decisions are emitted strictly on mitigation actions via spawnEnforceParticle.
   },
 
+  /**
+   * Spawns animated feedback particles representing mitigation enforcement commands.
+   * Directs particles from the Decision Engine to the Ryu controller along a curved path.
+   */
   spawnEnforceParticle: function(action) {
     if (this.reducedMotion) return;
     this.lastEnforceAction = action || 'block';
@@ -194,6 +225,10 @@ var ExpertPipeline = {
     });
   },
 
+  /**
+   * Spawns animated feedback particles representing traffic redirection to the deception sinkhole.
+   * Displays distinct purple particles traversing from the Decision Engine to the Deception node.
+   */
   spawnRedirectParticle: function() {
     if (this.reducedMotion) return;
     var redirectPath = this.paths.find(function(p) { return p.kind === 'redirect'; });
@@ -206,6 +241,10 @@ var ExpertPipeline = {
     });
   },
 
+  /**
+   * Spawns randomized ambient particles across forward pipeline stages to simulate ongoing baseline traffic.
+   * Caps maximum active particles to prevent visual clutter and maintain high rendering frame rates.
+   */
   spawnAmbientParticle: function() {
     if (this.reducedMotion || this.particles.length > 40) return;
     var forwardPaths = this.paths.filter(function(p) { return !p.feedback && p.kind !== 'redirect'; });
@@ -221,6 +260,10 @@ var ExpertPipeline = {
     });
   },
 
+  /**
+   * Calculates node activity glow intensities based on current system polling telemetry.
+   * Adjusts visual highlight brightness to reflect active queue sizes, anomalies, and resource tiers.
+   */
   updateNodeGlow: function(pollData) {
     var flagged = (pollData.pipeline && pollData.pipeline.flood_prefilter_flagged) || 0;
     var ifAnomalies = (pollData.if && pollData.if.score_distribution) ? pollData.if.score_distribution.anomaly || 0 : 0;
@@ -253,8 +296,10 @@ var ExpertPipeline = {
     }
   },
 
-  /* -- Private Rendering Subroutines (Decomposed drawScene) ----------------- */
-
+  /**
+   * Draws connecting lines, bezier feedback curves, arrows, and path labels between stages.
+   * Applies dashed formatting and distinct stroke colors according to path classifications.
+   */
   _drawPaths: function(ctx, scaleY) {
     this.paths.forEach(function(path) {
       var start = this._coords(this.nodes[path.from].x, this.nodes[path.from].y);
@@ -367,6 +412,10 @@ var ExpertPipeline = {
     }.bind(this));
   },
 
+  /**
+   * Renders active forward and feedback particles along their paths with motion trail effects.
+   * Updates particle completion progress and removes expired particles from the tracking buffer.
+   */
   _drawParticles: function(ctx, currentTime, scaleY) {
     if (this.particles.length > 40) this.particles.splice(0, this.particles.length - 40);
     for (var i = this.particles.length - 1; i >= 0; i--) {
@@ -436,6 +485,10 @@ var ExpertPipeline = {
     }
   },
 
+  /**
+   * Draws node circles, sequence numbers, labels, selection rings, and status indicators.
+   * Adjusts stroke colors and shadow effects dynamically according to theme and selection state.
+   */
   _drawNodes: function(ctx, pulseAlpha) {
     for (var key in this.nodes) {
       var node = this.nodes[key];
@@ -516,6 +569,10 @@ var ExpertPipeline = {
     }
   },
 
+  /**
+   * Renders the visual legend panel indicating traffic state color definitions.
+   * Positions a translucent pill box containing color badges and descriptive labels.
+   */
   _drawLegend: function(ctx) {
     var legendX = this.canvas.width - 196;
     var legendY = 12;
@@ -552,6 +609,10 @@ var ExpertPipeline = {
     });
   },
 
+  /**
+   * Coordinates canvas scene rendering on each animation frame.
+   * Throttles execution rate, handles offscreen pausing, and invokes individual layer renderers.
+   */
   drawScene: function(timestamp) {
     if (!timestamp) timestamp = performance.now();
     this.isLightMode = document.body.classList.contains('light');
@@ -582,6 +643,10 @@ var ExpertPipeline = {
     this._animFrame = requestAnimationFrame(this.drawScene.bind(this));
   },
 
+  /**
+   * Halts all canvas animation loops and unbinds registered DOM event listeners.
+   * Clears internal particle arrays and releases observer resources.
+   */
   stop: function() {
     if (this._animFrame) {
       cancelAnimationFrame(this._animFrame);

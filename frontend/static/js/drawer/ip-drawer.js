@@ -1,12 +1,18 @@
-/* ip-drawer.js: Threat Analysis IP drawer controller and renderer */
+/**
+ * Threat Analysis IP drawer controller and telemetry visualization engine.
+ * Manages modal visibility, real-time polling, and ML diagnostic rendering for inspected IP addresses.
+ */
 
-// -- State ---------------------------------------------------------------------
+// Drawer state tracking active IP, live polling timer, and return focus element.
 let _drawerCurrentIp = null;
 let _drawerLiveTimer = null;
 let _drawerIsLive = false;
 let _drawerReturnFocus = null;
 
-// -- Focus Trap ----------------------------------------------------------------
+/**
+ * Traps keyboard Tab focus inside the drawer element to preserve modal accessibility.
+ * Cycles focus between the first and last focusable elements when the drawer is open.
+ */
 function _initDrawerFocusTrap() {
   const drawer = document.getElementById('ip-drawer');
   if (!drawer) return;
@@ -26,13 +32,17 @@ function _initDrawerFocusTrap() {
   });
 }
 
+// Initializes the keyboard focus trap when the DOM content has fully loaded.
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', _initDrawerFocusTrap);
 } else {
   _initDrawerFocusTrap();
 }
 
-// -- Public API ----------------------------------------------------------------
+/**
+ * Opens the threat detail drawer for an IP address and displays its telemetry.
+ * Captures currently focused element for restoration, updates headers, and starts data fetching.
+ */
 function openIpDrawer(ip) {
   if (!ip || ip === '--') return;
   _drawerReturnFocus = document.activeElement;
@@ -61,6 +71,10 @@ function openIpDrawer(ip) {
   _fetchIpDetail(ip);
 }
 
+/**
+ * Closes the threat detail drawer and restores focus to the previously active element.
+ * Halts live polling loops and resets modal styling and accessibility attributes.
+ */
 function closeIpDrawer() {
   _stopLivePolling();
   const returnTo = _drawerReturnFocus;
@@ -80,6 +94,7 @@ function closeIpDrawer() {
   if (returnTo && typeof returnTo.focus === 'function') returnTo.focus();
 }
 
+// Dismisses the threat detail drawer when the Escape key is pressed.
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _drawerCurrentIp) closeIpDrawer();
 });
@@ -87,8 +102,10 @@ document.addEventListener('keydown', e => {
 window.openIpDrawer = openIpDrawer;
 window.closeIpDrawer = closeIpDrawer;
 
-// -- Live polling --------------------------------------------------------------
-
+/**
+ * Starts periodic polling for live telemetry on active flows.
+ * Queries the live endpoint every two seconds and stops if the IP selection changes or flow terminates.
+ */
 function _startLivePolling(ip) {
   _stopLivePolling();
   _drawerIsLive = true;
@@ -113,13 +130,19 @@ function _startLivePolling(ip) {
   }, 2000);
 }
 
+/**
+ * Clears the active polling interval timer and resets live tracking state.
+ * Prevents redundant background network requests when the drawer is inactive.
+ */
 function _stopLivePolling() {
   if (_drawerLiveTimer) { clearInterval(_drawerLiveTimer); _drawerLiveTimer = null; }
   _drawerIsLive = false;
 }
 
-// -- Fetch & render ------------------------------------------------------------
-
+/**
+ * Retrieves comprehensive threat telemetry and ML diagnostics for a target IP.
+ * Populates drawer sections upon success or falls back to quarantine table cache on failure.
+ */
 async function _fetchIpDetail(ip) {
   try {
     const apiUrl = window.API_URL || '';
@@ -170,8 +193,10 @@ async function _fetchIpDetail(ip) {
   }
 }
 
-// -- Badge helpers -------------------------------------------------------------
-
+/**
+ * Updates the drawer status badge to indicate whether traffic is live or historical.
+ * Injects animated pulse badges for live connections or subdued tags for historical entries.
+ */
 function _setBadge(isLive) {
   const el = document.getElementById('idd-status-badge');
   if (!el) return;
@@ -196,8 +221,10 @@ function _setBadge(isLive) {
   }
 }
 
-// -- Live section partial update -----------------------------------------------
-
+/**
+ * Updates dynamic telemetry and pipeline components during live polling updates.
+ * Avoids full container re-rendering by patching only high-frequency UI components.
+ */
 function _updateLiveSection(data) {
   const f = data.features || {};
   const ml = data.ml || {};
@@ -208,8 +235,10 @@ function _updateLiveSection(data) {
   _renderPipeline(data, ml, st, ml.is_anomaly);
 }
 
-// -- Full render ---------------------------------------------------------------
-
+/**
+ * Renders complete flow diagnostics, ML evaluation bars, and mitigation pipeline into the drawer.
+ * Updates verdict banners, descriptions, and triggers expert trace rendering when enabled.
+ */
 function _renderIpDetail(d) {
   const f = d.features || {};
   const ml = d.ml || {};
@@ -256,7 +285,10 @@ function _renderIpDetail(d) {
   _iddShow('content');
 }
 
-/* Main entry: renders both IF and RF signal rows */
+/**
+ * Generates feature signal comparison cards for Isolation Forest and Random Forest inputs.
+ * Maps raw flow statistics against configured thresholds for the identified attack class.
+ */
 function _renderFeatureSignals(f, attackClass) {
   const pktCount = f.pkt_count || 0;
   const bytCount = f.byte_count || 0;
@@ -291,8 +323,10 @@ function _renderFeatureSignals(f, attackClass) {
   }
 }
 
-// -- ML evaluation bars --------------------------------------------------------
-
+/**
+ * Renders visual score meters for Isolation Forest anomaly score and Random Forest confidence.
+ * Highlights whether model outputs satisfy configured detection thresholds or classification gates.
+ */
 function _renderMlBars(ml, th) {
   const ifScore = ml.if_score || 0;
   const rfConf = ml.confidence || 0;
@@ -348,8 +382,10 @@ function _renderMlBars(ml, th) {
     </div>`;
 }
 
-// -- Mitigation pipeline -------------------------------------------------------
-
+/**
+ * Resolves the CSS variable token associated with a given mitigation action keyword.
+ * Ensures consistent color coding across quarantine, ban, rate-limit, and normal states.
+ */
 function _actionColor(a) {
   if (/blackhole|block/i.test(a)) return 'var(--red,#ff3d5a)';
   if (/ban/i.test(a)) return 'var(--amber,#ffb02e)';
@@ -358,6 +394,10 @@ function _actionColor(a) {
   return 'var(--sub2,#6b7190)';
 }
 
+/**
+ * Renders the multi-stage traffic processing pipeline from SDN ingress to mitigation enforcement.
+ * Highlights current phase progression and displays timestamps for executed actions.
+ */
 function _renderPipeline(d, ml, st, isAnomaly) {
   const phaseHistory = d.phase_history || [];
   const pipelineEl = document.getElementById('idd-pipeline');
@@ -440,8 +480,10 @@ function _renderPipeline(d, ml, st, isAnomaly) {
     </div>`;
 }
 
-// -- State pills ---------------------------------------------------------------
-
+/**
+ * Renders metadata pill badges detailing IP history, offence counts, reputation, and timestamps.
+ * Provides quick visual indicators for forensic tracking in the drawer header area.
+ */
 function _renderHistoryPills(st) {
   const hist = document.getElementById('idd-history');
   if (!hist) return;
@@ -476,8 +518,10 @@ function _renderHistoryPills(st) {
     </div>`).join('');
 }
 
-// -- Tooltip -------------------------------------------------------------------
-
+/**
+ * Displays a contextual tooltip at the current mouse event position.
+ * Positions and displays the floating element with the provided explanation text.
+ */
 function _iddShowTip(e, text) {
   if (!text) return;
   const tip = document.getElementById('idd-tooltip');
@@ -487,6 +531,10 @@ function _iddShowTip(e, text) {
   _iddMoveTip(e);
 }
 
+/**
+ * Anchors a tooltip element directly below a triggering DOM element.
+ * Computes bounding rectangle coordinates to keep the tooltip within viewport bounds.
+ */
 function _iddShowTipEl(el) {
   const text = el.dataset.tip;
   if (!text) return;
@@ -501,6 +549,10 @@ function _iddShowTipEl(el) {
   tip.style.top = Math.max(4, rect.bottom + 6) + 'px';
 }
 
+/**
+ * Updates the screen position of an active tooltip relative to pointer movements.
+ * Adjusts horizontal and vertical coordinates while preventing viewport overflow.
+ */
 function _iddMoveTip(e) {
   const tip = document.getElementById('idd-tooltip');
   if (!tip || tip.style.display === 'none') return;
@@ -511,11 +563,16 @@ function _iddMoveTip(e) {
   tip.style.top = Math.max(4, y) + 'px';
 }
 
+/**
+ * Hides the active floating tooltip element.
+ * Clears display styling when hovering ends.
+ */
 function _iddHideTip() {
   const tip = document.getElementById('idd-tooltip');
   if (tip) tip.style.display = 'none';
 }
 
+// Tracks cursor movement across the window to adjust active tooltip positions dynamically.
 document.addEventListener('mousemove', e => {
   const tip = document.getElementById('idd-tooltip');
   if (tip && tip.style.display !== 'none') _iddMoveTip(e);
@@ -526,8 +583,10 @@ window._iddShowTipEl = _iddShowTipEl;
 window._iddMoveTip = _iddMoveTip;
 window._iddHideTip = _iddHideTip;
 
-// -- Helpers -------------------------------------------------------------------
-
+/**
+ * Toggles visibility between the loading state, error alert, and main content views.
+ * Ensures only the active container state is displayed within the drawer body.
+ */
 function _iddShow(which) {
   const map = { loading: 'flex', error: 'flex', content: 'block' };
   ['loading', 'error', 'content'].forEach(s => {
@@ -536,8 +595,10 @@ function _iddShow(which) {
   });
 }
 
-// -- Expert Mode: Algorithm Trace ----------------------------------------------
-
+/**
+ * Renders detailed algorithm inspection traces and feature lists for expert analysis mode.
+ * Formats all 16 Isolation Forest and 15 Random Forest features along with decision reasoning logs.
+ */
 function _renderExpertTrace(d, ml, st, f, th) {
   const expertSection = document.getElementById('idd-expert-section');
   const expertContent = document.getElementById('idd-expert-content');

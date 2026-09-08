@@ -1,11 +1,14 @@
-/* drawer-signals.js: Feature signal normalization, thresholds, and card renderers */
+// Feature signal evaluation rules, numeric normalization, and interactive metric card renderers.
+// Powers visual analysis and telemetry breakdown in the threat analysis drawer.
 
+// Formats numerical byte values into human-readable data rate strings with B/s, KB/s, or MB/s units.
 function _fmtBytes(b) {
   if (b >= 1e6) return `${(b/1e6).toFixed(2)} MB/s`;
   if (b >= 1e3) return `${(b/1e3).toFixed(1)} KB/s`;
   return `${b.toFixed(0)} B/s`;
 }
 
+// Converts a Unix timestamp in seconds into a localized date and time string.
 function _fmtTs(ts) {
   if (!ts || isNaN(ts) || ts <= 0) return '--';
   try {
@@ -17,6 +20,7 @@ function _fmtTs(ts) {
   } catch { return '--'; }
 }
 
+// Configuration dictionary defining relevant telemetry features, anomaly threshold alerts, and bar scales per attack type.
 const _SIGNAL_CONFIG = {
   "ICMP Flood": {
     if: [
@@ -80,7 +84,8 @@ const _SIGNAL_CONFIG = {
   },
 };
 
-/* Renders one feature card for IF or RF row in the Analysis tab */
+// Generates an interactive telemetry signal card with custom bar scaling, threshold alert styling, and tooltip bindings.
+// Visually highlights deviating features for Isolation Forest and Random Forest evaluations.
 function _mkSignalCard(feat, val, isIF) {
   const isAlert   = feat.alert(val);
   const barPct    = (feat.bar(val) * 100).toFixed(1);
@@ -118,7 +123,7 @@ function _mkSignalCard(feat, val, isIF) {
     </div>`;
 }
 
-/* Renders one feature card for Algorithm Trace tab */
+// Renders a compact feature telemetry card for detailed algorithmic trace views.
 function _renderDrawerFeatureCard(feat, val) {
   const fmtVal = feat.fmt(val);
   return `
@@ -134,3 +139,4 @@ window._fmtTs = _fmtTs;
 window._SIGNAL_CONFIG = _SIGNAL_CONFIG;
 window._mkSignalCard = _mkSignalCard;
 window._renderDrawerFeatureCard = _renderDrawerFeatureCard;
+

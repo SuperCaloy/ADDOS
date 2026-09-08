@@ -1,17 +1,22 @@
-let prev = { t: 0, m: 0, n: 0 };
-let _resetPrev = false;  // flag: reset prev on next poll to avoid backgrounding spike
-let _lastFetchTs = 0;    // timestamp of last successful fetchStats call (ms)
+// Telemetry polling controller updating live summary metric cards, hardware gauges, and model status.
+// Calculates incremental traffic deltas from cumulative counters to feed real-time charts.
 
-/* Shared IF threshold -- set once by fetchModelInfo, read by mitigation.js */
+// Previous polling cycle traffic counters and timestamp for delta rate computations.
+let prev = { t: 0, m: 0, n: 0 };
+let _resetPrev = false;
+let _lastFetchTs = 0;
+
+// Shared Isolation Forest threshold populated by model telemetry and consumed by mitigation views.
 let ifThr = 0;
 
-/* Format cumulative change as +X.X% string */
+// Formats percentage delta between current and previous values into a signed string.
 function _pctDelta(curr, prevVal) {
   const d = ((curr - prevVal) / Math.max(prevVal, 1)) * 100;
   return (d >= 0 ? '+' : '') + d.toFixed(1) + '%';
 }
 
-/* Poll /api/stats -- update cards and push one chart point */
+// Polls top-level traffic totals, updates dashboard card values, and calculates live chart throughput deltas.
+// Throttles spike calculations when switching back from inactive browser tabs.
 async function fetchStats() {
   try {
     const s = await apiFetch('/api/stats');
@@ -21,7 +26,6 @@ async function fetchStats() {
     const cn  = s.normal_packets    || 0;
     const tot = Math.max(ct, 1);
 
-    /* Update summary cards */
     set('c-total',   ct.toLocaleString());
     set('c-total-s', prev.t > 0 ? _pctDelta(ct, prev.t) : '+0.0%');
     set('c-mal',     cm.toLocaleString());
@@ -31,7 +35,6 @@ async function fetchStats() {
     set('c-thr',     (s.active_threats || 0).toString());
     set('p-rt',      `${(s.mitigation_ms || 0).toFixed(1)} ms`);
 
-    /* FP rate card -- color-coded by severity */
     const fpRate = typeof s.fp_rate === 'number' ? s.fp_rate : 0;
     const fpEl   = document.getElementById('p-fp');
     if (fpEl) {
@@ -41,16 +44,12 @@ async function fetchStats() {
                        : 'var(--red)';
     }
 
-    /* Feed live chart: compute per-interval deltas from cumulative values */
     const curRange = window.Store ? window.Store.getChartRange() : range;
     if (curRange === 'Live') {
       const lm     = s.live_malicious || 0;
       const ln     = s.live_normal    || 0;
       const nowMs  = Date.now();
 
-      /* After tab was backgrounded, skip one delta to avoid a spike.
-       * Also skip if elapsed time since last fetch is > 5s (browser throttled
-       * the interval while tab was hidden -- the delta would be inflated). */
       const elapsed = _lastFetchTs > 0 ? (nowMs - _lastFetchTs) : 0;
       if (_resetPrev || elapsed > 5000) {
         _resetPrev = false;
@@ -66,16 +65,16 @@ async function fetchStats() {
       pushChartPoint(now, deltaT, deltaM, deltaN);
     }
 
-    /* Save for next poll delta calculation */
     prev = { t: ct, m: cm, n: cn };
     _lastFetchTs = Date.now();
 
   } catch (_) {}
 }
 
-/* fetchModelInfo -- delegates to pollModelInfo. */
+// Queries machine learning model telemetry and synchronizes the shared anomaly threshold across components.
 async function fetchModelInfo() { await pollModelInfo(); }
-/* Poll system metrics (CPU/Memory) every 1s */
+
+// Polls controller CPU and memory utilization from the backend and updates hardware capacity bars.
 async function fetchSystemMetrics() {
   try {
     const m = await apiFetch('/api/system_metrics');
@@ -99,7 +98,7 @@ async function fetchSystemMetrics() {
   } catch (_) {}
 }
 
-/* Poll model accuracy every 30s */
+// Queries machine learning model metrics and updates anomaly detection accuracy and classification rates.
 async function pollModelInfo() {
   try {
     const info = await apiFetch('/api/model_info');

@@ -1,10 +1,11 @@
-/* chart.js -- live traffic chart init, push, history fetch, range tabs
- * Exposes window._chart so theme toggle in ui.js can update chart colors. */
+// Time-series traffic chart controller visualizing incoming, blocked, and forwarded packet rates.
+// Supports real-time delta plotting and adaptive polling for historical data aggregation.
 
-/* Current active range tab -- 'Live' or a history range string */
+// Current time-series range view: Live streaming or historical aggregate window.
 let range = 'Live';
 
-/* Init Chart.js line chart -- stored on window so ui.js theme toggle can reach it */
+// Instantiates the Chart.js line chart and registers it globally for theme color synchronization.
+// Configures multi-line datasets for incoming, blocked, and forwarded traffic with custom tooltip formatters.
 window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
   type: 'line',
   data: {
@@ -34,8 +35,6 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
         titleFont: { family: "'Fira Code', monospace", size: 10 },
         bodyFont:  { family: "'Fira Code', monospace", size: 11 },
         callbacks: {
-          /* Area fill uses a near-transparent backgroundColor; override the
-             tooltip swatch with the solid borderColor for clear colors. */
           labelColor: function (context) {
             const clr = context.dataset.borderColor || '#5c6080';
             return { borderColor: clr, backgroundColor: clr, borderWidth: 2, borderRadius: 2 };
@@ -50,9 +49,10 @@ window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
   },
 });
 
-/* Append one data point, shift oldest when buffer is full */
+// Appends an interval traffic measurement to the chart and shifts the oldest entry when exceeding buffer size.
+// Discards live incoming points while the user is viewing historical windows to prevent data mixing.
 function pushChartPoint(label, di, db, df) {
-  if (range !== 'Live') return; // Pause live trace while viewing history
+  if (range !== 'Live') return;
 
   const d = window._chart.data;
   d.labels.push(label);
@@ -66,7 +66,8 @@ function pushChartPoint(label, di, db, df) {
   window._chart.update('none');
 }
 
-/* Replace chart with historical bucket data from /api/graph_history */
+// Queries aggregate historical traffic bucket statistics from the backend and updates chart series.
+// Populates time-series points across the selected retrospective interval.
 async function fetchHistory(r) {
   try {
     const buckets      = await apiFetch(`/api/graph_history?range=${r}`);
@@ -79,9 +80,10 @@ async function fetchHistory(r) {
   } catch (_) {}
 }
 
-/* Range tab clicks -- switch between Live and historical views */
 let _historyTimer = null;
 
+// Handles user range tab selections between real-time streaming and historical windows.
+// Adjusts background polling frequency according to the selected time horizon.
 document.getElementById('rtabs').addEventListener('click', e => {
   const btn = e.target.closest('.rt');
   if (!btn) return;
@@ -98,17 +100,15 @@ document.getElementById('rtabs').addEventListener('click', e => {
   if (range !== 'Live') {
     fetchHistory(range);
     
-    // Smart Polling Engine: Dynamic intervals based on SOC best practices
-    let intervalMs = 10000; // fallback
-    if (range === '1h') intervalMs = 30000;        // 30 seconds
-    else if (range === '24h') intervalMs = 300000; // 5 minutes
-    else if (range === '7d') intervalMs = 1800000; // 30 minutes
+    let intervalMs = 10000;
+    if (range === '1h') intervalMs = 30000;
+    else if (range === '24h') intervalMs = 300000;
+    else if (range === '7d') intervalMs = 1800000;
     
     _historyTimer = setInterval(() => {
       if (range !== 'Live') fetchHistory(range);
     }, intervalMs);
   } else {
-    // Switching back to Live - clear history data to avoid mixed scaling
     const d = window._chart.data;
     d.labels = [];
     d.datasets.forEach(ds => ds.data = []);

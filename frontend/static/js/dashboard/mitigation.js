@@ -1,12 +1,11 @@
-/* mitigation.js -- polls /api/quarantine_list, DOM-diffs watchlist table,
- * handles release and blackhole button actions with confirmation modals. */
+// Watchlist controller managing active quarantine table rendering, DOM diffing, and manual enforcement actions.
+// Tracks IP state transitions and presents confirmation modals for release and blackhole overrides.
 
-/* Row map -- src_ip -> <tr> -- used for in-place DOM updates (no flicker) */
+// Active table row cache indexed by source IP and pending action confirmation callback.
 const _qRows = new Map();
-
-/* Confirmation modal state */
 let _confirmCallback = null;
 
+// Displays an action confirmation modal dialog with customized prompt text and execution callback.
 function openConfirmModal(title, message, callback) {
   document.getElementById('confirm-title').textContent = title;
   document.getElementById('confirm-message').textContent = message;
@@ -14,59 +13,54 @@ function openConfirmModal(title, message, callback) {
   document.getElementById('confirm-modal').classList.add('open');
 }
 
+// Dismisses the confirmation modal dialog and clears pending action state.
 function closeConfirmModal() {
   document.getElementById('confirm-modal').classList.remove('open');
   _confirmCallback = null;
 }
 
+// Executes the queued confirmation callback and closes the modal dialog.
 function confirmAction() {
   if (_confirmCallback) _confirmCallback();
   closeConfirmModal();
 }
 
-/* Poll /api/quarantine_list and update watchlist table */
+// Polls active quarantine list from the backend and updates watchlist table rows in-place.
+// Performs surgical DOM updates without full table replacement to prevent visual flickering.
 async function fetchQuarantine() {
   try {
     const data = await apiFetch('/api/quarantine_list');
     set('q-ct', `${data.length} IP${data.length !== 1 ? 's' : ''}`);
     const tb = document.getElementById('q-body');
 
-    /* Empty state */
     if (!data.length) {
       _qRows.clear();
       tb.innerHTML = `<tr><td colspan="7" class="q-empty">No IPs currently under active mitigation.</td></tr>`;
       return;
     }
 
-    /* Remove rows whose IP is no longer in the list */
     const activeIps = new Set(data.map(e => e.src_ip));
     for (const [ip, tr] of _qRows) {
       if (!activeIps.has(ip)) { tr.remove(); _qRows.delete(ip); }
     }
 
-    /* Update existing rows or insert new ones */
     data.forEach(e => {
       const sc   = e.if_score || 0;
       const ts   = e.time_in_phase_sec || 0;
       const conf = e.confidence != null ? Number(e.confidence).toFixed(4) : '--';
       const time = ts < 60 ? `${ts}s` : `${Math.floor(ts / 60)}m ${ts % 60}s`;
 
-      /* IF score color class based on threshold */
       const currentThr = window.Store ? window.Store.getIfThreshold() : ifThr;
       const scCls = !currentThr           ? 'mono'
                   : sc >= currentThr * 1.2 ? 'sc-red'
                   : sc >= currentThr       ? 'sc-amb'
                   : 'sc-grn';
 
-      /* TTL countdown for time-ban rows */
       const ttlRemaining = e.ttl_remaining_sec != null
         ? ` <span style="color:var(--amber,#ffb300);font-size:11px;font-family:var(--mono)">[${Math.floor(e.ttl_remaining_sec/60)}m ${e.ttl_remaining_sec%60}s]</span>`
         : '';
 
-      /* Priority badge */
       const priBadge = renderPriority(e.priority);
-
-      /* Use phase_label if available, otherwise fall back to phase */
       const phaseDisplay = e.phase_label || e.phase || '--';
 
       const inner = `
@@ -83,12 +77,10 @@ async function fetchQuarantine() {
         </div></td>`;
 
       if (_qRows.has(e.src_ip)) {
-        /* Update in-place -- no DOM remove/insert, no flicker */
         const existing     = _qRows.get(e.src_ip);
         existing.dataset.ip = e.src_ip;
         existing.innerHTML  = inner;
       } else {
-        /* New IP -- append row */
         const tr      = document.createElement('tr');
         tr.className  = 'tr-clickable';
         tr.dataset.ip = e.src_ip;
@@ -98,14 +90,13 @@ async function fetchQuarantine() {
       }
     });
 
-    /* Remove empty-state placeholder if rows now exist */
     const placeholder = tb.querySelector('[colspan]');
     if (placeholder) placeholder.parentElement.remove();
 
   } catch (_) {}
 }
 
-/* Show confirmation modal before executing quarantine action */
+// Configures and displays the confirmation modal before executing a manual release or blackhole override.
 function confirmQuarantineAction(action, ip) {
   const title = action === 'release' ? 'Release IP' : 'Blackhole IP';
   const msg = action === 'release'
@@ -121,7 +112,7 @@ function confirmQuarantineAction(action, ip) {
   openConfirmModal(title, msg, () => quarantineAction(action, ip));
 }
 
-/* POST release or blackhole action for an IP */
+// Sends a manual mitigation release or blackhole POST command to the backend and triggers immediate watchlist refresh.
 async function quarantineAction(action, ip) {
   try {
     await apiFetch(`/api/quarantine/${action}`, {
@@ -134,3 +125,4 @@ async function quarantineAction(action, ip) {
     showToast('Request failed', true);
   }
 }
+

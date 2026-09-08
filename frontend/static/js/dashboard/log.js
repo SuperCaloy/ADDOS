@@ -1,25 +1,19 @@
-/* log.js - SSE live events, audit log table DOM updates, recent events replay
- * Tracks rows by src_ip to detect phase escalations and update in-place.
- * Includes infinite scroll for loading older events seamlessly. */
+// Security audit log manager handling real-time event streaming, table diffing, and infinite scroll.
+// Deduplicates incident rows by source IP and phase type while enabling historical pagination.
 
-/* Row map -- `${ip}|${event_type}` -> { tr, action } -- composite key so re-attacks create new rows */
+// Cached row map indexed by composite IP and event key, total count, sort direction, and scroll cursor.
 const _logRows = new Map();
 let logCt = 0;
-
-/* Sort state for audit log */
 let logSortAsc = false;
-
-
-/* Infinite scroll state */
 let logLoading = false;
 let logAllLoaded = false;
 let logOldestTimestamp = null;
 
+// Constructs table column HTML, composite incident key, and formatted action labels from a raw event record.
 function _buildEventRowData(ev) {
   const ip        = ev.src_ip     || '-';
   const newAction = ev.action_taken || '-';
 
-  /* Append ban duration to Time Ban label if available */
   let actionLabel = newAction;
   if (/time ban/i.test(newAction) && ev.ban_duration_sec) {
     actionLabel = `Time Ban ${Math.round(ev.ban_duration_sec / 60)}m`;
@@ -40,7 +34,8 @@ function _buildEventRowData(ev) {
   return { ip, newAction, html, key, isRelease };
 }
 
-/* Add or update one row in the audit log table */
+// Inserts a new security event row at the top of the audit table or updates an existing row during phase escalation.
+// Manages row capacity eviction when the table reaches configured buffer limits.
 function addLogRow(ev) {
   const tb          = document.getElementById('log-body');
   const placeholder = tb.querySelector('[colspan]');
@@ -48,8 +43,6 @@ function addLogRow(ev) {
 
   const { ip, newAction, html, key, isRelease } = _buildEventRowData(ev);
 
-  /* Incident key: same IP + event_type = same incident row (update in-place).
-   * After a release, key is deleted so next detection starts a new row. */
   if (_logRows.has(key)) {
     const existing = _logRows.get(key);
     existing.tr.innerHTML = html;
@@ -61,7 +54,6 @@ function addLogRow(ev) {
     return;
   }
 
-  /* Evict oldest row if log is full (MAX_LOG_ROWS=0 means no limit) */
   if (MAX_LOG > 0 && logCt >= MAX_LOG) {
     const oldest = tb.querySelector('tr:last-child');
     if (oldest) {
@@ -72,7 +64,6 @@ function addLogRow(ev) {
   logCt++;
   set('log-ct', logCt.toString());
 
-  /* Insert new row at top */
   const tr      = document.createElement('tr');
   tr.className  = 'row-in tr-clickable';
   tr.dataset.ip = ip;
@@ -87,7 +78,7 @@ function addLogRow(ev) {
   tb.insertBefore(tr, tb.firstChild);
 }
 
-/* Prepend older rows for infinite scroll (no animation, preserves scroll position) */
+// Appends historical event rows to the bottom of the table during infinite scroll without triggering entry animations.
 function prependOlderRows(events) {
   const tb = document.getElementById('log-body');
   const placeholder = tb.querySelector('[colspan]');
@@ -96,7 +87,6 @@ function prependOlderRows(events) {
   events.forEach(ev => {
     const { ip, newAction, html, key, isRelease } = _buildEventRowData(ev);
 
-    /* Skip if row already exists (dedup) */
     if (_logRows.has(key)) return;
 
     const tr      = document.createElement('tr');
@@ -110,7 +100,6 @@ function prependOlderRows(events) {
       _logRows.set(key, { tr, action: newAction });
     }
 
-    /* Append to bottom (older events go to bottom) */
     tb.appendChild(tr);
     logCt++;
   });
@@ -118,7 +107,7 @@ function prependOlderRows(events) {
   set('log-ct', logCt.toString());
 }
 
-/* Connect SSE stream via unified EventBus */
+// Subscribes the audit log table to live event payloads broadcast over the unified EventBus.
 function connectSSE() {
   if (window.EventBus) {
     window.EventBus.on('event', ev => {
@@ -128,7 +117,7 @@ function connectSSE() {
   }
 }
 
-/* Sort audit log rows by timestamp */
+// Re-orders rendered audit log table rows by timestamp in ascending or descending order.
 function sortLogRows(asc) {
   const tb = document.getElementById('log-body');
   if (!tb) return;
@@ -141,7 +130,7 @@ function sortLogRows(asc) {
   rows.forEach(tr => tb.appendChild(tr));
 }
 
-/* Toggle sort on timestamp header click */
+// Inverts the active timestamp sort direction and updates the header arrow glyph.
 function toggleLogSort() {
   logSortAsc = !logSortAsc;
   sortLogRows(logSortAsc);
@@ -149,14 +138,12 @@ function toggleLogSort() {
   if (arrow) arrow.textContent = logSortAsc ? '▲' : '▼';
 }
 
-/* Replay last 100 events on page load so log is not empty on first visit */
+// Replays the most recent security events on page load to populate the audit log before live streaming begins.
 async function fetchRecentEvents() {
   try {
     const events = await apiFetch('/api/recent_events?limit=100');
     events.forEach(ev => addLogRow(ev));
-    /* Sort after loading so latest is always on top */
     sortLogRows(false);
-    /* Track oldest timestamp for infinite scroll */
     if (events.length > 0) {
       logOldestTimestamp = events[0].timestamp;
     }
@@ -164,7 +151,8 @@ async function fetchRecentEvents() {
   } catch (_) {}
 }
 
-/* Load older events for infinite scroll (Facebook/X style - seamless) */
+// Fetches the next page of historical security events when the operator scrolls near the table bottom.
+// Preserves user scroll position while inserting older incident records into the DOM.
 async function loadOlderEvents() {
   if (logLoading || logAllLoaded) return;
 
@@ -186,18 +174,12 @@ async function loadOlderEvents() {
     if (olderEvents.length === 0) {
       logAllLoaded = true;
     } else {
-      /* Save scroll position */
       const prevScrollHeight = logScroll.scrollHeight;
 
-      /* Prepend older rows */
       prependOlderRows(olderEvents);
-      /* Re-sort after adding older rows */
       sortLogRows(logSortAsc);
 
-      /* Update cursor to oldest loaded event */
       logOldestTimestamp = olderEvents[0].timestamp;
-
-      /* Restore scroll position (new rows added below) */
       logScroll.scrollTop = scrollTop + (logScroll.scrollHeight - prevScrollHeight);
     }
   } finally {
@@ -205,7 +187,7 @@ async function loadOlderEvents() {
   }
 }
 
-/* Setup infinite scroll listener */
+// Attaches scroll boundary detection to the table container to trigger pagination.
 function setupInfiniteScroll() {
   const logScroll = document.querySelector('#log-body').closest('.tbl-scroll');
   if (!logScroll) return;
@@ -215,5 +197,5 @@ function setupInfiniteScroll() {
   });
 }
 
-/* Initialize infinite scroll on DOM ready */
 document.addEventListener('DOMContentLoaded', setupInfiniteScroll);
+

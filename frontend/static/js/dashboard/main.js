@@ -1,33 +1,34 @@
+// Application bootstrap script initializing telemetry feeds, polling timers, and event delegation.
+// Orchestrates dashboard startup across metric cards, audit tables, and interactive drawers.
+
+// Triggers initial data queries on script execution to populate dashboard state prior to timer intervals.
 fetchStats();
 fetchModelInfo();
 fetchQuarantine();
 fetchRecentEvents();
 fetchSystemMetrics();
 
-/* -- SSE live event stream --------------------------------------------------- */
+// Initializes live streaming connection and schedules periodic background polling for metrics and tables.
 connectSSE();
+setInterval(fetchStats,         POLL_MS);
+setInterval(fetchQuarantine,    POLL_MS);
+setInterval(fetchSystemMetrics, 1000);
+setInterval(pollModelInfo,      1000);
 
-/* -- Polling intervals ------------------------------------------------------- */
-setInterval(fetchStats,         POLL_MS);   /* stats cards and chart: every 2s */
-setInterval(fetchQuarantine,    POLL_MS);   /* watchlist table: every 2s */
-setInterval(fetchSystemMetrics, 1000);      /* system metrics: every 1s */
-setInterval(pollModelInfo,      1000);      /* model accuracy: every 1s */
-
-/* -- Tab visibility: reset chart delta on return ----------------------------- */
-/* Browsers throttle setInterval in background tabs. When the user returns,
- * the first poll would see a huge delta from all missed traffic. Skip it. */
+// Resets rate delta calculations when returning from an inactive browser tab.
+// Prevents interval throttling from causing artificial traffic spikes in the live chart.
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') _resetPrev = true;
 });
 
-/* -- Row-click delegation ---------------------------------------------------- */
-/* Single listener per tbody -- survives innerHTML updates, skips button clicks */
+// Attaches delegated click and keyboard listeners to watchlist and audit log tables.
+// Opens the threat analysis drawer when selecting an incident row while ignoring direct button clicks.
 (function _attachRowDelegation() {
   ['log-body', 'q-body'].forEach(tbId => {
     const tb = document.getElementById(tbId);
     if (!tb) return;
 
-    /* Click */
+    // Dispatches click events on table rows to open the IP threat analysis drawer.
     tb.addEventListener('click', function (e) {
       if (e.target.closest('button, a')) return;
       const tr = e.target.closest('tr[data-ip]');
@@ -36,7 +37,7 @@ document.addEventListener('visibilitychange', () => {
       if (ip && ip !== '--') window.openIpDrawer(ip);
     });
 
-    /* Keyboard: Enter or Space activates focused row */
+    // Enables keyboard activation using Enter or Space on focused table rows.
     tb.addEventListener('keydown', function (e) {
       if (e.key !== 'Enter' && e.key !== ' ') return;
       if (e.target.closest('button, a')) return;
@@ -47,12 +48,11 @@ document.addEventListener('visibilitychange', () => {
       if (ip && ip !== '--') window.openIpDrawer(ip);
     });
 
-    /* MutationObserver -- stamp tabindex="0" on every new tr[data-ip] */
+    // Observes dynamic DOM insertions in table bodies to ensure newly rendered rows receive keyboard focus attributes.
     const _stampTabindex = (mutations) => {
       mutations.forEach(m => {
         m.addedNodes.forEach(node => {
           if (node.nodeType !== 1) return;
-          /* The added node itself may be a tr, or may contain trs */
           const rows = node.matches?.('tr[data-ip]')
             ? [node]
             : [...(node.querySelectorAll?.('tr[data-ip]') || [])];

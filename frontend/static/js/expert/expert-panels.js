@@ -1,5 +1,12 @@
-/* expert-panels.js: Panel renderers for Machine Learning Internals and Mitigation State Machine */
+/**
+ * Panel renderers for Machine Learning Internals and Mitigation State Machine in Expert Mode.
+ * Generates SVG sparklines, score thermometers, traffic composition bars, and active state feeds.
+ */
 
+/**
+ * Generates an inline SVG polyline sparkline visualizing historical telemetry trends.
+ * Normalizes values across the available vertical range or outputs a fallback indicator for empty series.
+ */
 function makeSparkline(data, color) {
   if (!data || data.length < 1) return '<div class="sparkline-placeholder">--</div>';
   if (data.length === 1) {
@@ -23,6 +30,10 @@ function makeSparkline(data, color) {
   </svg>`;
 }
 
+/**
+ * Renders the Machine Learning Internals panel containing IF thermometers, RF composition bars, and TEA z-scores.
+ * Updates DOM elements progressively or initializes required container markup if unpopulated.
+ */
 function renderMLPanel(ifData, rfData, teaData) {
   const el = document.getElementById('expert-ml-content');
   if (!el) return;
@@ -204,6 +215,10 @@ function renderMLPanel(ifData, rfData, teaData) {
   }
 }
 
+/**
+ * Updates Temporal Entropy Analysis progress meters, z-scores, and status labels during polling loops.
+ * Synchronizes global pipeline latch state with current switch telemetry.
+ */
 function updateTEASwitch(tea) {
   if (!tea) return;
 
@@ -258,6 +273,10 @@ function updateTEASwitch(tea) {
   }
 }
 
+/**
+ * Updates the Isolation Forest anomaly score thermometer and maximum score reading.
+ * Adjusts bar fill widths dynamically upon receiving new individual flow inference reports.
+ */
 function updateIFBar(inf) {
   if (!inf) return;
 
@@ -276,6 +295,10 @@ function updateIFBar(inf) {
   }
 }
 
+/**
+ * Renders mitigation state machine phase summaries and recent active flow telemetry feeds.
+ * Displays phase counters for quarantine, time bans, and blackholes alongside IP audit logs.
+ */
 function renderMitigationPanel(smStates, deception, rg) {
   const el = document.getElementById('expert-mitigation-content');
   if (!el) return;

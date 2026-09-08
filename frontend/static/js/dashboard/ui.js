@@ -1,32 +1,35 @@
-/* ui.js -- DOM utilities, tag renderers, toast, theme toggle, modal, calendar
- * No polling logic here -- pure presentation helpers used by all other modules. */
+// Presentation utilities, badge renderers, toast alerts, theme synchronization, and modal dialogs.
+// Provides pure UI rendering functions shared across all dashboard views without business logic.
 
-/* Set text content of element by id */
+// Updates the text content of a DOM element selected by ID with null safety checks.
 function set(id, val) {
   const el = document.getElementById(id);
   if (el) el.textContent = val;
 }
 
-/* -- Tag renderers ----------------------------------------------------------- */
-
+// Formats a generic HTML span badge using design system tag classes.
 const mkTag = (cls, txt) => `<span class="tag ${cls}">${txt}</span>`;
 
+// Renders semantic classification badges for DDoS or anomalous traffic classifications.
 function renderClass(v) {
   if (v === 'DDoS')    return mkTag('t-ddos',    v);
   if (v === 'Anomaly') return mkTag('t-anomaly', v);
   return `<span style="color:var(--sub2)">${v}</span>`;
 }
 
+// Maps detected attack types to color-coded attack vector badge chips.
 function renderVector(v) {
   const map = { 'SYN Flood': 't-syn', 'UDP Flood': 't-udp', 'ICMP Flood': 't-icmp', 'Uncertain': 't-unc' };
   return map[v] ? mkTag(map[v], v) : `<span style="color:var(--sub2)">${v}</span>`;
 }
 
+// Formats active mitigation enforcement actions into distinct visual badges.
 function renderAction(v) {
   const map = { 'Quarantined': 't-q', 'Rate Limited': 't-rl', 'Time Ban': 't-ban', 'Blackhole': 't-blocked', 'Blocked': 't-blocked' };
   return map[v] ? mkTag(map[v], v) : `<span style="color:var(--sub2)">${v}</span>`;
 }
 
+// Renders incident priority badges according to urgency severity tiers.
 function renderPriority(v) {
   const map = {
     'Critical': '<span class="p-crit">CRITICAL</span>',
@@ -37,8 +40,7 @@ function renderPriority(v) {
   return map[v] || `<span class="p-low">${v}</span>`;
 }
 
-/* -- Toast ------------------------------------------------------------------- */
-
+// Displays an accessible temporary notification toast message that automatically dismisses.
 function showToast(msg, isErr = false) {
   const el     = document.createElement('div');
   el.className = 'toast';
@@ -50,10 +52,10 @@ function showToast(msg, isErr = false) {
   setTimeout(() => el.remove(), 4000);
 }
 
-/* -- Theme toggle ------------------------------------------------------------ */
-
 let isLight = false;
 
+// Synchronizes CSS theme classes, chart scales, canvas styles, and local storage state.
+// Applies global color palette changes consistently across all active visual components.
 function _applyTheme(light) {
   document.body.classList.toggle('light', light);
   document.body.classList.toggle('dark', !light);
@@ -89,12 +91,13 @@ function _applyTheme(light) {
   if (window.Store) window.Store.setTheme(light);
 }
 
+// Inverts current light or dark theme mode and triggers full application palette updates.
 function toggleTheme() {
   isLight = !isLight;
   _applyTheme(isLight);
 }
 
-/* Restore saved theme on load -- defer so window._chart exists first */
+// Restores saved theme preference from local storage on DOM load once dependencies are ready.
 window.addEventListener('DOMContentLoaded', () => {
   const saved = localStorage.getItem('adddos-theme');
   if (saved === 'light') {
@@ -108,16 +111,18 @@ window.addEventListener('DOMContentLoaded', () => {
   }
 });
 
-/* -- Report modal ------------------------------------------------------------ */
-
+// Dismisses the PDF report generation modal dialog.
 function closeModal() {
   document.getElementById('modal').classList.remove('open');
 }
 
+// Closes the report modal when the user clicks the semi-transparent backdrop overlay.
 document.getElementById('modal').addEventListener('click', e => {
   if (e.target === e.currentTarget) closeModal();
 });
 
+// Validates date picker inputs and requests a compiled PDF incident report from the backend API.
+// Initiates automatic browser file download and alerts the operator upon completion or failure.
 async function submitReport() {
   const sd  = document.getElementById('r-start').value;
   const ed  = document.getElementById('r-end').value;

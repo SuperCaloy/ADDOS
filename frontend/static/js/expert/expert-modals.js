@@ -1,8 +1,16 @@
-/* expert-modals.js: Algorithm Detail Popups for Expert Mode */
+/**
+ * Algorithm detail popup modal controller and specialized telemetry renderers for Expert Mode.
+ * Displays real-time mathematical inspections for Flood Prefilter, Entropy Analyzer, Isolation Forest, and Random Forest.
+ */
 
+// Modal management controller tracking refresh intervals and view routing.
 var ExpertModals = {
   _pollTimer: null,
 
+  /**
+   * Opens the algorithm inspection modal for the specified pipeline stage and starts periodic refreshes.
+   * Configures header badges, injects initial body markup, and polls live data every two seconds.
+   */
   open: function(stageKey) {
     var overlay = document.getElementById('expert-modal-overlay');
     var body = document.getElementById('expert-modal-body');
@@ -37,12 +45,20 @@ var ExpertModals = {
     }, 2000);
   },
 
+  /**
+   * Closes the active algorithm inspection modal and terminates background refresh polling.
+   * Removes overlay visibility classes and clears the polling timer reference.
+   */
   close: function() {
     var overlay = document.getElementById('expert-modal-overlay');
     if (overlay) overlay.classList.remove('open');
     if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
   },
 
+  /**
+   * Dispatches modal content rendering to the specific algorithm template based on stage identifier.
+   * Retrieves the latest cached telemetry snapshot before invoking stage renderers.
+   */
   _renderBody: function(key, el) {
     if (!el) return;
     var d = window._lastExpertData || {};
@@ -52,6 +68,10 @@ var ExpertModals = {
     else if (key === 'rf') this._renderRF(d, el);
   },
 
+  /**
+   * Renders the Flood Prefilter inspection view with session summaries, protocol counters, and flagged sources.
+   * Outlines threshold criteria and highlights multi-protocol coordinated attack vectors.
+   */
   _renderPrefilter: function(d, el) {
     var pf = (d.pipeline && d.pipeline.flood_prefilter_breakdown) || {};
     var pfSession = (d.pipeline && d.pipeline.flood_prefilter_session) || {};
@@ -113,6 +133,10 @@ var ExpertModals = {
       '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">A source is flagged when: (1) its packet rate goes above 3 times what the system learned as normal for that protocol, OR (2) it sends a big burst (40% of the limit) in less than 0.1 seconds. The baseline adjusts over time. If the same source is flagged on 2+ protocols at the same time, it is marked as a coordinated multi-protocol attack.</div></div>';
   },
 
+  /**
+   * Renders the Temporal Entropy Analysis inspection view with diversity meters, status badges, and shadow baseline state.
+   * Explains variance metrics and baseline latching behaviors during active attacks.
+   */
   _renderTEA: function(d, el) {
     var g = (d.tea && d.tea.global) || {};
     var szVar = g.size_var || 0;
@@ -192,6 +216,10 @@ var ExpertModals = {
       '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">Compares current traffic diversity to what it learned as normal. If the z-score drops below a negative threshold, traffic is less diverse than normal (a flood signal). The latch freezes memory during attacks so the flood does not corrupt the baseline. It unlocks only when both the anomaly detector and entropy analyzer agree traffic has returned to normal.</div></div>';
   },
 
+  /**
+   * Generates a z-score track component with baseline markers and threshold indicators.
+   * Renders bar gauges comparing current entropy deviations against trained statistical baselines.
+   */
   _teaTrack: function(label, z, pct, thrPct, color, baseVal) {
     return '<div style="margin-bottom:16px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">' +
       '<span style="font-size:15px;font-weight:700">' + label + '</span>' +
@@ -205,6 +233,10 @@ var ExpertModals = {
     '<div style="font-size:14px;color:var(--sub2);margin-top:4px">baseline mean: ' + baseVal.toFixed(4) + '</div></div>';
   },
 
+  /**
+   * Renders the Isolation Forest model inspection view including anomaly gauges and recent score sparklines.
+   * Illustrates score distributions between normal and anomalous flows relative to the decision threshold.
+   */
   _renderIF: function(d, el) {
     var ifData = d.if || {};
     var threshold = ifData.threshold || 0.5992;
@@ -298,6 +330,10 @@ var ExpertModals = {
       '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">Each flow gets a score from 0 to 1. A score near 0 looks normal. A score near 1 looks very different from normal. The threshold is set during training. If above threshold, the flow is sent to Random Forest to identify the attack type. Below threshold = normal, not forwarded.</div></div>';
   },
 
+  /**
+   * Renders the Random Forest classifier inspection view with vote breakdowns and recent classification rows.
+   * Explains decision tree voting mechanisms and confidence gating for mitigation execution.
+   */
   _renderRF: function(d, el) {
     var rf = d.rf || {};
     var dist = rf.class_distribution || {};
@@ -356,6 +392,7 @@ var ExpertModals = {
   }
 };
 
+// Dismisses the active expert modal popup when the Escape key is pressed.
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') ExpertModals.close();
 });

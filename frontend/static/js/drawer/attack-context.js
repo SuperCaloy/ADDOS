@@ -1,5 +1,7 @@
-/* attack-context.js: Domain encyclopedia and attack descriptions for IP Threat Drawer */
+// Domain encyclopedia defining attack vector specifications, characteristic signatures, and feature tooltip definitions.
+// Provides educational descriptions and diagnostic reference data for the threat analysis drawer.
 
+// Explanatory definitions for flow features displayed in interactive metric card tooltips.
 const _FEAT_TOOLTIPS = {
   "Flow Rate (pps)": "Packet rate for this flow, measured in packets per second (pps). Significantly elevated rates relative to normal baselines are indicative of flood-based attacks.",
   "Byte Rate":       "Data throughput for this flow, measured in bytes per second. Sharp increases may indicate volumetric attacks targeting bandwidth exhaustion.",
@@ -10,6 +12,7 @@ const _FEAT_TOOLTIPS = {
   "Byte Count":      "Total data volume observed in this flow, measured in bytes.",
 };
 
+// Domain knowledge base mapping attack classifications to semantic color tokens, descriptions, and signature traits.
 const _ATTACK_CONTEXT = {
   "ICMP Flood": {
     color: 'var(--red,#ff3d5a)',
@@ -54,3 +57,4 @@ const _ATTACK_CONTEXT = {
 
 window._FEAT_TOOLTIPS = _FEAT_TOOLTIPS;
 window._ATTACK_CONTEXT = _ATTACK_CONTEXT;
+

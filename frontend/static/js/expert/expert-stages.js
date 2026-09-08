@@ -1,5 +1,9 @@
-/* expert-stages.js: Topology stage data, formulas, and stage inspector */
+/**
+ * Topology stage metadata, algorithmic formulas, and stage inspection view renderer for expert mode.
+ * Maintains telemetry history buffers and renders deep-dive mathematical descriptions of pipeline stages.
+ */
 
+// Global expert mode state tracking selected stage, telemetry time-series, and log queues.
 var ExpertState = {
   selectedStage: 'mininet',
   ifHistory: [],
@@ -9,6 +13,7 @@ var ExpertState = {
   maxLog: 50
 };
 
+// Structural definitions, descriptions, formulas, and I/O specifications for all pipeline stages.
 var ExpertStages = {
   data: {
     mininet: {
@@ -116,10 +121,18 @@ var ExpertStages = {
     }
   },
 
+  /**
+   * Initializes the stage inspector by binding the default selected stage to the DOM.
+   * Ensures the detail panel displays valid content upon initial page load.
+   */
   init: function() {
     this.updateInspector(ExpertState.selectedStage);
   },
 
+  /**
+   * Updates the stage inspector pane with metadata and mathematical formulas for the given stage.
+   * Reconstructs the formula list, input/output mappings, and modal explanation button.
+   */
   updateInspector: function(key) {
     ExpertState.selectedStage = key;
     var s = this.data[key];

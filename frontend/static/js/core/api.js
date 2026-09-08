@@ -1,9 +1,14 @@
+// HTTP network transport client and system status indicator.
+// Provides standardized API request execution with automatic payload encoding and error handling.
+
+// Global network coordinates and client polling limits resolved from window configuration.
 const API     = window.API_URL;
 const POLL_MS = window.POLL_MS || 2000;
 const MAX_PTS = window.MAX_PTS || 30;
 const MAX_LOG = window.MAX_LOG || 100;
 
-/* -- Status pill helper ------------------------------------------------------- */
+// Updates the header status badge color, indicator glow, and text based on network reachability.
+// Provides visual feedback reflecting continuous connectivity with the backend service.
 function _setStatusPill(online) {
   const pill = document.getElementById('status-pill');
   const dot  = document.getElementById('status-dot');
@@ -25,7 +30,8 @@ function _setStatusPill(online) {
   }
 }
 
-/* Fetch helper from backend: updates status pill; supports GET and POST */
+// Dispatches HTTP requests to backend endpoints with automatic JSON serialization and response parsing.
+// Synchronizes the system status pill with network success and propagates HTTP errors to callers.
 async function apiFetch(path, options = {}) {
   try {
     const fetchOpts = { ...options };
@@ -48,3 +54,4 @@ async function apiFetch(path, options = {}) {
     throw e;
   }
 }
+
