@@ -31,7 +31,7 @@ def extract_rf_features(flow_stats: dict) -> np.ndarray:
     avg_bytes_per_pkt      = byt / (pkt + eps)
     flow_intensity         = math.log1p(max(pkt * bps, 0))
     bytes_per_duration     = math.log1p(max(byt / (fds + eps), 0))
-    # eps here, not +1 — matches training denominator exactly
+    # eps here, not +1 -- matches training denominator exactly
     pkt_size_uniformity    = math.log1p(max(avg_bytes_per_pkt / (bps + eps), 0))
     flow_src_intensity     = math.log1p(max(fcps * pps, 0))
 

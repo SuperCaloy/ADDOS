@@ -2,23 +2,26 @@ fetchStats();
 fetchModelInfo();
 fetchQuarantine();
 fetchRecentEvents();
+fetchSystemMetrics();
 
-/* ── SSE live event stream ─────────────────────────────────────────────────── */
+/* -- SSE live event stream --------------------------------------------------- */
 connectSSE();
 
-/* ── Polling intervals ─────────────────────────────────────────────────────── */
-setInterval(fetchStats,      POLL_MS);   /* stats cards + chart — every 2s */
-setInterval(fetchQuarantine, POLL_MS);   /* watchlist table    — every 2s */
+/* -- Polling intervals ------------------------------------------------------- */
+setInterval(fetchStats,         POLL_MS);   /* stats cards and chart: every 2s */
+setInterval(fetchQuarantine,    POLL_MS);   /* watchlist table: every 2s */
+setInterval(fetchSystemMetrics, 1000);      /* system metrics: every 1s */
+setInterval(pollModelInfo,      1000);      /* model accuracy: every 1s */
 
-/* ── Tab visibility: reset chart delta on return ───────────────────────────── */
+/* -- Tab visibility: reset chart delta on return ----------------------------- */
 /* Browsers throttle setInterval in background tabs. When the user returns,
  * the first poll would see a huge delta from all missed traffic. Skip it. */
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') _resetPrev = true;
 });
 
-/* ── Row-click delegation ──────────────────────────────────────────────────── */
-/* Single listener per tbody — survives innerHTML updates, skips button clicks */
+/* -- Row-click delegation ---------------------------------------------------- */
+/* Single listener per tbody -- survives innerHTML updates, skips button clicks */
 (function _attachRowDelegation() {
   ['log-body', 'q-body'].forEach(tbId => {
     const tb = document.getElementById(tbId);
@@ -30,7 +33,7 @@ document.addEventListener('visibilitychange', () => {
       const tr = e.target.closest('tr[data-ip]');
       if (!tr) return;
       const ip = tr.dataset.ip;
-      if (ip && ip !== '—') window.openIpDrawer(ip);
+      if (ip && ip !== '--') window.openIpDrawer(ip);
     });
 
     /* Keyboard: Enter or Space activates focused row */
@@ -41,10 +44,10 @@ document.addEventListener('visibilitychange', () => {
       if (!tr) return;
       e.preventDefault();
       const ip = tr.dataset.ip;
-      if (ip && ip !== '—') window.openIpDrawer(ip);
+      if (ip && ip !== '--') window.openIpDrawer(ip);
     });
 
-    /* MutationObserver — stamp tabindex="0" on every new tr[data-ip] */
+    /* MutationObserver -- stamp tabindex="0" on every new tr[data-ip] */
     const _stampTabindex = (mutations) => {
       mutations.forEach(m => {
         m.addedNodes.forEach(node => {

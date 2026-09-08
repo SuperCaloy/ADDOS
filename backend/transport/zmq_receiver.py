@@ -44,18 +44,13 @@ def get_raw_counts() -> dict:
         return {"raw_total": _raw_total_pkts}
 
 
+# Return current total system packets per second and reset.
 def get_total_pps() -> float:
-    """Return current total system packets per second and reset."""
     global _total_pps
     with _pps_lock:
         result = _total_pps
         _total_pps = 0.0
     return result
-
-
-def get_switch_count() -> int:
-    with _switch_count_lock:
-        return _connected_switches
 
 
 def _reset_flow_state() -> None:
@@ -329,12 +324,8 @@ def _parse_and_route(raw: bytes) -> None:
         worker.submit(src_ip, flow_stats, switch_stats)
 
 
+# Evict per-switch flow entries older than one poll cycle (older than 1s).
 def _clear_switch_flow_buffers() -> None:
-    """Evict per-switch flow entries older than one poll cycle.
-
-    Entries newer than 1s are kept so flows arriving between TEA's
-    snapshot and this clear are not lost.
-    """
     cutoff = time.monotonic() - 1.0
     with _switch_flows_lock:
         for dpid in list(_switch_flows):

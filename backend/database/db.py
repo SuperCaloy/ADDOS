@@ -64,6 +64,9 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS traffic_summary (
             id                    INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp             TEXT    NOT NULL,
+            total_packets         INTEGER DEFAULT 0,
+            malicious_dropped     INTEGER DEFAULT 0,
+            normal_packets        INTEGER DEFAULT 0,
             total_flows_observed  INTEGER DEFAULT 0,
             threats_mitigated     INTEGER DEFAULT 0,
             true_negatives_passed INTEGER DEFAULT 0,
@@ -180,7 +183,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_df_attack_class
             ON detection_features (attack_class);
 
-        -- quarantine_state — block_expires_at TEXT added for TTL persistence.
+        -- quarantine_state -- block_expires_at TEXT added for TTL persistence.
         -- NULL = permanent (manual block). ISO timestamp = auto-block expiry.
         CREATE TABLE IF NOT EXISTS quarantine_state (
             src_ip           TEXT PRIMARY KEY,
@@ -268,12 +271,8 @@ def _init_schema(conn: sqlite3.Connection) -> None:
     """)
 
 
+# Safe schema migrations for existing databases (idempotent ALTER TABLEs).
 def _migrate(conn: sqlite3.Connection) -> None:
-    """Safe schema migrations for existing databases.
-
-    Each ALTER TABLE is wrapped in try/except so re-running on a fresh DB
-    (which already has the column from _init_schema) is a no-op.
-    """
     # H5 fix: add block_expires_at to existing quarantine_state tables.
     try:
         conn.execute("ALTER TABLE quarantine_state ADD COLUMN block_expires_at TEXT")
@@ -327,6 +326,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     # hold_ip stats columns
     for col in ("held", "rescored", "expired_unscored"):
+        try:
+            conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+
+    # Packet count columns
+    for col in ("total_packets", "malicious_dropped", "normal_packets"):
         try:
             conn.execute(f"ALTER TABLE traffic_summary ADD COLUMN {col} INTEGER DEFAULT 0")
             conn.commit()
@@ -387,19 +394,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
 # C3 fix: atomic transaction context manager
 # ---------------------------------------------------------------------------
 
+# Context manager for multi-statement atomic transactions.
 @contextmanager
 def transaction():
-    """Context manager for multi-statement atomic transactions.
-
-    Usage::
-
-        with transaction() as conn:
-            conn.execute("INSERT INTO ...", (...))
-            conn.execute("DELETE FROM ...", (...))
-        # commits on __exit__, rolls back on exception
-
-    Holds _lock for the duration — do not nest with execute() or query().
-    """
     conn = get_connection()
     with _lock:
         conn.execute("BEGIN")

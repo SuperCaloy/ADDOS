@@ -1,7 +1,5 @@
 from flask import Blueprint, jsonify, request
 from backend.pipeline.decision_engine import get_stats, get_scan_log, clear_confidence_lock
-from backend.pipeline.flow_tracker import tracker
-from backend.transport.zmq_receiver import get_raw_counts
 from backend.models import loader
 from backend.database.db import query, execute
 import threading
@@ -12,7 +10,7 @@ log = logging.getLogger(__name__)
 
 bp = Blueprint("stats", __name__)
 
-# Ground truth store — populated by topology when attacks start/stop.
+# Ground truth store -- populated by topology when attacks start/stop.
 # Persisted to DB so it survives backend restarts (fixes RF metrics going to 0
 # when the topology sent notifications before the backend was listening).
 _gt_lock:  threading.Lock = threading.Lock()
@@ -88,7 +86,7 @@ def stats():
     except Exception:
         hist_detect_ms, hist_mitig_ms = 0, 0
 
-    # FP rate from DB — same formula as report (if_fp / (if_fp + if_tn))
+    # FP rate from DB -- same formula as report (if_fp / (if_fp + if_tn))
     try:
         fp_rows = query("""
             SELECT SUM(if_fp) as fp, SUM(if_tn) as tn
@@ -108,7 +106,7 @@ def stats():
         "malicious_dropped": malicious,
         "normal_packets":    normal,
 
-        # Live chart — same values, cards and chart always match
+        # Live chart -- same values, cards and chart always match
         "live_total":        total,
         "live_malicious":    malicious,
         "live_normal":       normal,

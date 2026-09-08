@@ -66,12 +66,6 @@ def _get_ctrl_metrics() -> tuple:
             return (0.0, 0.0)
 
 
-def record_packet() -> None:
-    global _pps_counter
-    with _pps_lock:
-        _pps_counter += 1
-
-
 def start() -> None:
     def _loop():
         global _pps_counter

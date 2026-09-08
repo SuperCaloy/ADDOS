@@ -9,17 +9,8 @@ ARCHIVE_AFTER_HOURS = 24
 ARCHIVE_INTERVAL_S  = 3600   # once per hour
 
 
+# Move events older than ARCHIVE_AFTER_HOURS from hot table to archive atomically.
 def _archive_old_events() -> int:
-    """Move events older than ARCHIVE_AFTER_HOURS from hot table to archive.
-
-    C3 fix: uses transaction() context manager for a real atomic operation.
-    Previously execute("BEGIN") auto-committed immediately because every
-    db.execute() calls conn.commit() — making the old BEGIN/ROLLBACK a no-op
-    and leaving rows in both tables or losing them entirely on a mid-loop crash.
-
-    Also prunes old detection_features rows (ip_detail only needs the latest
-    per src_ip, so older rows are dead weight).
-    """
     cutoff = time.strftime(
         "%Y-%m-%d %H:%M:%S",
         time.localtime(time.time() - ARCHIVE_AFTER_HOURS * 3600)
@@ -54,7 +45,7 @@ def _archive_old_events() -> int:
             log.info("Archived %d mitigation events (older than %s)",
                      deleted_events, cutoff)
     except Exception:
-        log.exception("Archiver failed — rolled back")
+        log.exception("Archiver failed -- rolled back")
 
     try:
         cur = execute(

@@ -1,7 +1,7 @@
 import math
 from flask import Blueprint, jsonify
 from backend.pipeline.flow_tracker import tracker
-from backend.mitigation.state_machine import state_machine
+from backend.mitigation.state_machine import state_machine, PHASE_LABELS
 from backend.pipeline.entropy_analyzer import entropy_analyzer
 from backend.database.db import query
 from backend.models import loader
@@ -9,8 +9,31 @@ from backend.mitigation import behavioral
 
 bp = Blueprint("ip_detail", __name__)
 
+_PHASE_TO_ID = {label: pid for pid, label in PHASE_LABELS.items()}
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+
+# -- Helpers --------------------------------------------------------------------
+
+def _read_tea_profile(src_ip: str) -> tuple[str, int, float, float]:
+    tea_verdict = "uncertain"
+    tea_samples = 0
+    tea_pps_trend = 0.0
+    tea_entropy = 0.0
+    try:
+        tea_verdict = entropy_analyzer.get_ip_verdict(src_ip)
+        with entropy_analyzer._lock:
+            profile = entropy_analyzer._ip_profiles.get(src_ip)
+            if profile:
+                tea_samples = len(profile._pps_samples)
+                if len(profile._pps_samples) >= 2:
+                    tea_pps_trend = profile._pps_samples[-1] - profile._pps_samples[0]
+                pps_list = list(profile._pps_samples)
+                pps_mean = sum(pps_list) / len(pps_list) if pps_list else 0.0
+                pps_var = sum((x - pps_mean) ** 2 for x in pps_list) / len(pps_list) if pps_list else 0.0
+                tea_entropy = math.sqrt(max(pps_var, 1e-9))
+    except Exception:
+        pass
+    return tea_verdict, tea_samples, tea_pps_trend, tea_entropy
 
 def _is_active(src_ip: str) -> bool:
     # Check if IP is currently in state machine (phase 1-3 = active mitigation)
@@ -48,28 +71,11 @@ def _build_live_features(src_ip: str) -> dict | None:
     # Pull live phase/priority from state machine (locked accessor, copy)
     state    = state_machine.get_state(src_ip)
     phase    = state.phase        if state else 0
-    priority = state.priority     if state else "—"
-    action   = state.action_taken if state else "—"
+    priority = state.priority     if state else "--"
+    action   = state.action_taken if state else "--"
 
     # TEA per-IP profile
-    tea_verdict = "uncertain"
-    tea_samples = 0
-    tea_pps_trend = 0.0
-    tea_entropy = 0.0
-    try:
-        tea_verdict = entropy_analyzer.get_ip_verdict(src_ip)
-        with entropy_analyzer._lock:
-            profile = entropy_analyzer._ip_profiles.get(src_ip)
-            if profile:
-                tea_samples = len(profile._pps_samples)
-                if len(profile._pps_samples) >= 2:
-                    tea_pps_trend = profile._pps_samples[-1] - profile._pps_samples[0]
-                pps_list = list(profile._pps_samples)
-                pps_mean = sum(pps_list) / len(pps_list) if pps_list else 0.0
-                pps_var = sum((x - pps_mean) ** 2 for x in pps_list) / len(pps_list) if pps_list else 0.0
-                tea_entropy = math.sqrt(max(pps_var, 1e-9))
-    except Exception:
-        pass
+    tea_verdict, tea_samples, tea_pps_trend, tea_entropy = _read_tea_profile(src_ip)
 
     # Expert trace feature fields (from IF/RF feature contracts)
     flow_count_per_src = fs.get("flow_count_per_src", 0)
@@ -112,7 +118,7 @@ def _build_live_features(src_ip: str) -> dict | None:
         },
         "state": {
             "phase":            phase,
-            "phase_label":      state.phase_label() if state else "—",
+            "phase_label":      state.phase_label() if state else "--",
             "priority":         priority,
             "action_taken":     action,
 
@@ -140,7 +146,7 @@ def _build_db_features(src_ip: str) -> dict | None:
     # Pull last-known features from database for released/historical IPs.
     # Returns None if no data exists at all.
 
-    # Most recent mitigation event — IF score, action, phase
+    # Most recent mitigation event -- IF score, action, phase
     ev_rows = query("""
         SELECT timestamp, predicted_class, attack_vector, confidence,
                if_score, phase, priority, action_taken
@@ -192,7 +198,7 @@ def _build_db_features(src_ip: str) -> dict | None:
     tp_dst       = float(feat.get("tp_dst", 0) or 0)
     port_entropy = round(tp_src / (tp_dst + 1), 4)
 
-    # ip_attack_history — offence/ban/phase metadata
+    # ip_attack_history -- offence/ban/phase metadata
     hist = query("""
         SELECT ban_level, phase_reached, first_seen, priority, offence_count, reputation_score
         FROM ip_attack_history
@@ -201,7 +207,7 @@ def _build_db_features(src_ip: str) -> dict | None:
     """, (src_ip,))
     h = hist[0] if hist else {}
 
-    # Phase history — all distinct phase transitions
+    # Phase history -- all distinct phase transitions
     phase_rows = query("""
         SELECT timestamp, phase, action_taken, attack_vector, event_type, reason
         FROM mitigation_events WHERE src_ip = ?
@@ -214,7 +220,7 @@ def _build_db_features(src_ip: str) -> dict | None:
             ORDER BY timestamp ASC
         """, (src_ip,))
 
-    # Deduplicate phase transitions — keep first per (phase, action) pair
+    # Deduplicate phase transitions -- keep first per (phase, action) pair
     seen   = set()
     phases = []
     for pr in phase_rows:
@@ -224,40 +230,17 @@ def _build_db_features(src_ip: str) -> dict | None:
             phases.append({
                 "timestamp":     pr.get("timestamp"),
                 "phase":         pr.get("phase") or 0,
-                "action_taken":  pr.get("action_taken") or "—",
-                "attack_vector": pr.get("attack_vector") or "—",
+                "action_taken":  pr.get("action_taken") or "--",
+                "attack_vector": pr.get("attack_vector") or "--",
                 "event_type":    pr.get("event_type"),
                 "reason":        pr.get("reason"),
             })
 
-    # TEA per-IP profile for historical IPs (from DB if available, else verdict)
-    tea_verdict = "uncertain"
-    tea_samples = 0
-    tea_pps_trend = 0.0
-    tea_entropy = 0.0
-    try:
-        tea_verdict = entropy_analyzer.get_ip_verdict(src_ip)
-        with entropy_analyzer._lock:
-            profile = entropy_analyzer._ip_profiles.get(src_ip)
-            if profile:
-                tea_samples = len(profile._pps_samples)
-                if len(profile._pps_samples) >= 2:
-                    tea_pps_trend = profile._pps_samples[-1] - profile._pps_samples[0]
-                pps_list = list(profile._pps_samples)
-                pps_mean = sum(pps_list) / len(pps_list) if pps_list else 0.0
-                pps_var = sum((x - pps_mean) ** 2 for x in pps_list) / len(pps_list) if pps_list else 0.0
-                tea_entropy = math.sqrt(max(pps_var, 1e-9))
-    except Exception:
-        pass
+    # TEA per-IP profile
+    tea_verdict, tea_samples, tea_pps_trend, tea_entropy = _read_tea_profile(src_ip)
 
     # DB phase is string label, convert to numeric
-    db_phase = 0
-    if ev.get("phase"):
-        phase_map = {"Quarantined": 1, "Time Ban": 2, "Blackhole": 3}
-        db_phase = phase_map.get(ev.get("phase"), 0)
-    if not db_phase and h.get("phase_reached"):
-        phase_map = {"Quarantined": 1, "Time Ban": 2, "Blackhole": 3}
-        db_phase = phase_map.get(h.get("phase_reached"), 0)
+    db_phase = _PHASE_TO_ID.get(ev.get("phase") or h.get("phase_reached"), 0)
 
     return {
         "src_ip":   src_ip,
@@ -284,13 +267,13 @@ def _build_db_features(src_ip: str) -> dict | None:
         "ml": {
             "if_score":     if_score,
             "is_anomaly":   True,
-            "attack_class": ev.get("attack_vector") or "—",
+            "attack_class": ev.get("attack_vector") or "--",
             "confidence":   conf_pct,
         },
         "state": {
             "phase":            db_phase,
-            "priority":         ev.get("priority") or h.get("priority") or "—",
-            "action_taken":     ev.get("action_taken") or "—",
+            "priority":         ev.get("priority") or h.get("priority") or "--",
+            "action_taken":     ev.get("action_taken") or "--",
 
             "ban_level":        h.get("ban_level", 0),
             "reputation_score": h.get("reputation_score", 0.0),
@@ -312,11 +295,11 @@ def _build_db_features(src_ip: str) -> dict | None:
     }
 
 
-# ── Endpoints ──────────────────────────────────────────────────────────────────
+# -- Endpoints ------------------------------------------------------------------
 
 @bp.get("/api/ip_detail/<path:src_ip>/live")
 def ip_detail_live(src_ip: str):
-    # Real-time endpoint — only works for currently active IPs.
+    # Real-time endpoint -- only works for currently active IPs.
     # Called by ip-drawer.js every 2s when drawer is open and IP is active.
     # Returns 404 if IP is no longer in state machine so drawer stops polling.
     src_ip = src_ip.strip()
@@ -332,11 +315,11 @@ def ip_detail_live(src_ip: str):
 
 @bp.get("/api/ip_detail/<path:src_ip>")
 def ip_detail(src_ip: str):
-    # Full detail endpoint — live if active, DB fallback if not.
+    # Full detail endpoint -- live if active, DB fallback if not.
     # is_live flag in response tells drawer whether to start polling.
     src_ip = src_ip.strip()
 
-    # Try live first regardless of state machine — tracker may have fresh data
+    # Try live first regardless of state machine -- tracker may have fresh data
     if _is_active(src_ip):
         data = _build_live_features(src_ip)
         if data:

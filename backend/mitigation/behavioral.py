@@ -4,7 +4,7 @@ from backend.database import writer
 
 log = logging.getLogger(__name__)
 
-# ── Thresholds ─────────────────────────────────────────────────────────────
+# -- Thresholds -------------------------------------------------------------
 # Weighted offense score triggering direct blackhole (half-life decay, 24h). 5 rapid attacks accumulate to 10.0.
 BLACKHOLE_OFFENSE_THRESHOLD = 10.0
 
@@ -66,14 +66,8 @@ def get_offence_count(src_ip: str) -> int:
         return 0
 
 
-def get_offences(src_ip: str) -> int:
-    # Queries total offense count from ip_attack_history; returns 0 on no history or DB error.
-    try:
-        count = writer.get_offense_total_count(src_ip)
-        return count if count is not None else 0
-    except Exception as exc:
-        log.warning("Behavioral: failed to get offenses for %s - %s", src_ip, exc)
-        return 0
+# Alias duplicate for backward compatibility
+get_offences = get_offence_count
 
 
 def get_ban_level(src_ip: str) -> int:

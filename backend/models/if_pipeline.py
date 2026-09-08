@@ -20,7 +20,7 @@ def _init_median_tracker(n: int) -> None:
 
 
 def _get_local_buffer(n: int):
-    # Per-thread accumulator — avoids locking on every single flow
+    # Per-thread accumulator -- avoids locking on every single flow
     if not hasattr(_thread_local, "sums"):
         _thread_local.sums   = np.zeros(n, dtype=np.float64)
         _thread_local.counts = np.zeros(n, dtype=np.int64)
@@ -82,7 +82,7 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     flow_intensity      = math.log1p(max(pkt * bps, 0))          # uses bps, not pps
     port_entropy        = math.log1p(max(tps / (tpd + 1), 0))
     bytes_per_duration  = math.log1p(max(byt / (fds + eps), 0))
-    # eps here, not +1 — matches training denominator exactly
+    # eps here, not +1 -- matches training denominator exactly
     pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt / (bps + eps), 0))
     flow_src_intensity  = math.log1p(max(fcps * pps, 0))
 

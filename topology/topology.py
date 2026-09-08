@@ -26,174 +26,71 @@ BACKEND_API      = "http://127.0.0.1:5000"
 RESTORE_POLL_S   = 5.0
 N_EDGE           = 8
 N_HOSTS          = 27
-SERVER_IP        = "10.0.0.26"   # h26, victim server
-SINKHOLE_IP      = "10.0.0.27"   # h27, dummy sinkhole host
-# Per-type packet counts calibrated to produce comparable bandwidth impact.
-# SYN: tiny packets (~60B) need high count; UDP: large payload (1400B) needs fewer;
-# ICMP: medium payload (512B) needs moderate count.
-ATTACK_PKT_COUNTS = {
-    "SYN":  20000,
-    "UDP":   8000,
-    "ICMP": 12000,
-}
-
-
-def _attack_pkt_count(atype: str) -> int:
-    """Return the configured packet count for a given attack type."""
-    return ATTACK_PKT_COUNTS.get(atype, 10000)
-
-# 15 legit (h1-h15); 10 attackers (h16-h25); h26 server; h27 sinkhole.
-_LEGIT_NUMS    = frozenset(range(1, 16))
-_ATTACKER_NUMS = frozenset(range(16, 26))
-_ATTACKER_POOL = _ATTACKER_NUMS
+try:
+    from topology.profiles import (
+        SERVER_IP,
+        SINKHOLE_IP,
+        ATTACK_PKT_COUNTS,
+        attack_pkt_count as _attack_pkt_count,
+        _LEGIT_NUMS,
+        _ATTACKER_NUMS,
+        _ATTACKER_POOL,
+        _ALL_VARIANTS,
+        _ATTACKER_VARIANTS,
+        _STRESS_CMDS,
+        _ATTACKER_START_DELAYS,
+        _ATTACK_TYPE_FLAGS,
+        _ATTACK_TYPE_PORTS,
+        _SYN_FLOOD_INSTANCES,
+        flood_spawn_count as _flood_spawn_count,
+        _ICMP_CONTINUOUS,
+        _TCP_PROFILES,
+        _UDP_PROFILES,
+        _LEGIT_SLEEP_MULTIPLIERS,
+        _HOST_SLOTS,
+        post_idle_slots as _post_idle_slots,
+        _DEFAULT_DURATIONS,
+    )
+    from topology.ryu_utils import send_ryu_command as _send_ryu_command
+except (ImportError, ModuleNotFoundError):
+    from profiles import (
+        SERVER_IP,
+        SINKHOLE_IP,
+        ATTACK_PKT_COUNTS,
+        attack_pkt_count as _attack_pkt_count,
+        _LEGIT_NUMS,
+        _ATTACKER_NUMS,
+        _ATTACKER_POOL,
+        _ALL_VARIANTS,
+        _ATTACKER_VARIANTS,
+        _STRESS_CMDS,
+        _ATTACKER_START_DELAYS,
+        _ATTACK_TYPE_FLAGS,
+        _ATTACK_TYPE_PORTS,
+        _SYN_FLOOD_INSTANCES,
+        flood_spawn_count as _flood_spawn_count,
+        _ICMP_CONTINUOUS,
+        _TCP_PROFILES,
+        _UDP_PROFILES,
+        _LEGIT_SLEEP_MULTIPLIERS,
+        _HOST_SLOTS,
+        post_idle_slots as _post_idle_slots,
+        _DEFAULT_DURATIONS,
+    )
+    from ryu_utils import send_ryu_command as _send_ryu_command
 
 # Teardown stop events halt the poller/watchdog loops before net.stop() and suppress the watchdog during the flash-crowd probe.
-_RESTORE_POLLER_STOP   = threading.Event()
+_RESTORE_POLLER_STOP    = threading.Event()
 _BASELINE_WATCHDOG_STOP = threading.Event()
 _WATCHDOG_SUPPRESS      = threading.Event()
-
-# Attack archetypes are deliberately separable on packet size + ports alone so
-# RF never depends on ip_proto being resolvable (proto caches can go blind after
-# a ban/release of a still-flooding attacker): SYN is the tiny-packet archetype
-# (~60B, TCP ports), UDP the amplification archetype (1400B, service ports),
-# ICMP the ping-flood archetype (512B, no ports). Three disjoint size/port
-# clusters; all sizes stay inside the frozen model's tolerated range.
-_ALL_VARIANTS = {
-    16: ("SYN",  "-S -p 80   --flood",                 0, 0),
-    17: ("SYN",  "-S -p 443  --flood",                 0, 0),
-    18: ("SYN",  "-S -p 5432 --flood",                 0, 0),
-    19: ("SYN",  "-S -p 8080 --flood",                 0, 0),
-    20: ("UDP",  "--udp -p 53    --flood --data 1400",  0, 0),
-    21: ("UDP",  "--udp -p 123   --flood --data 1400",  0, 0),
-    22: ("UDP",  "--udp -p 1900  --flood --data 1400",  0, 0),
-    23: ("ICMP", "--icmp --flood --data 512",          0, 0),
-    24: ("ICMP", "--icmp --flood --data 512",          0, 0),
-    25: ("ICMP", "--icmp --flood --data 512",          0, 0),
-}
-_ATTACKER_VARIANTS = {n: v for n, v in _ALL_VARIANTS.items()
-                      if n in _ATTACKER_NUMS}
-assert set(_ATTACKER_VARIANTS) == set(_ATTACKER_NUMS)
-
-# Rand-source stress commands are derived from _ATTACKER_VARIANTS so sizes and flags stay in sync with the base families. Spoofing is a separate memory-stress metric expressed via the extra flag.
-_STRESS_CMDS = {}
-for _n, (_t, _fl, _, _) in _ATTACKER_VARIANTS.items():
-    if _t == "SYN":
-        _core = f"{_fl} --rand-source"
-    else:
-        _core = _fl.replace("--data ", "--rand-source --data ", 1)
-    _STRESS_CMDS[_n] = f"hping3 {_core} {SERVER_IP} > /dev/null 2>&1"
-del _n, _t, _fl
-
-# Stagger delays: 0.1-0.6s random start jitter
-_ATTACKER_START_DELAYS = {
-    num: round(random.uniform(0.1, 0.6), 2) for num in _ATTACKER_NUMS
-}
-
-# Attack type flags for randomized mixed campaigns (same archetypes as
-# _ALL_VARIANTS: SYN tiny, UDP 1400B, ICMP 512B ping-flood)
-_ATTACK_TYPE_FLAGS = {
-    "SYN":  "-S -p {port} --flood",
-    "UDP":  "--udp -p {port} --flood --data 1400",
-    "ICMP": "--icmp --flood --data 512",
-}
-_ATTACK_TYPE_PORTS = {
-    "SYN":  [80, 443, 8080, 5432, 3389, 25, 1900],
-    "UDP":  [53, 123, 1900, 11211, 161, 514],
-    "ICMP": [0],
-}
-
-# SYN aggression: parallel hping3 instances per SYN attacker. SYN is the
-# weakest-detected attack type (52B packets are smaller than benign TCP and
-# share its ports, so packet rate is the only loud IF feature, and log1p
-# compresses it). Two instances ≈ 20-30k pps per host on a contended VM.
-# Budget: 14 total flooders on 8 vCPU / 10GB (Ryu + backend + OVS share the
-# rest). The bare-metal 12T/24GB machine can raise this to 3.
-_SYN_FLOOD_INSTANCES = 2
-
-
-def _flood_spawn_count(atype: str) -> int:
-    # How many parallel hping3 processes one attacker of this type spawns.
-    return _SYN_FLOOD_INSTANCES if atype == "SYN" else 1
-
-# Attackers run pure continuous --flood with no rest cycling.
 
 _mixed_stop_event = threading.Event()
 _campaign_threads: list = []
 
-# Attack-detection fallback: after a stop the switch may lack forward rules so an attacker can flood unseen. The watchdog pokes those hosts to force a fresh table-miss and resume flow_stats.
 _WATCHDOG_INTERVAL_S = 15.0
 _WATCHDOG_WINDOW_S   = 90.0
-# No pokes during the first seconds of a campaign: the backend needs time to
-# detect a fresh wave (ICMP especially), and poking mid-learning disrupts it.
 _POKE_GRACE_S        = 30.0
 _STOP_SETTLE_S       = 3.0
-
-# size_min, size_max, sleep_min, sleep_max
-# Calibrated to real-world background ICMP: monitoring pings every 5-20s.
-_ICMP_CONTINUOUS = {
-    0: (56, 56,  6.0, 10.0),
-    1: (56, 56, 12.0, 20.0),
-    3: (56, 56,  5.0,  8.0),
-}
-
-# port: size_min, size_max, sleep_min, sleep_max
-# Calibrated to real web traffic: page requests every 5-10s, small payloads.
-_TCP_PROFILES = {
-    80:   (32, 128, 5.0, 10.0),
-    443:  (32, 128, 5.0, 10.0),
-    8080: (32, 128, 5.0, 10.0),
-}
-
-# port: size_min, size_max, sleep_min, sleep_max
-# Calibrated to real services: DNS bursty but spaced, NTP/SSDP infrequent,
-# syslog steady, SNMP polling periodic.
-_UDP_PROFILES = {
-    53:   (32, 128, 6.0, 12.0),
-    123:  (32, 128, 8.0, 15.0),
-    161:  (32, 128, 10.0, 20.0),
-    514:  (32, 128, 5.0, 10.0),
-    1900: (32, 128, 8.0, 15.0),
-}
-
-# Per-host send-interval multipliers. Values > 1.0 make a host send less
-# frequently during the baseline active phase so its traffic looks like idle
-# background noise rather than a coordinated flood. h6 and h9 were flagged
-# as attack-like because all UDP hosts hit the same ports at the same rate.
-_LEGIT_SLEEP_MULTIPLIERS = {
-    6:  2.5,   # h6: very chill, ~8-18s between sends
-    8:  1.5,   # h8: slightly slower
-    9:  2.5,   # h9: very chill, ~8-18s between sends
-    10: 1.5,   # h10: slightly slower
-}
-
-# Host slot pools are picked randomly each active cycle and are the exact trained signatures the frozen model recognizes as normal.
-_HOST_SLOTS = {
-    1:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
-    2:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
-    3:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
-    4:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
-    5:  [("tcp", 80), ("tcp", 443), ("tcp", 8080)],
-    6:  [("udp", 53), ("udp", 514)],           # DNS + syslog
-    7:  [("udp", 123), ("udp", 161)],           # NTP + SNMP
-    8:  [("udp", 1900), ("udp", 53)],           # SSDP + DNS
-    9:  [("udp", 514), ("udp", 123)],           # syslog + NTP
-    10: [("udp", 161), ("udp", 1900)],          # SNMP + SSDP
-    11: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
-    12: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
-    13: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
-    14: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
-    15: [("icmp_cont", 0), ("icmp_cont", 1), ("icmp_cont", 3)],
-}
-
-def _post_idle_slots(num: int) -> list:
-    # Keep a host inside its trained per-host signature after idle; a foreign
-    # protocol would breach the frozen model and cause false positives.
-    return list(_HOST_SLOTS.get(num, [("icmp_cont", 1)]))
-
-_DEFAULT_DURATIONS = {
-    "idle":   (8, 20),
-    "active": (45, 45),
-}
 
 # Runtime state, set at startup
 _host_switch_map:    dict[str, str]              = {}
@@ -214,7 +111,10 @@ _restore_log = _logging.getLogger("restore_poller")
 # rows score 0.61-0.64 on the frozen IF (benign UDP FP evidence, benchmark.db
 # 15:xx). Fast pacing for a short window pushes 5+ packets into the flow first;
 # 5-10 packet rows maxed 0.5903 (safe).
-_FLOW_EPOCH_S        = 600  # mirrors FLOW_EPOCH_S in controller/ryu_controller.py
+try:
+    from backend.config import FLOW_EPOCH_S as _FLOW_EPOCH_S
+except ImportError:
+    _FLOW_EPOCH_S = 600
 _WARM_FLUSH_GRACE_S  = 45   # fast pacing duration after a legit-flow flush
 _WARM_EPOCH_WINDOW_S = 30   # fast pacing duration after each epoch boundary
 _WARM_FAST_SLEEP     = (2.0, 3.0)
@@ -303,7 +203,7 @@ def build_tree(n_hosts: int = N_HOSTS, n_edge: int = N_EDGE):
         _hosts.append(host)
         _host_switch_map[f"h{host_num}"] = sw.name
 
-    # h27 silent sinkhole — connected to core, receives redirected traffic
+    # h27 silent sinkhole -- connected to core, receives redirected traffic
     sinkhole = _net.addHost(
         "h27",
         ip=f"{SINKHOLE_IP}/24",
@@ -733,7 +633,7 @@ def _attacker_cycle_worker(num: int, stop_event: threading.Event,
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
 
-    # Restart loop — restarts hping3 if it dies unexpectedly
+    # Restart loop -- restarts hping3 if it dies unexpectedly
     while not stop_event.is_set():
         for _ in range(_flood_spawn_count(atype)):
             _nsrun(h, cmd)
@@ -979,7 +879,7 @@ def verify_attacks() -> None:
 
 
 def start_syn_flood_campaign() -> None:
-    # SYN flood — every SYN-assigned attacker, continuous, watchdog
+    # SYN flood -- every SYN-assigned attacker, continuous, watchdog
     # auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
     nums = _attackers_of_type("SYN")
@@ -998,7 +898,7 @@ def start_syn_flood_campaign() -> None:
         _campaign_threads.append(t)
         t.start()
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
-        # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
+        # 100ms stagger -- prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
     _start_attack_watchdog(nums, _mixed_stop_event)
     info("=" * 55 + "\n")
@@ -1007,7 +907,7 @@ def start_syn_flood_campaign() -> None:
 
 
 def start_icmp_flood_campaign() -> None:
-    # ICMP flood — every ICMP-assigned attacker, continuous, watchdog
+    # ICMP flood -- every ICMP-assigned attacker, continuous, watchdog
     # auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
     nums = _attackers_of_type("ICMP")
@@ -1026,7 +926,7 @@ def start_icmp_flood_campaign() -> None:
         _campaign_threads.append(t)
         t.start()
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
-        # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
+        # 100ms stagger -- prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
     _start_attack_watchdog(nums, _mixed_stop_event)
     info("=" * 55 + "\n")
@@ -1035,7 +935,7 @@ def start_icmp_flood_campaign() -> None:
 
 
 def start_udp_flood_campaign() -> None:
-    # UDP flood — every UDP-assigned attacker, continuous, watchdog
+    # UDP flood -- every UDP-assigned attacker, continuous, watchdog
     # auto-restarts if killed
     global _mixed_stop_event, _campaign_threads
     nums = _attackers_of_type("UDP")
@@ -1054,7 +954,7 @@ def start_udp_flood_campaign() -> None:
         _campaign_threads.append(t)
         t.start()
         info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
-        # 100ms stagger — prevents simultaneous OVS hit and switch disconnects
+        # 100ms stagger -- prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
     _start_attack_watchdog(nums, _mixed_stop_event)
     info("=" * 55 + "\n")
@@ -1122,12 +1022,8 @@ def start_mixed_campaign(stagger_s: float = 2.0) -> None:
     info("=" * 65 + "\n\n")
 
 
+# Randomly assign attack types to attackers, at most ceil(N/3) per type.
 def _randomize_mixed_attacks() -> dict[int, str]:
-    """Randomly assign attack types to attackers, no two same at a time.
-
-    Returns dict mapping attacker num -> attack type (SYN/UDP/ICMP).
-    Constraint: at most ceil(N/3) attackers per type, evenly distributed.
-    """
     nums = sorted(_ATTACKER_NUMS)
     n = len(nums)
     per_type = (n + 2) // 3  # ceil division: 10 attackers -> 4/3/3
@@ -1140,9 +1036,9 @@ def _randomize_mixed_attacks() -> dict[int, str]:
     return dict(zip(nums, pool))
 
 
+# Build hping3 command for a given attack type (randomized campaigns).
 def _hping_cmd_randomized(attacker_num: int, target: str, atype: str,
                           count: int = None) -> str:
-    """Build hping3 command for a given attack type (randomized campaigns)."""
     port = random.choice(_ATTACK_TYPE_PORTS[atype])
     flags = _ATTACK_TYPE_FLAGS[atype].format(port=port)
 
@@ -1151,9 +1047,9 @@ def _hping_cmd_randomized(attacker_num: int, target: str, atype: str,
     return f"hping3 {flags} {target} > /dev/null 2>&1"
 
 
+# Continuous flood with randomized attack type override.
 def _attacker_cycle_worker_randomized(num: int, stop_event: threading.Event,
                                        atype: str, delay: float = 0.0) -> None:
-    """Continuous flood with randomized attack type override."""
     h  = net.get(f"h{num}")
     ip = h.IP()
 
@@ -1199,7 +1095,7 @@ def start_stress_test() -> None:
     _stress_stop_event.clear()
     _stress_threads.clear()
 
-    info("*** Starting stress test — all 10 attackers, rand-source flood -> {}\n".format(SERVER_IP))
+    info("*** Starting stress test -- all 10 attackers, rand-source flood -> {}\n".format(SERVER_IP))
 
 # Stagger each attacker by 100ms so OVS is not hit by all floods in the same millisecond, which causes switch disconnects.
     def _stress_worker(num: int) -> None:
@@ -1317,17 +1213,10 @@ def stop_all_attacks() -> None:
 
     info("*** Clearing controller state via ZMQ...\n")
     try:
-        import zmq as _zmq
-        _ctx  = _zmq.Context.instance()
-        _sock = _ctx.socket(_zmq.PUSH)
-        _sock.setsockopt(_zmq.LINGER, 0)
-        _sock.setsockopt(_zmq.SNDTIMEO, 500)
-        _sock.connect("tcp://127.0.0.1:5556")
         for h in hosts:
             if int(h.name[1:]) in _ATTACKER_POOL:
-                _sock.send_json({"action": "clear", "src_ip": h.IP()})
+                _send_ryu_command({"action": "clear", "src_ip": h.IP()})
                 info(f"    cleared: {h.IP()}\n")
-        _sock.close()
     except Exception as e:
         info(f"    ZMQ warning: {e}\n")
 
@@ -1629,14 +1518,7 @@ def _warmup_macs() -> None:
 
     # signal Ryu to start forwarding stats to backend
     try:
-        import zmq as _zmq
-        _ctx  = _zmq.Context.instance()
-        _sock = _ctx.socket(_zmq.PUSH)
-        _sock.setsockopt(_zmq.LINGER, 0)
-        _sock.setsockopt(_zmq.SNDTIMEO, 500)
-        _sock.connect("tcp://127.0.0.1:5556")
-        _sock.send_json({"action": "warmup_done"})
-        _sock.close()
+        _send_ryu_command({"action": "warmup_done"})
     except Exception as e:
         info(f"    warmup_done warning: {e}\n")
 
@@ -1688,29 +1570,29 @@ def check_traffic() -> None:
 
         if num == 21:
             role, attack_type = "SINKHOLE", "-"
-            status = "✓ sinkhole active"
+            status = "[OK] sinkhole active"
         elif is_server:
             role, attack_type = "SERVER", "-"
             srv_up = h.cmd("pgrep -f 'tcp_udp_server\\|time.sleep' 2>/dev/null").strip()
-            status = "✓ HTTP running" if srv_up else "⚠ server down"
+            status = "[OK] HTTP running" if srv_up else "[WARN] server down"
         elif is_attacker:
             role        = "ATTACKER"
             attack_type = next((f"[{a['attack_type']}] {a['flags']}"
                                 for a in _attack_assignments if a["attacker"] == h.name), "?")
             mit          = quarantine.get(ip)
             is_attacking = ip in _active_attackers
-            if is_attacking and mit: status = f"★ ATTACKING -> [{mit}]"
-            elif is_attacking:       status = "★ ATTACKING"
-            elif mit:                status = f"⚡ MITIGATED [{mit}]"
+            if is_attacking and mit: status = f"[ATTACK] -> [{mit}]"
+            elif is_attacking:       status = "[ATTACK]"
+            elif mit:                status = f"[MITIGATED] [{mit}]"
             else:                    status = "standby"
         else:
             role, attack_type = "legit", "-"
             mit     = quarantine.get(ip)
             t_alive = _baseline_threads.get(h.name)
             running = t_alive is not None and t_alive.is_alive()
-            if mit:       status = f"⚠ FP? MITIGATED [{mit}]"
-            elif running: status = "✓ baseline running"
-            else:         status = "⚠ baseline stopped"
+            if mit:       status = f"[WARN] FP? MITIGATED [{mit}]"
+            elif running: status = "[OK] baseline running"
+            else:         status = "[WARN] baseline stopped"
 
         info(f"  {h.name:<6} {ip:<14} {sw:<8} {role:<10} {attack_type:<12} {status}\n")
 
@@ -1801,7 +1683,7 @@ def watch_pipeline(interval: float = 2.0, anomaly_only: bool = False, n: int = 2
                 if not entries:
                     lines.append("  (waiting for traffic...)")
                 for e in entries:
-                    anom = "⚡ YES" if e.get("is_anomaly") else "  no"
+                    anom = "[YES]" if e.get("is_anomaly") else "  no"
                     lines.append(
                         f"  {e.get('ts','-'):<9} {e.get('src_ip','-'):<16}"
                         f" {e.get('pps',0):>8.1f} {e.get('if_score',0):>9.4f}"
@@ -1857,29 +1739,29 @@ def _print_banner(edge_switches: list) -> None:
     info("\n" + "=" * 75 + "\n")
     info("  COMMANDS\n")
     info("  " + "-" * 65 + "\n")
-    info("  ── BURST (finite) ────────────────────────────────────────────\n")
+    info("  -- BURST (finite) --------------------------------------------\n")
     info(f"  py launch_syn_flood()                  # {ATTACK_PKT_COUNTS['SYN']:,} pkts, h16\n")
     info(f"  py launch_icmp_flood()                 # {ATTACK_PKT_COUNTS['ICMP']:,} pkts, h23\n")
     info(f"  py launch_udp_flood()                  # {ATTACK_PKT_COUNTS['UDP']:,} pkts, h20\n\n")
-    info("  ── SUSTAINED (unlimited) ─────────────────────────────────────\n")
+    info("  -- SUSTAINED (unlimited) -------------------------------------\n")
     info("  py launch_syn_flood_sustained()        # h16\n")
     info("  py launch_icmp_flood_sustained()       # h23\n")
     info("  py launch_udp_flood_sustained()        # h20\n\n")
-    info("  ── ALL ATTACKERS ─────────────────────────────────────────────\n")
+    info("  -- ALL ATTACKERS ---------------------------------------------\n")
     info("  py launch_attack()                     # all 10, randomized types\n")
     info("  py launch_attack(sustained=False)      # all 10, burst\n\n")
-    info("  ── CAMPAIGNS ─────────────────────────────────────────────────\n")
+    info("  -- CAMPAIGNS -------------------------------------------------\n")
     info("  py start_syn_flood_campaign()          # all SYN attackers\n")
     info("  py start_icmp_flood_campaign()         # all ICMP attackers\n")
     info("  py start_udp_flood_campaign()          # all UDP attackers\n")
     info("  py start_mixed_campaign()              # all 10, randomized types\n")
     info("  py start_stress_test()                 # all 10, rand-source, memory stress\n\n")
-    info("  ── STOP ──────────────────────────────────────────────────────\n")
+    info("  -- STOP ------------------------------------------------------\n")
     info("  py stop_all_attacks()                  # kill + flush + clear\n")
     info("  py stop_baseline()                     # stop baseline\n\n")
-    info("  ── BENCHMARK ─────────────────────────────────────────────────\n")
+    info("  -- BENCHMARK -------------------------------------------------\n")
     info("  py run_benchmark()                     # 60-min session, auto-stop + reset + exit\n\n")
-    info("  ── OTHER ─────────────────────────────────────────────────────\n")
+    info("  -- OTHER -----------------------------------------------------\n")
     info("  py flash_crowd()                       # 30s spike to server\n")
     info("  py flash_crowd(duration=60)            # custom duration\n")
     info("  py check_traffic()                     # live host status\n")

@@ -4,12 +4,12 @@ from backend.config import SIMULATION_MODE
 
 log = logging.getLogger(__name__)
 
-# ── Ban durations per level ────────────────────────────────────────────────
+# -- Ban durations per level ------------------------------------------------
 # state_machine calls get_ban_duration(ban_level) and never hardcodes durations.
 if SIMULATION_MODE:
-    BAN_LEVELS = [30, 60, 120, 300, 600, 1200]       # 30s → 20m
+    BAN_LEVELS = [30, 60, 120, 300, 600, 1200]       # 30s -> 20m
 else:
-    BAN_LEVELS = [120, 300, 600, 1800, 3600, 86400]  # 2m → 24h
+    BAN_LEVELS = [120, 300, 600, 1800, 3600, 86400]  # 2m -> 24h
 
 MAX_BAN_LEVEL      = len(BAN_LEVELS) - 1
 
@@ -32,7 +32,7 @@ def get_blackhole_ttl() -> int:
     return BLACKHOLE_TTL_SECONDS
 
 
-# ── Action constants sent verbatim to ZmqCommander → Ryu ──────────────────
+# -- Action constants sent verbatim to ZmqCommander -> Ryu ------------------
 ACTION_QUARANTINE = "quarantine"   # priority-90 drop rule
 ACTION_RATE_LIMIT = "rate_limit"   # priority-80 meter rule
 ACTION_BLOCK      = "block"        # priority-100 full drop
@@ -43,13 +43,13 @@ ACTION_CLEAR      = "clear"        # removes all rules for this IP
 SINKHOLE_CONFIDENCE_THRESHOLD = 0.70
 
 # After sinkhole observation, escalate to quarantine only once confidence is resolved to this level, matching the sinkhole trigger.
-SINKHOLE_ESCALATE_CONFIDENCE = 0.70
+SINKHOLE_ESCALATE_CONFIDENCE = SINKHOLE_CONFIDENCE_THRESHOLD
 
 # Hard ceiling on cumulative time across sinkhole cycles. If RF never resolves an active retripping IP, force escalation once this total is hit.
 SINKHOLE_MAX_TOTAL_SECONDS = 90.0
 
 
-def resolve_phase1_actions(priority: str) -> list[str]:
+def resolve_phase1_actions(priority: str = "") -> list[str]:
     # Phase 1 observation throttles rather than drops, so possibly-legit traffic is still watched.
     return [ACTION_RATE_LIMIT]
 
@@ -85,7 +85,7 @@ def should_sinkhole(attack_vector: str, confidence: float, phase: int) -> bool:
     result = (attack_vector == "Uncertain") and (confidence < SINKHOLE_CONFIDENCE_THRESHOLD)
 
     if result:
-        log.debug("TrafficFilter: sinkhole — vector=%s  conf=%.2f", attack_vector, confidence)
+        log.debug("TrafficFilter: sinkhole -- vector=%s  conf=%.2f", attack_vector, confidence)
 
     return result
 

@@ -8,8 +8,17 @@ import os
 import threading
 import sqlite3
 import json
-import urllib.request
 from pathlib import Path
+
+
+def _project_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _fetch_backend_json(url: str, timeout: float = 2.0) -> dict:
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.load(r)
+
 
 # fractions of the 60-minute evaluated window (T_eval_start relative)
 _PHASES = [   # (start_frac, kind, action)
@@ -59,9 +68,7 @@ def _default_calibration_gate(topo, cap_s: float):
     clean = 0
     while time.monotonic() < deadline and clean < 3:
         try:
-            with urllib.request.urlopen(f"{topo.BACKEND_API}/api/expert/live",
-                                        timeout=2) as r:
-                data = json.load(r)
+            data = _fetch_backend_json(f"{topo.BACKEND_API}/api/expert/live", timeout=2)
             learned = (data.get("tea", {}).get("global", {})
                        .get("learned") is True)
             # Clean poll: no live IpState entries and no active sinkholes.
@@ -90,9 +97,7 @@ def _clean_poll_gate(topo, limit_t: float):
     import json, urllib.request
     while time.monotonic() < limit_t:
         try:
-            with urllib.request.urlopen(f"{topo.BACKEND_API}/api/expert/live",
-                                        timeout=2) as r:
-                data = json.load(r)
+            data = _fetch_backend_json(f"{topo.BACKEND_API}/api/expert/live", timeout=2)
             # Ground truth: empty state machine and no active sinkholes.
             if (not data.get("state_machine")
                     and not data.get("deception", {})
@@ -108,9 +113,7 @@ def _log_tier_snapshot(topo):
     # optional telemetry before the second mixed wave; never fatal
     import json, urllib.request
     try:
-        with urllib.request.urlopen(f"{topo.BACKEND_API}/api/stats",
-                                    timeout=2) as r:
-            data = json.load(r)
+        data = _fetch_backend_json(f"{topo.BACKEND_API}/api/stats", timeout=2)
         # compact slice of the response, never the whole payload
         summary = {k: data.get(k) for k in
                    ("active_threats", "malicious_dropped",
@@ -140,7 +143,7 @@ def _resolve_db_path():
     env = os.environ.get("DDOS_DB_PATH")
     if env:
         return Path(env)
-    return Path(__file__).resolve().parents[1] / "benchmark" / "benchmark.db"
+    return _project_root() / "benchmark" / "benchmark.db"
 
 
 def _marker_path():
@@ -150,7 +153,7 @@ def _marker_path():
         from backend.config import MARKER_PATH
         return Path(MARKER_PATH)
     except Exception:
-        return Path(__file__).resolve().parents[1] / "benchmark" / "DB_TARGET"
+        return _project_root() / "benchmark" / "DB_TARGET"
 
 
 def _write_db_marker() -> None:
@@ -190,11 +193,10 @@ def _await_backend_db(topo, cap_s: float) -> None:
     target = str(_resolve_db_path())
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(f"{topo.BACKEND_API}/api/db_path",
-                                        timeout=2) as r:
-                if json.load(r).get("db_path") == target:
-                    print(f"BENCHMARK: backend confirmed on {target}")
-                    return
+            data = _fetch_backend_json(f"{topo.BACKEND_API}/api/db_path", timeout=2)
+            if data.get("db_path") == target:
+                print(f"BENCHMARK: backend confirmed on {target}")
+                return
         except Exception:
             pass
         time.sleep(2)
@@ -207,7 +209,7 @@ def _init_benchmark_db(db_path: Path) -> None:
 # Create a fresh DB like the backend's own first boot (same folder autogeneration, WAL pragmas, full schema and migrations) via backend.database.db's schema code. This keeps the schema in sync, avoiding drift.
     db_path.parent.mkdir(parents=True, exist_ok=True)
     import sys
-    root = str(Path(__file__).resolve().parents[1])
+    root = str(_project_root())
     if root not in sys.path:
         sys.path.insert(0, root)
     from backend.database import db as backend_db

@@ -1,7 +1,6 @@
 import json
 import threading
 import joblib
-import numpy as np
 from backend.config import (
     IF_MODEL_PATH, IF_SCALER_PATH, IF_QUANTILER_PATH, IF_CONTRACT_PATH,
     RF_MODEL_PATH, RF_SCALER_PATH, RF_CONTRACT_PATH, RF_ENCODER_PATH,
@@ -10,7 +9,7 @@ from backend.config import (
 _lock = threading.Lock()
 _loaded = False
 
-# Singletons — populated once at startup
+# Singletons -- populated once at startup
 if_model     = None
 if_scaler    = None
 if_quantiler = None
@@ -59,4 +58,4 @@ def load_all() -> None:
 
 def require_loaded() -> None:
     if not _loaded:
-        raise RuntimeError("Models not loaded — call loader.load_all() at startup.")
+        raise RuntimeError("Models not loaded -- call loader.load_all() at startup.")

@@ -11,8 +11,8 @@ import logging
 log = logging.getLogger(__name__)
 
 
+# EWMA-based dynamic threshold for DDoS detection.
 class DynamicThreshold:
-    """EWMA-based dynamic threshold for DDoS detection."""
 
     def __init__(self, alpha: float = 0.1, multiplier: float = 3.0,
                  initial: float = 50.0, floor: float = 25.0):
@@ -31,7 +31,7 @@ class DynamicThreshold:
         return current_pps > self.threshold()
 
 
-# proto_key → (limit, window_seconds)
+# proto_key -> (limit, window_seconds)
 _PROTO_CONFIG = {
     "SYN":  (FLOOD_SYN_LIMIT,  FLOOD_SYN_WINDOW_S),
     "ICMP": (FLOOD_ICMP_LIMIT, FLOOD_ICMP_WINDOW_S),
@@ -74,17 +74,17 @@ class FloodPreFilter:
     def __init__(self):
         self._lock = threading.Lock()
 
-        # src_ip → proto_key → _ProtoWindow
+        # src_ip -> proto_key -> _ProtoWindow
         self._windows: dict[str, dict[str, _ProtoWindow]] = defaultdict(
             lambda: defaultdict(_ProtoWindow)
         )
 
-        # src_ip → proto_key → DynamicThreshold
+        # src_ip -> proto_key -> DynamicThreshold
         self._dyn_thresh: dict[str, dict[str, DynamicThreshold]] = defaultdict(
             lambda: defaultdict(DynamicThreshold)
         )
 
-        # (src_ip, proto_key) → trigger reason string
+        # (src_ip, proto_key) -> trigger reason string
         self._flagged: dict[tuple, str] = {}
 
         # Session-cumulative counters (never reset until process restart)
@@ -113,18 +113,18 @@ class FloodPreFilter:
             limit = dt.threshold()
             key   = (src_ip, proto)
 
-            # Already flagged — update correlation silently
+            # Already flagged -- update correlation silently
             if key in self._flagged:
                 self._check_correlation(src_ip, now)
                 return False
 
             reason = None
 
-            # 1. Full window limit — count >= configured limit in window_s
+            # 1. Full window limit -- count >= configured limit in window_s
             if count >= limit:
                 reason = f"limit={count}>={limit} in {window_s}s"
 
-            # 2. Burst sub-window — 40% of limit in 0.1s or 0.5s
+            # 2. Burst sub-window -- 40% of limit in 0.1s or 0.5s
             if reason is None:
                 burst_limit = max(2, int(limit * _BURST_FRACTION))
                 for sw in _BURST_WINDOWS:
@@ -145,7 +145,7 @@ class FloodPreFilter:
         return False
 
     def _check_correlation(self, src_ip: str, now: float) -> None:
-        # Called inside self._lock — count active protocols, log if multi-vector
+        # Called inside self._lock -- count active protocols, log if multi-vector
         active = sum(
             1 for proto, (_, window_s) in _PROTO_CONFIG.items()
             if (w := self._windows[src_ip].get(proto)) and w.count_in(now, window_s) > 0

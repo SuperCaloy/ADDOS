@@ -9,24 +9,13 @@ let logCt = 0;
 /* Sort state for audit log */
 let logSortAsc = false;
 
-/* Dynamic audit log count */
-function updateLogCount(delta) {
-  logCt += delta;
-  const el = document.getElementById('log-ct');
-  if (el) el.textContent = logCt;
-}
 
 /* Infinite scroll state */
 let logLoading = false;
 let logAllLoaded = false;
 let logOldestTimestamp = null;
 
-/* Add or update one row in the audit log table */
-function addLogRow(ev) {
-  const tb          = document.getElementById('log-body');
-  const placeholder = tb.querySelector('[colspan]');
-  if (placeholder) placeholder.parentElement.remove();
-
+function _buildEventRowData(ev) {
   const ip        = ev.src_ip     || '-';
   const newAction = ev.action_taken || '-';
 
@@ -45,11 +34,22 @@ function addLogRow(ev) {
     <td>${renderPriority(ev.priority      || 'Low')}</td>
     <td>${renderAction(actionLabel)}</td>`;
 
-  /* Incident key: same IP + event_type = same incident row (update in-place).
-   * After a release, key is deleted so next detection starts a new row. */
   const key = ip + '|' + (ev.event_type || 'transition');
   const isRelease = ev.event_type === 'released' || (ev.event_type === 'manual' && /release/i.test(newAction));
 
+  return { ip, newAction, html, key, isRelease };
+}
+
+/* Add or update one row in the audit log table */
+function addLogRow(ev) {
+  const tb          = document.getElementById('log-body');
+  const placeholder = tb.querySelector('[colspan]');
+  if (placeholder) placeholder.parentElement.remove();
+
+  const { ip, newAction, html, key, isRelease } = _buildEventRowData(ev);
+
+  /* Incident key: same IP + event_type = same incident row (update in-place).
+   * After a release, key is deleted so next detection starts a new row. */
   if (_logRows.has(key)) {
     const existing = _logRows.get(key);
     existing.tr.innerHTML = html;
@@ -94,25 +94,7 @@ function prependOlderRows(events) {
   if (placeholder) placeholder.parentElement.remove();
 
   events.forEach(ev => {
-    const ip        = ev.src_ip     || '-';
-    const newAction = ev.action_taken || '-';
-
-    let actionLabel = newAction;
-    if (/time ban/i.test(newAction) && ev.ban_duration_sec) {
-      actionLabel = `Time Ban ${Math.round(ev.ban_duration_sec / 60)}m`;
-    }
-
-    const html = `
-      <td class="mono">${ev.timestamp      || '-'}</td>
-      <td class="ip">${ip}</td>
-      <td>${renderClass(ev.predicted_class  || '-')}</td>
-      <td>${renderVector(ev.attack_vector   || '-')}</td>
-      <td class="mono">${ev.confidence      || '-'}</td>
-      <td>${renderPriority(ev.priority      || 'Low')}</td>
-      <td>${renderAction(actionLabel)}</td>`;
-
-    const key = ip + '|' + (ev.event_type || 'transition');
-    const isRelease = ev.event_type === 'released' || (ev.event_type === 'manual' && /release/i.test(newAction));
+    const { ip, newAction, html, key, isRelease } = _buildEventRowData(ev);
 
     /* Skip if row already exists (dedup) */
     if (_logRows.has(key)) return;
@@ -136,19 +118,14 @@ function prependOlderRows(events) {
   set('log-ct', logCt.toString());
 }
 
-/* Connect SSE stream - auto-reconnects on error after 3s */
+/* Connect SSE stream via unified EventBus */
 function connectSSE() {
-  const es     = new EventSource(`${API}/api/events`);
-  es.onmessage = e => { 
-    try { 
-      const parsed = JSON.parse(e.data);
-      if (parsed.type === 'expert') return; // Handled by expert.js
-      
-      const ev = parsed.payload || parsed;
-      if (ev.src_ip) addLogRow(ev); 
-    } catch (_) {} 
-  };
-  es.onerror   = ()  => { es.close(); setTimeout(connectSSE, 3000); };
+  if (window.EventBus) {
+    window.EventBus.on('event', ev => {
+      if (ev && ev.src_ip) addLogRow(ev);
+    });
+    window.EventBus.connect();
+  }
 }
 
 /* Sort audit log rows by timestamp */

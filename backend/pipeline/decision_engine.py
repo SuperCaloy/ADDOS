@@ -3,8 +3,83 @@ import logging
 import threading
 import datetime
 import collections
-from backend.mitigation.state_machine import state_machine
+from backend.mitigation.state_machine import state_machine, _build_mitigation_event, _build_sse_event
 from backend.mitigation.deception import deception
+
+
+def _build_tea_result(flow_stats: dict) -> dict:
+    fs = flow_stats or {}
+    return {
+        "is_flash_crowd":    fs.get("tea_flash_crowd", False),
+        "is_attack_pattern": fs.get("tea_attack_pattern", False),
+        "confidence":        fs.get("tea_confidence", "low"),
+        "is_learned":        fs.get("tea_is_learned", False),
+    }
+
+
+def _compute_rf_confusion(expected_class: str, attack_class: str) -> dict:
+    _class_map = {"SYN Flood": "SYN", "ICMP Flood": "ICMP", "UDP Flood": "UDP"}
+    _predicted = _class_map.get(attack_class)
+    res = {
+        "rf_tp": 0, "rf_fp": 0, "rf_tn": 0, "rf_fn": 0,
+        "rf_tp_syn": 0, "rf_fp_syn": 0, "rf_tn_syn": 0, "rf_fn_syn": 0,
+        "rf_tp_icmp": 0, "rf_fp_icmp": 0, "rf_tn_icmp": 0, "rf_fn_icmp": 0,
+        "rf_tp_udp": 0, "rf_fp_udp": 0, "rf_tn_udp": 0, "rf_fn_udp": 0,
+        "rf_syn_as_icmp": 0, "rf_syn_as_udp": 0,
+        "rf_icmp_as_syn": 0, "rf_icmp_as_udp": 0,
+        "rf_udp_as_syn": 0, "rf_udp_as_icmp": 0,
+    }
+    if expected_class and _predicted:
+        if _predicted == expected_class:
+            res["rf_tp"] = 1
+            if expected_class == "SYN":
+                res["rf_tp_syn"] = 1
+                res["rf_tn_icmp"] = 1
+                res["rf_tn_udp"] = 1
+            elif expected_class == "ICMP":
+                res["rf_tp_icmp"] = 1
+                res["rf_tn_syn"] = 1
+                res["rf_tn_udp"] = 1
+            elif expected_class == "UDP":
+                res["rf_tp_udp"] = 1
+                res["rf_tn_syn"] = 1
+                res["rf_tn_icmp"] = 1
+        else:
+            res["rf_fp"] = 1
+            res["rf_fn"] = 1
+            mis = (expected_class, _predicted)
+            if mis == ("SYN", "ICMP"):
+                res["rf_syn_as_icmp"] = 1
+            elif mis == ("SYN", "UDP"):
+                res["rf_syn_as_udp"] = 1
+            elif mis == ("ICMP", "SYN"):
+                res["rf_icmp_as_syn"] = 1
+            elif mis == ("ICMP", "UDP"):
+                res["rf_icmp_as_udp"] = 1
+            elif mis == ("UDP", "SYN"):
+                res["rf_udp_as_syn"] = 1
+            elif mis == ("UDP", "ICMP"):
+                res["rf_udp_as_icmp"] = 1
+    elif expected_class and not _predicted:
+        res["rf_fn"] = 1
+        if expected_class == "SYN":
+            res["rf_fn_syn"] = 1
+        elif expected_class == "ICMP":
+            res["rf_fn_icmp"] = 1
+        elif expected_class == "UDP":
+            res["rf_fn_udp"] = 1
+    return res
+
+
+def _merge_confidence(locked: tuple, current: tuple) -> tuple:
+    locked_conf, locked_class = locked
+    cur_conf, cur_class = current
+    if locked_class == "Uncertain" and cur_class != "Uncertain" and cur_conf >= locked_conf:
+        return current
+    elif cur_conf < locked_conf:
+        return (locked_conf, locked_class)
+    else:
+        return current
 from backend.database import writer
 from backend.pipeline import worker
 from backend.pipeline.flood_prefilter import flood_filter
@@ -15,8 +90,8 @@ from backend.config import ML_ENABLED
 log = logging.getLogger(__name__)
 
 
+# Real packet_count when present, else falls back to pps estimate.
 def _estimate_pkt_count(flow_stats: dict) -> int:
-    """Real packet_count when present, else falls back to pps estimate."""
     fs  = flow_stats or {}
     raw = fs.get("packet_count")
     if raw is not None:
@@ -102,19 +177,19 @@ _sse_buffer: collections.deque = collections.deque(maxlen=500)
 _sse_dedup: dict = {}
 _SSE_DEDUP_TTL = 5.0
 
-# ── Pending restores - IPs awaiting baseline traffic restart after manual release
+# -- Pending restores - IPs awaiting baseline traffic restart after manual release
 _restore_lock     = threading.Lock()
 _pending_restores: set[str] = set()
 
-# ── Scan log - rolling buffer of last 200 flow evaluations for /api/debug/flows
+# -- Scan log - rolling buffer of last 200 flow evaluations for /api/debug/flows
 _scan_lock   = threading.Lock()
 _scan_buffer: collections.deque = collections.deque(maxlen=200)
 
 
+# Called by worker for every flow that runs through IF inference.
 def push_scan_result(src_ip: str, pps: float, sw_delta: float,
                      if_score: float, threshold: float, is_anomaly: bool,
                      attack_class: str, confidence: float) -> None:
-    """Called by worker for every flow that runs through IF inference."""
     import datetime
     entry = {
         "ts":          datetime.datetime.now().strftime("%H:%M:%S"),
@@ -135,7 +210,7 @@ def get_scan_log() -> list[dict]:
     with _scan_lock:
         return list(_scan_buffer)
 
-# ── Pipeline debug log - rolling buffer of last 200 inference results
+# -- Pipeline debug log - rolling buffer of last 200 inference results
 # Each entry: {src_ip, pps, if_score, threshold, is_anomaly,
 #              attack_class, confidence, action, ts}
 # Exposed via GET /api/debug so operators can see what the ML pipeline is doing.
@@ -153,8 +228,8 @@ def _push_debug(entry: dict) -> None:
         _debug_buffer.append(entry)
 
 
+# Accumulates real OVS dropped packet counts from ryu_controller.
 def record_dropped_packets(src_ip: str, delta: int) -> None:
-    """Accumulates real OVS dropped packet counts from ryu_controller."""
     with _lock:
         _stats["actual_pkts_dropped"] += delta
 
@@ -184,11 +259,10 @@ def get_stats() -> dict:
     }
 
 
-# ── False-positive handling ────────────────────────────────────────────────────
+# -- False-positive handling ----------------------------------------------------
 
+# Manual release of a blocked host (FP); buffers to traffic_summary and queues for restore.
 def record_false_positive(src_ip: str) -> None:
-    """Manual release of a blocked host, real FP. Buffers into traffic_summary
-    and queues src_ip for baseline restore."""
     with _lock:
         _stats["false_positives"] += 1
     writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1)
@@ -198,17 +272,16 @@ def record_false_positive(src_ip: str) -> None:
              src_ip, _stats["false_positives"])
 
 
+# Drain and return IPs queued for baseline traffic restoration.
 def drain_pending_restores() -> list[str]:
-    """Drain and return IPs queued for baseline traffic restoration."""
     with _restore_lock:
         ips = list(_pending_restores)
         _pending_restores.clear()
     return ips
 
 
+# Reset per-IP confidence lock so stale campaign classifications do not persist.
 def clear_confidence_lock() -> None:
-    """Reset the per-IP confidence lock so stale campaign classifications
-    cannot ratchet over fresh RF results in the next campaign."""
     with _conf_lock_mutex:
         _conf_lock.clear()
     log.info("Confidence lock cleared")
@@ -248,7 +321,7 @@ def _assign_priority(if_score: float, confidence: float,
     )
 
 
-# ── Detection ledger gate: one 'detected' row per phase entry ────────────
+# -- Detection ledger gate: one 'detected' row per phase entry ------------
 # Keyed on IpState.phase_entered (monotonic); repeats within one entry are
 # suppressed, and stale entries are pruned to bound memory under IP churn.
 _DETECTION_LOGGED_MAX = 128
@@ -277,7 +350,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     from backend.api.stats import get_active_attacks as _get_gt
     t_start = time.monotonic()
 
-    # Detection Time - flow queued (worker.submit) → IF/RF result ready here.
+    # Detection Time - flow queued (worker.submit) -> IF/RF result ready here.
     # None when not provided (e.g. timeout fallback path) - left as None in DB.
     detection_ms = ((t_start - enqueued_at) * 1000.0) if enqueued_at is not None else None
     if detection_ms is not None:
@@ -326,7 +399,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     with _lock:
         _stats["ml_processed"] += 1
 
-    # ── Debug log - record every inference result ─────────────────────────────
+    # -- Debug log: record every inference result ------------------------------
     _pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
 
     # update sinkhole PPS so observation window can escalate/release correctly
@@ -359,7 +432,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
             _stats["normal_packets"]  += 1
             _stats["normal_forwarded"] += _pkt_count
 
-        # IF: normal → TN if legit, FN if attacker (only if actively attacking)
+        # IF: normal -> TN if legit, FN if attacker (only if actively attacking)
         _is_attacker = src_ip in _get_gt()
         writer.log_traffic_summary(
             total=1, threats=0, true_neg=1, fp=0,
@@ -386,14 +459,9 @@ def on_result(src_ip: str, if_score, is_anomaly,
     with _conf_lock_mutex:
         prev = _conf_lock.get(src_ip)
         if prev is not None:
-            locked_conf, locked_class = prev
-            if locked_class == "Uncertain" and attack_class != "Uncertain" and confidence >= locked_conf:
-                _conf_lock[src_ip] = (confidence, attack_class)
-            elif confidence < locked_conf:
-                confidence   = locked_conf
-                attack_class = locked_class
-            else:
-                _conf_lock[src_ip] = (confidence, attack_class)
+            merged = _merge_confidence(prev, (confidence, attack_class))
+            confidence, attack_class = merged
+            _conf_lock[src_ip] = (confidence, attack_class)
         else:
             _conf_lock[src_ip] = (confidence, attack_class)
 
@@ -403,12 +471,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # TEA mitigation gate. Every interval already went through IF/RF.
     # Ground truth counting below always runs, regardless of this decision.
-    _tea_result = {
-        "is_flash_crowd":    (flow_stats or {}).get("tea_flash_crowd", False),
-        "is_attack_pattern": (flow_stats or {}).get("tea_attack_pattern", False),
-        "confidence":        (flow_stats or {}).get("tea_confidence", "low"),
-        "is_learned":        (flow_stats or {}).get("tea_is_learned", False),
-    }
+    _tea_result = _build_tea_result(flow_stats)
 
     # TEA confidence-based routing
     _tea_confidence = _tea_result.get("confidence", "low")
@@ -479,22 +542,21 @@ def on_result(src_ip: str, if_score, is_anomaly,
     if not is_known_legit and _tea_mitigate and (
         ip_state is None or _should_log_detection(src_ip, ip_state.phase_entered)
     ):
-        writer.log_mitigation_event({
-        "timestamp":       ts,
-        "src_ip":          src_ip,
-        "predicted_class": predicted_class,
-        "attack_vector":   attack_class,
-        "confidence":      confidence,
-        "priority":        priority,
-        "action_taken":    action_taken,
-        "if_score":        if_score,
-        "phase":           phase_label,
-        "is_manual":       0,
-        "event_type":      "detected",
-        "detection_ms":    detection_ms,
-        "mitigation_ms":   mitigation_ms,
-        "session_id":      ip_state.session_id if ip_state else None,
-        })
+        writer.log_mitigation_event(_build_mitigation_event(
+            src_ip=src_ip,
+            attack_vector=attack_class,
+            confidence=confidence,
+            priority=priority,
+            action_taken=action_taken,
+            if_score=if_score,
+            phase=phase_label,
+            event_type="detected",
+            reason=None,
+            session_id=ip_state.session_id if ip_state else None,
+            is_manual=False,
+            detection_ms=detection_ms,
+            mitigation_ms=mitigation_ms,
+        ))
 
     _threat_pps = _estimate_pkt_count(flow_stats)
     _is_tp      = src_ip in _get_gt()
@@ -515,55 +577,23 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     # Map RF attack_class to short type
     _class_map = {"SYN Flood": "SYN", "ICMP Flood": "ICMP", "UDP Flood": "UDP"}
-    _predicted  = _class_map.get(attack_class)
-
-    _rf_tp = _rf_fp = _rf_tn = _rf_fn = 0
-    _rf_tp_syn = _rf_fp_syn = _rf_tn_syn = _rf_fn_syn = 0
-    _rf_tp_icmp= _rf_fp_icmp= _rf_tn_icmp= _rf_fn_icmp= 0
-    _rf_tp_udp = _rf_fp_udp = _rf_tn_udp = _rf_fn_udp = 0
-    _rf_syn_as_icmp = _rf_syn_as_udp = 0
-    _rf_icmp_as_syn = _rf_icmp_as_udp = 0
-    _rf_udp_as_syn  = _rf_udp_as_icmp = 0
-
-    if _expected_class and _predicted:
-        if _predicted == _expected_class:
-            _rf_tp = 1
-            if _expected_class == "SYN":
-                _rf_tp_syn = 1; _rf_tn_icmp = 1; _rf_tn_udp = 1
-            elif _expected_class == "ICMP":
-                _rf_tp_icmp = 1; _rf_tn_syn = 1; _rf_tn_udp = 1
-            elif _expected_class == "UDP":
-                _rf_tp_udp = 1; _rf_tn_syn = 1; _rf_tn_icmp = 1
-        else:
-            # Misclassification - track off-diagonal cell
-            _rf_fp = 1; _rf_fn = 1
-            _mis = (_expected_class, _predicted)
-            if   _mis == ("SYN",  "ICMP"): _rf_syn_as_icmp  = 1
-            elif _mis == ("SYN",  "UDP"):  _rf_syn_as_udp   = 1
-            elif _mis == ("ICMP", "SYN"):  _rf_icmp_as_syn  = 1
-            elif _mis == ("ICMP", "UDP"):  _rf_icmp_as_udp  = 1
-            elif _mis == ("UDP",  "SYN"):  _rf_udp_as_syn   = 1
-            elif _mis == ("UDP",  "ICMP"): _rf_udp_as_icmp  = 1
-    elif _expected_class and not _predicted:
-        _rf_fn = 1
-        if _expected_class == "SYN":   _rf_fn_syn  = 1
-        elif _expected_class == "ICMP": _rf_fn_icmp = 1
-        elif _expected_class == "UDP":  _rf_fn_udp  = 1
+    _predicted = _class_map.get(attack_class)
+    _rf = _compute_rf_confusion(_expected_class, attack_class)
 
     writer.log_traffic_summary(
         total=1, threats=1, true_neg=0, fp=0,
         tp=(1 if _is_tp else 0),
         if_tp=_if_tp, if_fp=_if_fp,
-        rf_tp=_rf_tp, rf_fp=_rf_fp, rf_tn=_rf_tn, rf_fn=_rf_fn,
-        rf_tp_syn=_rf_tp_syn, rf_fp_syn=_rf_fp_syn,
-        rf_tn_syn=_rf_tn_syn, rf_fn_syn=_rf_fn_syn,
-        rf_tp_icmp=_rf_tp_icmp, rf_fp_icmp=_rf_fp_icmp,
-        rf_tn_icmp=_rf_tn_icmp, rf_fn_icmp=_rf_fn_icmp,
-        rf_tp_udp=_rf_tp_udp, rf_fp_udp=_rf_fp_udp,
-        rf_tn_udp=_rf_tn_udp, rf_fn_udp=_rf_fn_udp,
-        rf_syn_as_icmp=_rf_syn_as_icmp, rf_syn_as_udp=_rf_syn_as_udp,
-        rf_icmp_as_syn=_rf_icmp_as_syn, rf_icmp_as_udp=_rf_icmp_as_udp,
-        rf_udp_as_syn=_rf_udp_as_syn,   rf_udp_as_icmp=_rf_udp_as_icmp,
+        rf_tp=_rf["rf_tp"], rf_fp=_rf["rf_fp"], rf_tn=_rf["rf_tn"], rf_fn=_rf["rf_fn"],
+        rf_tp_syn=_rf["rf_tp_syn"], rf_fp_syn=_rf["rf_fp_syn"],
+        rf_tn_syn=_rf["rf_tn_syn"], rf_fn_syn=_rf["rf_fn_syn"],
+        rf_tp_icmp=_rf["rf_tp_icmp"], rf_fp_icmp=_rf["rf_fp_icmp"],
+        rf_tn_icmp=_rf["rf_tn_icmp"], rf_fn_icmp=_rf["rf_fn_icmp"],
+        rf_tp_udp=_rf["rf_tp_udp"], rf_fp_udp=_rf["rf_fp_udp"],
+        rf_tn_udp=_rf["rf_tn_udp"], rf_fn_udp=_rf["rf_fn_udp"],
+        rf_syn_as_icmp=_rf["rf_syn_as_icmp"], rf_syn_as_udp=_rf["rf_syn_as_udp"],
+        rf_icmp_as_syn=_rf["rf_icmp_as_syn"], rf_icmp_as_udp=_rf["rf_icmp_as_udp"],
+        rf_udp_as_syn=_rf["rf_udp_as_syn"],   rf_udp_as_icmp=_rf["rf_udp_as_icmp"],
     )
 
     elapsed_ms = (time.monotonic() - t_start) * 1000
@@ -587,17 +617,15 @@ def on_result(src_ip: str, if_score, is_anomaly,
     # Push SSE for every detection so the audit log reflects live activity.
     # All detections bypass dedup to ensure the audit log is never stale.
     if not is_known_legit and _tea_mitigate:
-        _push_sse_event({
-            "timestamp":       ts,
-            "src_ip":          src_ip,
-            "predicted_class": predicted_class,
-            "attack_vector":   attack_class,
-            "confidence":      f"{confidence * 100:.1f}%",
-            "priority":        priority,
-            "action_taken":    action_taken,
-            "event_type":      "released" if action_taken == "Released" else "transition",
-            "session_id":      ip_state.session_id if ip_state else None,
-        }, force=True)
+        _push_sse_event(_build_sse_event(
+            src_ip=src_ip,
+            attack_vector=attack_class,
+            confidence=confidence,
+            priority=priority,
+            action_taken=action_taken,
+            event_type="released" if action_taken == "Released" else "transition",
+            session_id=ip_state.session_id if ip_state else None,
+        ), force=True)
 
 
 def start() -> None:

@@ -1,7 +1,7 @@
-/* mitigation.js — polls /api/quarantine_list, DOM-diffs watchlist table,
+/* mitigation.js -- polls /api/quarantine_list, DOM-diffs watchlist table,
  * handles release and blackhole button actions with confirmation modals. */
 
-/* Row map — src_ip → <tr> — used for in-place DOM updates (no flicker) */
+/* Row map -- src_ip -> <tr> -- used for in-place DOM updates (no flicker) */
 const _qRows = new Map();
 
 /* Confirmation modal state */
@@ -48,13 +48,14 @@ async function fetchQuarantine() {
     data.forEach(e => {
       const sc   = e.if_score || 0;
       const ts   = e.time_in_phase_sec || 0;
-      const conf = e.confidence != null ? Number(e.confidence).toFixed(4) : '—';
+      const conf = e.confidence != null ? Number(e.confidence).toFixed(4) : '--';
       const time = ts < 60 ? `${ts}s` : `${Math.floor(ts / 60)}m ${ts % 60}s`;
 
       /* IF score color class based on threshold */
-      const scCls = !ifThr           ? 'mono'
-                  : sc >= ifThr * 1.2 ? 'sc-red'
-                  : sc >= ifThr       ? 'sc-amb'
+      const currentThr = window.Store ? window.Store.getIfThreshold() : ifThr;
+      const scCls = !currentThr           ? 'mono'
+                  : sc >= currentThr * 1.2 ? 'sc-red'
+                  : sc >= currentThr       ? 'sc-amb'
                   : 'sc-grn';
 
       /* TTL countdown for time-ban rows */
@@ -63,22 +64,16 @@ async function fetchQuarantine() {
         : '';
 
       /* Priority badge */
-      const _priMap = {
-        'Critical': '<span class="p-crit">CRITICAL</span>',
-        'High':     '<span class="p-high">HIGH</span>',
-        'Medium':   '<span class="p-med">MEDIUM</span>',
-        'Low':      '<span class="p-low">LOW</span>',
-      };
-      const priBadge = _priMap[e.priority] || '<span class="p-low">LOW</span>';
+      const priBadge = renderPriority(e.priority);
 
       /* Use phase_label if available, otherwise fall back to phase */
-      const phaseDisplay = e.phase_label || e.phase || '—';
+      const phaseDisplay = e.phase_label || e.phase || '--';
 
       const inner = `
-        <td class="ip">${e.src_ip || '—'}</td>
+        <td class="ip">${e.src_ip || '--'}</td>
         <td>${priBadge}</td>
         <td style="color:var(--sub2);font-size:13px">${phaseDisplay}${ttlRemaining}</td>
-        <td>${renderVector(e.attack_vector || '—')}</td>
+        <td>${renderVector(e.attack_vector || '--')}</td>
         <td class="${scCls}">${sc.toFixed(4)}</td>
         <td class="mono">${conf}</td>
         <td style="color:var(--sub2);font-family:var(--mono);font-size:12px">${time}</td>
@@ -88,12 +83,12 @@ async function fetchQuarantine() {
         </div></td>`;
 
       if (_qRows.has(e.src_ip)) {
-        /* Update in-place — no DOM remove/insert, no flicker */
+        /* Update in-place -- no DOM remove/insert, no flicker */
         const existing     = _qRows.get(e.src_ip);
         existing.dataset.ip = e.src_ip;
         existing.innerHTML  = inner;
       } else {
-        /* New IP — append row */
+        /* New IP -- append row */
         const tr      = document.createElement('tr');
         tr.className  = 'tr-clickable';
         tr.dataset.ip = e.src_ip;
@@ -129,10 +124,9 @@ function confirmQuarantineAction(action, ip) {
 /* POST release or blackhole action for an IP */
 async function quarantineAction(action, ip) {
   try {
-    await fetch(`${API}/api/quarantine/${action}`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ src_ip: ip }),
+    await apiFetch(`/api/quarantine/${action}`, {
+      method: 'POST',
+      body:   { src_ip: ip },
     });
     showToast(action === 'release' ? `Released ${ip}` : `Blocked ${ip}`);
     fetchQuarantine();

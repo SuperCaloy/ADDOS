@@ -1,10 +1,10 @@
-/* chart.js — live traffic chart init, push, history fetch, range tabs
+/* chart.js -- live traffic chart init, push, history fetch, range tabs
  * Exposes window._chart so theme toggle in ui.js can update chart colors. */
 
-/* Current active range tab — 'Live' or a history range string */
+/* Current active range tab -- 'Live' or a history range string */
 let range = 'Live';
 
-/* Init Chart.js line chart — stored on window so ui.js theme toggle can reach it */
+/* Init Chart.js line chart -- stored on window so ui.js theme toggle can reach it */
 window._chart = new Chart(document.getElementById('chart').getContext('2d'), {
   type: 'line',
   data: {
@@ -79,7 +79,7 @@ async function fetchHistory(r) {
   } catch (_) {}
 }
 
-/* Range tab clicks — switch between Live and historical views */
+/* Range tab clicks -- switch between Live and historical views */
 let _historyTimer = null;
 
 document.getElementById('rtabs').addEventListener('click', e => {
@@ -88,6 +88,7 @@ document.getElementById('rtabs').addEventListener('click', e => {
   document.querySelectorAll('.rt').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   range = btn.dataset.r;
+  if (window.Store) window.Store.setChartRange(range);
   
   if (_historyTimer) {
     clearInterval(_historyTimer);

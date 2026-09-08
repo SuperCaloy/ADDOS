@@ -12,6 +12,7 @@ from backend.config import (
     DEADLINE_ADMISSION_ENABLED, DEADLINE_ADMISSION_MARGIN_S,
     SVC_EMA_ALPHA, SVC_EMA_FALLBACK_MS,
     INFERENCE_SUBPROCESS_ENABLED,
+    WHITELIST_IPS,
 )
 from backend.models import if_pipeline, rf_pipeline, loader
 from backend.pipeline.flow_tracker import tracker
@@ -123,8 +124,8 @@ _svc_ema_batch = []
 _svc_ema_BATCH_SIZE = 100
 
 
+# Accumulate service times and update EMA every 100 samples.
 def _record_svc_ema(ms: float) -> None:
-    """Accumulate service times and update EMA every 100 samples."""
     _svc_ema_batch.append(ms)
     if len(_svc_ema_batch) < _svc_ema_BATCH_SIZE:
         return
@@ -153,8 +154,8 @@ def _effective_workers() -> int:
     return max(1, _num_workers if _num_workers > 0 else _default_num_workers())
 
 
+# Phase >= 2 IPs bypass admission shedding (cached for 100ms).
 def _is_exempt_ip(src_ip: str) -> bool:
-    """Phase >= 2 IPs bypass admission shedding. Cached for 100ms."""
     now = time.monotonic()
     cached = _admission_cache.get(src_ip)
     if cached is not None:
@@ -207,8 +208,8 @@ def _next_seq() -> int:
         return _seq_counter
 
 
+# Send a list of (is_anomaly, flow_stats) to TEA; shared by emit and idle-flush.
 def _flush_feedback_batch_items(items: list) -> None:
-    """Send a list of (is_anomaly, flow_stats) to TEA. Shared by emit and idle-flush."""
     try:
         from backend.pipeline.entropy_analyzer import entropy_analyzer as _tea
         for is_anom, fs in items:
@@ -232,13 +233,8 @@ def _flush_feedback_batch_items(items: list) -> None:
         pass
 
 
+# Batched dual TEA feedback emission (flushes every 100ms or at 50 items).
 def _emit_feedback(is_anomaly: bool, flow_stats: dict | None) -> None:
-    """Batched dual TEA feedback emission.
-
-    Accumulates feedback entries and flushes every 100ms or when batch
-    reaches 50 items. Reduces per-item overhead from try/except + import
-    to amortized batch cost.
-    """
     global _feedback_last_flush
     with _feedback_batch_lock:
         _feedback_batch.append((is_anomaly, flow_stats))
@@ -290,13 +286,8 @@ def _requeue_priority(src_ip: str, flow_stats: dict, switch_stats: dict, retry_c
         log.warning("Worker queue full, priority requeue dropped for %s", src_ip)
 
 
+# IF scoring via micro-batch tray when enabled; degrades to solo predict on failure.
 def _infer_if(if_vec):
-    """IF scoring via the micro-batch tray when enabled; solo otherwise.
-
-    Mirrors _infer_rf: any batch-path failure (future exception or wait
-    timeout) degrades to a solo predict so worst-case behavior equals
-    the non-batched pipeline.
-    """
     if not IF_BATCH_ENABLED:
         return if_pipeline.run_if_inference(if_vec)
     from backend.pipeline import if_batcher
@@ -309,12 +300,8 @@ def _infer_if(if_vec):
         return if_pipeline.run_if_inference(if_vec)
 
 
+# RF decode via micro-batch tray when enabled; degrades to solo predict on failure.
 def _infer_rf(rf_vec):
-    """RF decode via the micro-batch tray when enabled; solo otherwise.
-
-    Any batch-path failure (future exception or wait timeout) degrades to a
-    solo predict so worst-case behavior equals the non-batched pipeline.
-    """
     if not RF_BATCH_ENABLED:
         return rf_pipeline.run_rf_inference(rf_vec)
     from backend.pipeline import rf_batcher
@@ -327,9 +314,9 @@ def _infer_rf(rf_vec):
         return rf_pipeline.run_rf_inference(rf_vec)
 
 
+# Submit features to inference subprocess and poll for results. Returns True if handled.
 def _submit_and_poll_subprocess(src_ip, if_vec, rf_vec, flow_stats, switch_stats,
                                 is_flagged, enqueued_at, inf_start):
-    """Submit features to inference subprocess and poll for results. Returns True if handled."""
     from backend.pipeline.inference_process import inference_process
     if not inference_process.is_ready():
         return False
@@ -354,12 +341,12 @@ def _submit_and_poll_subprocess(src_ip, if_vec, rf_vec, flow_stats, switch_stats
         except Exception:
             log.exception("Error pushing subprocess result for %s", r_ip)
         if not HOTPATH_QUIET:
-            _rconf = f"{r_conf*100:.1f}%" if r_is_anomaly else "—"
+            _rconf = f"{r_conf*100:.1f}%" if r_is_anomaly else "--"
             log.info(
                 "[SCAN] %-15s  pps=%7.1f  IF=%.4f(thr=%.4f)  "
                 "anomaly=%-5s  RF=%-12s  conf=%s",
                 r_ip, _rpps, r_if_score, loader.if_threshold,
-                str(r_is_anomaly), r_class if r_is_anomaly else "—", _rconf
+                str(r_is_anomaly), r_class if r_is_anomaly else "--", _rconf
             )
         # Fire the result callback so on_result updates dashboard counters,
         # state machine, writer, and all other downstream consumers.
@@ -392,8 +379,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     # --- Skip invalid/whitelisted IPs ---
     if not src_ip or src_ip in ("0.0.0.0", ""):
         return
-    _WHITELIST = {"10.0.0.26", "10.0.0.27"}
-    if src_ip in _WHITELIST:
+    if src_ip in WHITELIST_IPS:  # {"10.0.0.26", "10.0.0.27"}
         return
 
     # --- Skip empty flows ---
@@ -402,7 +388,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     if pkt_count == 0:
         return
 
-    # --- Flood prefilter check — was this IP flagged by burst/limit detection ---
+    # --- Flood prefilter check -- was this IP flagged by burst/limit detection ---
     # IF handles per-host anomaly on its own; only the flood_filter flag matters.
     is_flagged = flood_filter.is_flagged_any(src_ip)
 
@@ -412,11 +398,11 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     if time.monotonic() - enqueued_at > WORKER_ITEM_TIMEOUT_S:
         if is_flagged:
             if retry_count < _MAX_PRIORITY_RETRIES:
-                log.warning("Worker timeout for %s (flagged) — priority retry %d", src_ip, retry_count + 1)
+                log.warning("Worker timeout for %s (flagged) -- priority retry %d", src_ip, retry_count + 1)
                 _requeue_priority(src_ip, flow_stats, switch_stats, retry_count + 1)
             else:
                 _inc_drop("retries_exhausted")
-                log.warning("Worker timeout for %s (flagged) — retries exhausted, fallback block", src_ip)
+                log.warning("Worker timeout for %s (flagged) -- retries exhausted, fallback block", src_ip)
                 if _result_callback:
                     try:
                         _result_callback(src_ip, None, None, None, None, timed_out=True)
@@ -424,10 +410,10 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                         log.exception("Worker error in timeout-fallback callback for %s", src_ip)
         else:
             _inc_drop("stale_dropped")
-            log.debug("Worker timeout for %s (not flagged) — dropped silently", src_ip)
+            log.debug("Worker timeout for %s (not flagged) -- dropped silently", src_ip)
         return
 
-    # --- Skip young flows — pps unreliable until flow matures ---
+    # --- Skip young flows -- pps unreliable until flow matures ---
     # Exemption: flood-prefilter-flagged IPs need immediate action
     flow_dur = float(flow_stats.get("flow_duration_sec", 0)) if flow_stats else 0.0
     if not is_flagged:
@@ -445,7 +431,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         except Exception:
             _dynamic_min = 0.05
         if pps < _dynamic_min:
-            # Too slow to be an attack — count as normal without IF scoring.
+            # Too slow to be an attack -- count as normal without IF scoring.
             # Feed the IF streak too, so quiet post-attack traffic doesn't
             # starve the unlock hysteresis.
             _emit_feedback(False, flow_stats)
@@ -462,7 +448,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     # --- Update Flow Tracker ---
     tracker.update_flow(src_ip, flow_stats)
 
-    # --- Check inference cache — reuse fresh result if available ---
+    # --- Check inference cache -- reuse fresh result if available ---
     cached = tracker.get_cached(src_ip)
     _prior_class = None
     _prior_conf  = 0.0
@@ -472,12 +458,12 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         ip_state       = state_machine.get_state(src_ip)
         already_banned = ip_state is not None and ip_state.phase >= 2
 
-        # Re-check banned IPs every 10s — avoids permanent wrong-class lock
+        # Re-check banned IPs every 10s -- avoids permanent wrong-class lock
         _recheck_due = (
             already_banned and ip_state.time_in_phase_sec() % 10 < 1
         )
 
-        # Lock: banned/high-confidence — skip unless recheck window hit
+        # Lock: banned/high-confidence -- skip unless recheck window hit
         is_locked = (
             not _recheck_due and (
                 already_banned or
@@ -504,7 +490,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                     log.exception("Worker error in cached-result callback for %s", src_ip)
             return
 
-        # Uncertain or low confidence — invalidate and re-run, keep prior as fallback
+        # Uncertain or low confidence -- invalidate and re-run, keep prior as fallback
         tracker.invalidate_cache(src_ip)
         _prior_class = cached.attack_class
         _prior_conf  = cached.confidence
@@ -514,7 +500,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         # --- Run Isolation Forest ---
         _inf_start = time.monotonic()
         if_vec = if_pipeline.extract_if_features(flow_stats)
-        # None = near-zero duration flow — skip scoring, treat as normal
+        # None = near-zero duration flow -- skip scoring, treat as normal
         if if_vec is None:
             return
 
@@ -556,8 +542,8 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         # --- TEA dual feedback (IF streak + TEA verdict latch) ---
         _emit_feedback(is_anomaly, flow_stats)
 
-        # --- Flood prefilter override — flagged IP + IF score above threshold ---
-        # Flood prefilter already confirmed this IP sent a burst — trust IF score.
+        # --- Flood prefilter override -- flagged IP + IF score above threshold ---
+        # Flood prefilter already confirmed this IP sent a burst -- trust IF score.
         if is_flagged and if_score >= _effective_threshold:
             is_anomaly = True
 
@@ -566,7 +552,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         confidence   = 0.0
 
         if is_anomaly:
-            # Merge flow_stats into rf_switch — RF needs per-flow fields (pps, bps etc)
+            # Merge flow_stats into rf_switch -- RF needs per-flow fields (pps, bps etc)
             rf_switch = {}
             if switch_stats:
                 rf_switch.update(switch_stats)
@@ -588,14 +574,14 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         # HOTPATH_QUIET: the per-item [SCAN] line burns CPU under saturation;
         # quiet mode drops it from INFO so the hot path stays light.
         pps_display  = float(flow_stats.get("packet_count_per_second", 0.0)) if flow_stats else 0.0
-        conf_display = f"{confidence*100:.1f}%" if is_anomaly else "—"
+        conf_display = f"{confidence*100:.1f}%" if is_anomaly else "--"
 
         if not HOTPATH_QUIET:
             log.info(
                 "[SCAN] %-15s  pps=%7.1f  IF=%.4f(thr=%.4f)  "
                 "anomaly=%-5s  RF=%-12s  conf=%s",
                 src_ip, pps_display, if_score, _effective_threshold,
-                str(is_anomaly), attack_class if is_anomaly else "—", conf_display
+                str(is_anomaly), attack_class if is_anomaly else "--", conf_display
             )
 
         # --- Push result to decision engine ---
@@ -648,10 +634,10 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         log.exception("Worker error processing %s", src_ip)
 
 
+# _process_item with worker service-time accounting (dequeue to return).
 def _process_item_with_metrics(priority: int, seq: int, src_ip: str,
                                flow_stats: dict, switch_stats: dict,
                                enqueued_at: float, retry_count: int) -> None:
-    """_process_item plus worker service-time accounting (dequeue to return)."""
     _t0 = time.monotonic()
     try:
         _process_item(priority, seq, src_ip, flow_stats, switch_stats,
@@ -660,8 +646,8 @@ def _process_item_with_metrics(priority: int, seq: int, src_ip: str,
         _record_service_time((time.monotonic() - _t0) * 1000.0)
 
 
+# Force-flush any pending feedback batch on worker idle.
 def _flush_pending_feedback() -> None:
-    """Force-flush any pending feedback batch on worker idle."""
     global _feedback_last_flush
     with _feedback_batch_lock:
         if not _feedback_batch:
@@ -676,7 +662,7 @@ def _worker_loop() -> None:
     while True:
         try:
             item = _queue.get(timeout=1.0)
-            # Outer guard — any uncaught exception in _process_item (including
+            # Outer guard -- any uncaught exception in _process_item (including
             # callbacks it fires) is caught, logged, and the thread keeps running.
             try:
                 _process_item_with_metrics(*item)

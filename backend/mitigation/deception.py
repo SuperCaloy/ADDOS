@@ -3,23 +3,23 @@ import threading
 import logging
 import datetime
 from dataclasses import dataclass, field
-from typing import Optional
 
 from backend.database import writer
 from backend.mitigation.traffic_filter import (
     SINKHOLE_ESCALATE_CONFIDENCE, SINKHOLE_MAX_TOTAL_SECONDS,
 )
+from backend.mitigation.state_machine import _build_mitigation_event
 
 log = logging.getLogger(__name__)
 
-# ── Configuration ──────────────────────────────────────────────────────────
+# -- Configuration ----------------------------------------------------------
 # Silent dummy host, must match h27 in topology.py.
 SINKHOLE_IP = "10.0.0.27"
 
 # Observation window before escalate/release decision (Strategy 2: longer sinkhole)
 SINKHOLE_OBSERVE_SECONDS = 20.0
 
-# PPS above this after observation window → escalate to Phase 1
+# PPS above this after observation window -> escalate to Phase 1
 SINKHOLE_PPS_ESCALATE_THRESHOLD = 1.0
 
 
@@ -61,7 +61,7 @@ class DeceptionModule:
         self._escalate_callback = escalate_fn
         self._release_callback  = release_fn
 
-    # ── Public ─────────────────────────────────────────────────────────
+    # -- Public ---------------------------------------------------------
 
     def enter_sinkhole(self, src_ip: str, attack_vector: str,
                        if_score: float, confidence: float) -> bool:
@@ -81,22 +81,14 @@ class DeceptionModule:
 
         self._push_redirect(src_ip)
 
-        log.info("Deception: sinkhole — %s  vector=%s  conf=%.2f  observe=%ds  →%s",
+        log.info("Deception: sinkhole -- %s  vector=%s  conf=%.2f  observe=%ds  ->%s",
                  src_ip, attack_vector, confidence, SINKHOLE_OBSERVE_SECONDS, SINKHOLE_IP)
 
-        writer.log_mitigation_event({
-            "timestamp":       entry.first_seen,
-            "src_ip":          src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   attack_vector,
-            "confidence":      confidence,
-            "priority":        "Low",
-            "action_taken":    f"Sinkhole",
-            "if_score":        if_score,
-            "phase":           "Sinkhole",
-            "is_manual":       False,
-            "event_type":      "transition",
-        })
+        writer.log_mitigation_event(_build_mitigation_event(
+            src_ip, attack_vector, confidence, "Low", "Sinkhole",
+            if_score, "Sinkhole", event_type="transition",
+            timestamp=entry.first_seen,
+        ))
 
         return True
 
@@ -142,20 +134,11 @@ class DeceptionModule:
             self._cumulative_time.pop(src_ip, None)
         if entry:
             self._push_clear(src_ip)
-            writer.log_mitigation_event({
-                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "src_ip":          src_ip,
-                "predicted_class": "DDoS",
-                "attack_vector":   entry.attack_vector,
-                "confidence":      entry.confidence,
-                "priority":        "Low",
-                "action_taken":    "Released",
-                "if_score":        entry.if_score,
-                "phase":           "Sinkhole",
-                "is_manual":       True,
-                "event_type":      "released",
-                "reason":          "manual release",
-            })
+            writer.log_mitigation_event(_build_mitigation_event(
+                src_ip, entry.attack_vector, entry.confidence, "Low", "Released",
+                entry.if_score, "Sinkhole", event_type="released",
+                reason="manual release", is_manual=True,
+            ))
             log.info("Deception: manually released %s from sinkhole", src_ip)
             return True
         return False
@@ -171,25 +154,16 @@ class DeceptionModule:
         for ip in sinkhole_ips:
             self._push_clear(ip)
             e = entries[ip]
-            writer.log_mitigation_event({
-                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "src_ip":          ip,
-                "predicted_class": "DDoS",
-                "attack_vector":   e.attack_vector,
-                "confidence":      e.confidence,
-                "priority":        "Low",
-                "action_taken":    "Released",
-                "if_score":        e.if_score,
-                "phase":           "Sinkhole",
-                "is_manual":       False,
-                "event_type":      "released",
-                "reason":          "resource guard CRIT",
-            })
+            writer.log_mitigation_event(_build_mitigation_event(
+                ip, e.attack_vector, e.confidence, "Low", "Released",
+                e.if_score, "Sinkhole", event_type="released",
+                reason="resource guard CRIT",
+            ))
         if sinkhole_ips:
             log.info("Deception: emergency cleared %d sinkhole entries", len(sinkhole_ips))
         return len(sinkhole_ips)
 
-    # ── Tick ───────────────────────────────────────────────────────────
+    # -- Tick -----------------------------------------------------------
 
     def tick(self) -> None:
         # Called every second by the tick thread; processes entries whose observation window completed.
@@ -217,7 +191,7 @@ class DeceptionModule:
         if still_active and (confidence_resolved or time_exceeded):
             reason = ("confidence resolved" if confidence_resolved
                       else f"time ceiling reached ({total_time:.0f}s)")
-            log.info("Deception: %s → Phase 1  pps=%.1f  conf=%.1f%%  %s",
+            log.info("Deception: %s -> Phase 1  pps=%.1f  conf=%.1f%%  %s",
                      src_ip, entry.recent_pps, entry.confidence * 100, reason)
             with self._lock:
                 self._cumulative_time.pop(src_ip, None)
@@ -233,27 +207,18 @@ class DeceptionModule:
         else:
             reason = ("traffic stopped" if not still_active
                       else "confidence unresolved")
-            log.info("Deception: %s → released (%s)  pps=%.1f  conf=%.1f%%  total=%.0fs",
+            log.info("Deception: %s -> released (%s)  pps=%.1f  conf=%.1f%%  total=%.0fs",
                      src_ip, reason, entry.recent_pps, entry.confidence * 100, total_time)
-            writer.log_mitigation_event({
-                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "src_ip":          src_ip,
-                "predicted_class": "DDoS",
-                "attack_vector":   entry.attack_vector,
-                "confidence":      entry.confidence,
-                "priority":        "Low",
-                "action_taken":    "Released",
-                "if_score":        entry.if_score,
-                "phase":           "Sinkhole",
-                "is_manual":       False,
-                "event_type":      "released",
-                "reason":          reason,
-            })
+            writer.log_mitigation_event(_build_mitigation_event(
+                src_ip, entry.attack_vector, entry.confidence, "Low", "Released",
+                entry.if_score, "Sinkhole", event_type="released",
+                reason=reason,
+            ))
             self._push_clear(src_ip)
             if self._release_callback:
                 self._release_callback(src_ip)
 
-    # ── Internal ───────────────────────────────────────────────────────
+    # -- Internal -------------------------------------------------------
 
     def _push_redirect(self, src_ip: str) -> None:
         if self._commander:

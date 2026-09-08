@@ -1,8 +1,4 @@
-"""Dedicated subprocess for IF + RF inference.
-
-Bypasses the GIL by running ML models in a separate process.
-Workers enqueue flow features; the subprocess batches and returns results.
-"""
+# Dedicated subprocess for IF + RF inference, bypassing the GIL.
 import multiprocessing
 import threading
 import time
@@ -15,10 +11,10 @@ log = logging.getLogger(__name__)
 _SHUTDOWN = "__INFERENCE_SHUTDOWN__"
 
 
+# Subprocess entry point: load models, then loop processing batches.
 def _inference_worker(input_queue: multiprocessing.Queue,
                       output_queue: multiprocessing.Queue,
                       ready_event: multiprocessing.Event) -> None:
-    """Subprocess entry point: load models, then loop processing batches."""
     import warnings
     warnings.filterwarnings("ignore", message=".*n_jobs.*")
     try:
@@ -80,8 +76,8 @@ def _inference_worker(input_queue: multiprocessing.Queue,
                 log.warning("Inference output queue full, dropping result for %s", result[0])
 
 
+# Manages a dedicated inference subprocess.
 class InferenceProcess:
-    """Manages a dedicated inference subprocess."""
 
     def __init__(self):
         self._input_queue = multiprocessing.Queue(maxsize=500)
@@ -121,15 +117,15 @@ class InferenceProcess:
                 except Exception:
                     pass
 
+    # Non-blocking submit. Returns immediately.
     def submit(self, src_ip: str, if_vec, rf_vec=None, meta: dict = None) -> None:
-        """Non-blocking submit. Returns immediately."""
         try:
             self._input_queue.put_nowait((src_ip, if_vec, rf_vec, meta or {}))
         except Exception:
             log.debug("Inference input queue full, dropping %s", src_ip)
 
+    # Drain all available results from the output queue. Non-blocking.
     def poll_results(self) -> list:
-        """Drain all available results from the output queue. Non-blocking."""
         results = []
         while True:
             try:

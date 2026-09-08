@@ -34,13 +34,8 @@ class InferenceCacheEntry:
         return time.monotonic() < self.expires_at
 
 
+# Tracks active flows per src_ip with a 500-entry cap and thread-safe cache.
 class FlowTracker:
-    """Tracks active flows per src_ip with a 500-entry cap.
-
-    H6 fix: _cache is now protected by the same _lock as _flows.
-    Previously cache operations had no lock — safe with a single worker
-    thread but a latent race condition for any future second worker.
-    """
 
     def __init__(self):
         self._lock   = threading.Lock()
@@ -77,7 +72,7 @@ class FlowTracker:
             return len(self._flows)
 
     # ------------------------------------------------------------------
-    # Inference cache — H6: all operations now lock-protected
+    # Inference cache -- H6: all operations now lock-protected
     # ------------------------------------------------------------------
 
     def get_cached(self, src_ip: str) -> InferenceCacheEntry | None:

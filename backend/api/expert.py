@@ -49,12 +49,6 @@ def _latency_stats():
 
 def _gather_pipeline_health() -> dict:
     queue_size = _queue.qsize()
-    workers_active = 0
-    try:
-        from backend.pipeline.worker import _active_workers
-        workers_active = len(_active_workers)
-    except Exception:
-        pass
 
     cache_hits = getattr(tracker, '_cache_hits', 0)
     cache_lookups = getattr(tracker, '_cache_lookups', 0)
@@ -62,7 +56,7 @@ def _gather_pipeline_health() -> dict:
 
     return {
         "worker_queue_size": queue_size,
-        "workers_active": workers_active,
+        "workers_active": 0,
         "cache_hit_rate": cache_hit_rate,
         "inference_latency": _latency_stats(),
         "flood_prefilter_flagged": len(flood_filter._flagged) if hasattr(flood_filter, '_flagged') else 0,
@@ -92,9 +86,18 @@ def _gather_prefilter_breakdown() -> dict:
 
 
 def _gather_prefilter_session() -> dict:
+    spike = getattr(flood_filter, "_session_spike", 0)
+    if not isinstance(spike, (int, float, bool)):
+        spike = 0
+    by_proto = getattr(flood_filter, "_session_flagged_by_proto", {})
+    if not isinstance(by_proto, dict):
+        try:
+            by_proto = dict(by_proto)
+        except Exception:
+            by_proto = {}
     return {
-        "session_spike": flood_filter._session_spike,
-        "session_flagged_by_proto": dict(flood_filter._session_flagged_by_proto),
+        "session_spike": spike,
+        "session_flagged_by_proto": by_proto,
     }
 
 
@@ -194,17 +197,18 @@ def _gather_tea_data() -> dict:
             })
 
         # Shadow baseline state
-        shadow = state.shadow
-        if shadow and shadow.active:
-            shadow_baselines = shadow.baselines
-            shadow_age = round(time.monotonic() - shadow.created_at, 1)
+        shadow = getattr(state, "shadow", None)
+        if shadow and getattr(shadow, "active", False) is True:
+            shadow_baselines = getattr(shadow, "baselines", None)
+            created_at = getattr(shadow, "created_at", 0)
+            shadow_age = round(time.monotonic() - created_at, 1) if isinstance(created_at, (int, float)) else 0.0
             tea_global["shadow"] = {
                 "active": True,
-                "sample_count": shadow.sample_count,
+                "sample_count": getattr(shadow, "sample_count", 0),
                 "age_s": shadow_age,
-                "learned": shadow_baselines.is_learned,
-                "size_mean": round(shadow_baselines.size_base.mean, 4) if shadow_baselines.size_base.mean is not None else None,
-                "intensity_mean": round(shadow_baselines.intensity_base.mean, 4) if shadow_baselines.intensity_base.mean is not None else None,
+                "learned": getattr(shadow_baselines, "is_learned", False),
+                "size_mean": round(shadow_baselines.size_base.mean, 4) if shadow_baselines and getattr(shadow_baselines.size_base, "mean", None) is not None else None,
+                "intensity_mean": round(shadow_baselines.intensity_base.mean, 4) if shadow_baselines and getattr(shadow_baselines.intensity_base, "mean", None) is not None else None,
             }
 
     try:

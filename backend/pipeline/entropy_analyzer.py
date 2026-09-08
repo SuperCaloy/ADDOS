@@ -115,24 +115,8 @@ class _AdaptiveBaseline:
         alpha = TEA_EMA_ALPHA_MAX - cv * (TEA_EMA_ALPHA_MAX - TEA_EMA_ALPHA_MIN)
         return max(TEA_EMA_ALPHA_MIN, min(TEA_EMA_ALPHA_MAX, alpha))
 
-    def _variance_stable(self) -> bool:
-        return False
-
+    # Provisional guard during the learning phase.
     def _warmup_reject(self, value: float) -> bool:
-        """Provisional guard during the learning phase.
-
-        Three rules (applied in order):
-        - min_learn_value: reject values below this floor (e.g. size_var /
-          intensity_var collapse to near-zero during attack);
-        - absolute cap: per-flow value above the dynamic cap is flood scale,
-          rejected regardless of the provisional mean;
-        - relative (PPS only): once the provisional mean has crossed the
-          validity gate, values deviating more than TEA_WARMUP_REJECT_FACTOR
-          are rejected.
-
-        A sustained attack simply delays learning until it stops, which is
-        the conservative outcome: no calibration under fire.
-        """
         if not self._warmup_guard or len(self._samples) < TEA_WARMUP_REJECT_AFTER:
             return False
         mean = self._psum / len(self._samples)
@@ -286,15 +270,15 @@ class _GlobalEntropyState:
     def shadow(self):
         return self._shadow
 
+    # Create a new shadow baseline.
     def start_shadow(self) -> None:
-        """Create a new shadow baseline."""
         if not _cfg.TEA_SHADOW_ENABLED:
             return
         self._shadow = _ShadowState()
         log.info("TEA shadow baseline created")
 
+    # Discard the current shadow baseline.
     def discard_shadow(self, reason: str) -> None:
-        """Discard the current shadow baseline."""
         if self._shadow:
             self._shadow.discard(reason)
             self._shadow = None
@@ -343,8 +327,8 @@ class _GlobalEntropyState:
         )
 
 
+# Shadow baseline that learns in parallel while primary is frozen.
 class _ShadowState:
-    """Shadow baseline that learns in parallel while primary is frozen."""
 
     def __init__(self):
         self.baselines = _GlobalEntropyState(TEA_WINDOW_SIZE)
@@ -352,19 +336,19 @@ class _ShadowState:
         self.sample_count: int = 0
         self.active: bool = True
 
+    # Shadow ready when all baselines learned (no duration gate).
     def is_ready(self) -> bool:
-        """Shadow ready when all baselines learned (no duration gate)."""
         if not self.active:
             return False
         return self.baselines.is_learned
 
+    # Shadow too old, should be discarded.
     def is_stale(self) -> bool:
-        """Shadow too old, should be discarded."""
         age = time.monotonic() - self.created_at
         return age > _cfg.TEA_SHADOW_MAX_AGE_S
 
+    # Mark shadow inactive.
     def discard(self, reason: str) -> None:
-        """Mark shadow inactive."""
         self.active = False
         log.info("TEA shadow discarded: %s", reason)
 
@@ -402,16 +386,8 @@ class _IpEntropyProfile:
         probs = probs[probs > 0]
         return float(-np.sum(probs * np.log2(probs)))
 
+    # Evaluate traffic profile for a specific IP.
     def verdict(self) -> str:
-        """
-        Evaluate traffic profile for a specific IP.
-        
-        Note: The per-IP verdict relies on fine-grained trend/entropy analysis
-        over a short sliding window, whereas the global gate (is_attack_pattern) 
-        relies on aggregate variance collapse across all traffic. They are kept
-        separate because the global gate detects the onset of a large attack, 
-        while this method tracks individual IP behavior.
-        """
         if len(self._pps_samples) < IP_PROFILE_MIN_SAMPLES:
             return "uncertain"
 
@@ -458,13 +434,8 @@ class _IpEntropyProfile:
         return "uncertain"
 
 
+# Thread-safe LRU cache for TEA results, keyed by dpid.
 class TeaResultCache:
-    """Thread-safe LRU cache for TEA results, keyed by dpid.
-
-    Stores the most recent TEA result per switch. Workers read from this
-    cache instead of calling TEA.update() inline, decoupling the
-    receiver thread from the 5-15ms TEA computation.
-    """
 
     def __init__(self, maxsize: int = 50):
         self._maxsize = maxsize
@@ -571,6 +542,77 @@ class EntropyAnalyzer:
                 and self._global_state.pps_base.locked
             )
 
+    @staticmethod
+    def _aggregate_flows(current_flows: list, eps: float = 1e-9) -> dict:
+        sizes = []
+        intensities = []
+        ppss = []
+        protos = {}
+        unique_ips = set()
+        for f in current_flows:
+            src = f.get("src_ip", "")
+            if src and src != "0.0.0.0":
+                unique_ips.add(src)
+            pkt = float(f.get("packet_count", 0))
+            byt = float(f.get("byte_count", 0))
+            pps = float(f.get("packet_count_per_second", 0))
+            bps = float(f.get("byte_count_per_second", 0))
+            avg_bytes_per_pkt = byt / (pkt + eps)
+            pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt, 0))
+            flow_intensity = math.log1p(max(pps * bps, 0))
+            sizes.append(pkt_size_uniformity)
+            intensities.append(flow_intensity)
+            ppss.append(max(pps, 0.0))
+            proto = f.get("ip_proto", 0)
+            protos[proto] = protos.get(proto, 0) + 1
+        return {
+            "sizes": sizes,
+            "intensities": intensities,
+            "ppss": ppss,
+            "protos": protos,
+            "unique_ips": unique_ips,
+        }
+
+    @staticmethod
+    def _compute_uniform_share(sizes: list, intensities: list) -> float:
+        if not sizes:
+            return 0.0
+        med_size = float(np.median(sizes))
+        med_int = float(np.median(intensities))
+        mad_size = float(np.median(np.abs(np.array(sizes) - med_size)))
+        mad_int = float(np.median(np.abs(np.array(intensities) - med_int)))
+        tol_size = max(0.02, 3.0 * mad_size)
+        tol_int = max(0.10, 3.0 * mad_int)
+        uniform_n = sum(
+            1 for s, i in zip(sizes, intensities)
+            if abs(s - med_size) <= tol_size and abs(i - med_int) <= tol_int
+        )
+        return uniform_n / len(sizes)
+
+    @staticmethod
+    def _compute_temporal_entropy(ppss: list, bins_count: int) -> float:
+        if not ppss:
+            return 0.0
+        iats = [1.0 / max(p, 1e-6) for p in ppss]
+        bins = np.histogram(iats, bins=bins_count)
+        probs = bins[0] / max(1, sum(bins[0]))
+        probs = probs[probs > 0]
+        return float(-np.sum(probs * np.log2(probs)))
+
+    @staticmethod
+    def _compute_mahalanobis(vector: np.ndarray, history: list) -> float:
+        if len(history) < 30:
+            return 0.0
+        history_array = np.array(history)
+        mean_vec = np.mean(history_array, axis=0)
+        cov_matrix = np.cov(history_array.T)
+        try:
+            cov_inv = np.linalg.inv(cov_matrix + np.eye(6) * 1e-6)
+            diff = vector - mean_vec
+            return float(np.sqrt(diff @ cov_inv @ diff))
+        except np.linalg.LinAlgError:
+            return 0.0
+
     def update(self, dpid: int, flows: list[dict]) -> dict:
         with self._lock:
             now = time.monotonic()
@@ -598,64 +640,20 @@ class EntropyAnalyzer:
             tea_cache.put(dpid, neutral)
             return neutral
 
-        eps = 1e-9
-        sizes = []
-        intensities = []
-        ppss = []
-        protos = {}
-        unique_ips = set()
-
-        for f in current_flows:
-            src = f.get("src_ip", "")
-            if src and src != "0.0.0.0":
-                unique_ips.add(src)
-
-            pkt = float(f.get("packet_count", 0))
-            byt = float(f.get("byte_count", 0))
-            pps = float(f.get("packet_count_per_second", 0))
-            bps = float(f.get("byte_count_per_second", 0))
-
-            avg_bytes_per_pkt = byt / (pkt + eps)
-            pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt, 0))
-            flow_intensity = math.log1p(max(pps * bps, 0))
-
-            sizes.append(pkt_size_uniformity)
-            intensities.append(flow_intensity)
-            ppss.append(max(pps, 0.0))
-
-            proto = f.get("ip_proto", 0)
-            protos[proto] = protos.get(proto, 0) + 1
+        agg = self._aggregate_flows(current_flows)
+        sizes = agg["sizes"]
+        intensities = agg["intensities"]
+        ppss = agg["ppss"]
+        protos = agg["protos"]
+        unique_ips = agg["unique_ips"]
 
         size_var = float(np.var(sizes)) if sizes else 0.0
         intensity_var = float(np.var(intensities)) if intensities else 0.0
         proto_entropy = _shannon_entropy(list(protos.values()))
         mean_pps = sum(ppss) / len(ppss) if ppss else 0.0
 
-        if sizes:
-            med_size  = float(np.median(sizes))
-            med_int   = float(np.median(intensities))
-            mad_size  = float(np.median(np.abs(np.array(sizes) - med_size)))
-            mad_int   = float(np.median(np.abs(np.array(intensities) - med_int)))
-            tol_size  = max(0.02, 3.0 * mad_size)
-            tol_int   = max(0.10, 3.0 * mad_int)
-            uniform_n = sum(
-                1 for s, i in zip(sizes, intensities)
-                if abs(s - med_size) <= tol_size and abs(i - med_int) <= tol_int
-            )
-            uniform_share = uniform_n / len(sizes)
-        else:
-            uniform_share = 0.0
-
-        # Temporal entropy: Shannon entropy of per-flow inter-packet arrival
-        # times (1/pps). Diverse pps patterns yield higher entropy.
-        if ppss:
-            iats = [1.0 / max(p, 1e-6) for p in ppss]
-            bins = np.histogram(iats, bins=_cfg.TEA_TEMPORAL_ENTROPY_BINS)
-            probs = bins[0] / max(1, sum(bins[0]))
-            probs = probs[probs > 0]
-            temporal_entropy = -np.sum(probs * np.log2(probs))
-        else:
-            temporal_entropy = 0.0
+        uniform_share = self._compute_uniform_share(sizes, intensities)
+        temporal_entropy = self._compute_temporal_entropy(ppss, _cfg.TEA_TEMPORAL_ENTROPY_BINS)
 
         snapshot = {
             "size_var":  size_var,
@@ -676,19 +674,7 @@ class EntropyAnalyzer:
             mean_pps,
             temporal_entropy,
         ])
-        # Compute distance against existing baseline before appending
-        if len(self._snapshot_history) >= 30:
-            history_array = np.array(self._snapshot_history)
-            mean_vec = np.mean(history_array, axis=0)
-            cov_matrix = np.cov(history_array.T)
-            try:
-                cov_inv = np.linalg.inv(cov_matrix + np.eye(6) * 1e-6)
-                diff = vector - mean_vec
-                mahal_dist = float(np.sqrt(diff @ cov_inv @ diff))
-            except np.linalg.LinAlgError:
-                mahal_dist = 0.0
-        else:
-            mahal_dist = 0.0
+        mahal_dist = self._compute_mahalanobis(vector, list(self._snapshot_history))
         # Only add to baseline history if not an extreme outlier, to prevent
         # attack traffic from contaminating the covariance matrix.
         if mahal_dist < _cfg.TEA_MAHALANOBIS_ATTACK_THRESHOLD * 2.0:
@@ -999,14 +985,8 @@ class EntropyAnalyzer:
             log.info("TEA gate: normal traffic, logging only (total=%d)", self._would_block_count)
         return not would_block
 
+    # Return selective IF guidance during flash crowds.
     def get_flash_crowd_guidance(self) -> dict:
-        """Return selective IF guidance during flash crowds.
-
-        Decision matrix:
-        - Flash crowd + low IF rate -> legitimate crowd -> ignore volume
-        - Flash crowd + high IF rate -> mixed-protocol attack -> no guidance
-        - No flash crowd -> no guidance
-        """
         with self._lock:
             last = self._global_state.last_result
             if not last or not last.get("is_flash_crowd"):
@@ -1067,8 +1047,8 @@ class EntropyAnalyzer:
         ):
             self._set_latch(False, "both streaks satisfied", caller_holds_lock=True)
 
+    # Verify shadow baselines produce reasonable z-scores for current traffic.
     def _shadow_health_check(self, shadow: _ShadowState) -> bool:
-        """Verify shadow baselines produce reasonable z-scores for current traffic."""
         baselines = shadow.baselines
         if not baselines.is_learned:
             return False
@@ -1102,8 +1082,8 @@ class EntropyAnalyzer:
 
         return True
 
+    # Promote shadow baseline to primary if ready and healthy.
     def _try_promote_shadow(self) -> None:
-        """Promote shadow baseline to primary if ready and healthy."""
         state = self._global_state
         if not state.shadow or not state.shadow.is_ready():
             return
@@ -1127,10 +1107,8 @@ class EntropyAnalyzer:
         # Clear shadow reference
         old_state._shadow = None
 
+    # P4: IF is anomalous only when anomalies dominate recent per-flow window.
     def _if_sustained_anomaly(self, now: float) -> bool:
-        """P4: IF is 'sustained anomalous' only when anomalies dominate the
-        recent per-flow window AND the timestamp is still fresh. A single
-        sporadic false positive never blocks recovery."""
         if now - self._last_if_anomaly_ts >= TEA_IDLE_UNLOCK_S:
             return False
         buf = self._if_rate_buffer
@@ -1138,20 +1116,15 @@ class EntropyAnalyzer:
             return False
         return (sum(buf) / len(buf)) >= _cfg.TEA_IF_ANOMALY_RATE_BLOCK
 
+    # Return current IF anomaly rate (0.0-1.0) from the ring buffer.
     def _if_anomaly_rate(self) -> float:
-        """Return the current IF anomaly rate (0.0-1.0) from the ring buffer."""
         buf = self._if_rate_buffer
         if not buf:
             return 0.0
         return sum(buf) / len(buf)
 
+    # Per-flow IF feedback. Streak-only: never locks baselines.
     def feedback_if(self, is_anomaly: bool) -> None:
-        """Per-flow IF feedback. Streak-only: NEVER locks baselines.
-
-        Isolated anomalies halve the streak (decay) instead of zeroing it,
-        so occasional IF false positives delay rather than restart recovery.
-        Every call feeds the sustained-rate ring buffer used by idle_tick.
-        """
         with self._lock:
             self._if_rate_buffer.append(1 if is_anomaly else 0)
             if is_anomaly:
@@ -1161,13 +1134,9 @@ class EntropyAnalyzer:
             self._if_normal_streak += 1
             self._try_unlock()
 
+    # Per-eval-interval TEA verdict feedback driving the latch.
     def feedback_tea(self, is_attack: bool, confidence: str = "low",
                      eval_seq: int | None = None) -> None:
-        """Per-eval-interval TEA verdict feedback driving the latch.
-
-        eval_seq dedup guarantees one count per interval even when many
-        flows carry the same cached result.
-        """
         with self._lock:
             if eval_seq is not None:
                 # P6: telemetry-provided seq is attacker-influenceable.
@@ -1215,16 +1184,8 @@ class EntropyAnalyzer:
                 self._relearn_stable_streak += 1
             self._try_unlock()
 
+    # Zero-traffic recovery path: unlock based on time since last attack signal.
     def idle_tick(self, now: float | None = None) -> None:
-        """Zero-traffic recovery path: no flow feedback arrives during
-        silence, so unlock is time-based on the last observed attack signal.
-
-        P4: the IF guard is a sustained anomaly-rate window, not a single
-        timestamp, so sporadic IF false positives no longer block recovery.
-        P3: a bounded max-hold valve force-unlocks a latch that has outlived
-        TEA_LATCH_MAX_HOLD_S while TEA itself reports sustained silence
-        (normal-verdict streak, not merely "no high-conf event", per REG-2).
-        """
         now = now if now is not None else time.monotonic()
         with self._lock:
             # Cleanup stale shadows regardless of latch state
@@ -1257,9 +1218,8 @@ class EntropyAnalyzer:
                     )
                 self._set_latch(False, "max-hold exceeded", caller_holds_lock=True)
 
+    # P5: recovery observability for expert endpoint and acceptance tests.
     def telemetry(self) -> dict:
-        """P5: recovery observability for the expert endpoint and
-        acceptance tests asserting the hold bound."""
         with self._lock:
             now = time.monotonic()
             buf = self._if_rate_buffer
@@ -1272,14 +1232,14 @@ class EntropyAnalyzer:
                 "relearn_stable_streak": self._relearn_stable_streak,
             }
 
+    # Lock-safe read of size baseline mean for dynamic low-rate gate.
     def mean_size_baseline(self) -> float:
-        """Lock-safe read of the size baseline mean for the dynamic low-rate gate."""
         with self._lock:
             return self._global_state.size_base.mean
 
+    # Drop per-IP profiles untouched longer than max_age_s.
     def cleanup_stale_profiles(self, max_age_s: float = TEA_IP_PROFILE_TTL_S,
                                now: float | None = None) -> int:
-        """Drop per-IP profiles untouched longer than max_age_s."""
         now = now if now is not None else time.monotonic()
         cutoff = now - max_age_s
         removed = 0

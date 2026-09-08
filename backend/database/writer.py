@@ -33,7 +33,7 @@ def _is_duplicate(src_ip: str, if_score: float, action_taken: str,
 
 
 # ---------------------------------------------------------------------------
-# Batch buffer for traffic_summary writes — flushed every 5 seconds
+# Batch buffer for traffic_summary writes -- flushed every 5 seconds
 # ---------------------------------------------------------------------------
 _summary_lock   = threading.Lock()
 _summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
@@ -90,18 +90,13 @@ def log_mitigation_event(event: dict) -> None:
 
 
 def log_manual_action(src_ip: str, action: str,
-                      attack_vector: str = "—",
+                      attack_vector: str = "--",
                       confidence: float = 0.0,
-                      priority: str = "—",
+                      priority: str = "--",
                       if_score: float = None,
                       phase: str = None,
                       session_id: str = None) -> None:
-    """Log a manual operator action (release/block).
-
-    Preserves the real attack_vector, confidence, priority and if_score from
-    the active IpState so the PDF report shows full details — only the
-    action_taken column changes to 'Manual Release' or 'Manual Block'.
-    """
+# Log a manual operator action (release/block), preserving IpState details for report.
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         execute("""
@@ -130,7 +125,7 @@ def log_detection_features(src_ip: str, if_score: float,
                             confidence: float,
                             flow_stats: dict,
                             switch_stats: dict) -> None:
-    # --- ML OFF — skip DB write to avoid polluting dataset ---
+    # --- ML OFF -- skip DB write to avoid polluting dataset ---
     if not ML_ENABLED:
         return
     try:
@@ -157,16 +152,29 @@ def log_detection_features(src_ip: str, if_score: float,
         tp_dst                   = fs.get("tp_dst", 0)
         ip_proto                 = fs.get("ip_proto", 0)
 
-        # --- Engineered features (raw, pre-log — match IF/RF formulas) ---
-        bytes_per_packet      = byte_count / max(packet_count, 1)
-        pkt_byte_rate_ratio   = packet_count_per_second / (byte_count_per_second + eps)
-        flow_intensity        = packet_count * byte_count_per_second
-        port_entropy          = tp_src / (tp_dst + 1)
-        bytes_per_duration    = byte_count / (flow_duration_sec + eps)
-        pkt_size_uniformity   = bytes_per_packet / (byte_count_per_second + 1)
-        flow_src_intensity    = flow_count_per_src * packet_count_per_second
-        duration_pkt_ratio    = flow_duration_total_ns / (packet_count + eps)
-        pkt_rate_per_duration = packet_count / (flow_duration_total_ns + eps)
+        from backend.pipeline.feature_engineering import compute_raw_features
+
+        raw_feats = compute_raw_features(
+            byte_count=byte_count,
+            packet_count=packet_count,
+            byte_count_per_second=byte_count_per_second,
+            packet_count_per_second=packet_count_per_second,
+            flow_duration_sec=flow_duration_sec,
+            flow_duration_total_ns=flow_duration_total_ns,
+            flow_count_per_src=flow_count_per_src,
+            tp_src=tp_src,
+            tp_dst=tp_dst,
+            eps=eps,
+        )
+        bytes_per_packet      = raw_feats["bytes_per_packet"]
+        pkt_byte_rate_ratio   = raw_feats["pkt_byte_rate_ratio"]
+        flow_intensity        = raw_feats["flow_intensity"]
+        port_entropy          = raw_feats["port_entropy"]
+        bytes_per_duration    = raw_feats["bytes_per_duration"]
+        pkt_size_uniformity   = raw_feats["pkt_size_uniformity"]
+        flow_src_intensity    = raw_feats["flow_src_intensity"]
+        duration_pkt_ratio    = raw_feats["duration_pkt_ratio"]
+        pkt_rate_per_duration = raw_feats["pkt_rate_per_duration"]
 
         flag_syn_flood  = 1 if attack_class == "SYN Flood"  else 0
         flag_icmp_flood = 1 if attack_class == "ICMP Flood" else 0
@@ -248,12 +256,8 @@ def features_overflow_count() -> int:
         return _features_overflow_count
 
 
+# Drain the feature buffer into the DB in FIFO chunks (falls back to per-row on failure).
 def flush_detection_features() -> int:
-    """Drain the feature buffer into the DB in FIFO chunks.
-
-    A chunk-level failure falls back to per-row inserts so one bad row
-    cannot lose its siblings (mirrors the old per-row swallow semantics).
-    """
     flushed = 0
     while True:
         with _features_lock:
@@ -280,15 +284,11 @@ def flush_detection_features() -> int:
 # quarantine_state
 # ---------------------------------------------------------------------------
 
+# Persist quarantine state including TTL expiry for backend restarts.
 def save_quarantine_state(src_ip: str, phase: int, attack_vector: str,
                           if_score: float, confidence: float,
                           action_taken: str, permanent: bool,
                           block_expires_at: str | None = None) -> None:
-    """Persist quarantine state.
-
-    H5 fix: block_expires_at (ISO timestamp string) stores TTL expiry for
-    auto-blocks so it survives backend restarts.  NULL = manual permanent block.
-    """
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         execute("""
@@ -319,8 +319,8 @@ def delete_quarantine_state(src_ip: str) -> None:
         log.exception("Failed to delete quarantine state for %s", src_ip)
 
 
+# Return all persisted quarantine entries on startup.
 def load_quarantine_states() -> list[dict]:
-    """Returns all persisted quarantine entries on startup."""
     try:
         from backend.database.db import query
         rows = query("""
@@ -351,7 +351,7 @@ def log_traffic_summary(total: int, threats: int,
                         rf_udp_as_syn:  int = 0, rf_udp_as_icmp: int = 0,
                         held: int = 0, rescored: int = 0,
                         expired_unscored: int = 0) -> None:
-    # --- ML OFF — skip metric writes to keep dataset clean ---
+    # --- ML OFF -- skip metric writes to keep dataset clean ---
     if not ML_ENABLED:
         return
     with _summary_lock:
@@ -434,8 +434,8 @@ def flush_summary() -> None:
         log.exception("Failed to flush traffic_summary")
 
 
+# Persist packet-level counters to global_counters table.
 def flush_global_counters() -> None:
-    """Persist packet-level counters to global_counters table."""
     from backend.pipeline.decision_engine import get_stats
     stats = get_stats()
     try:
@@ -479,13 +479,8 @@ def start_flush_thread() -> None:
     t.start()
 
 
+# Flush both buffered tables on interpreter exit.
 def register_exit_flush() -> None:
-    """Flush both buffered tables on interpreter exit.
-
-    Neither buffer had an exit hook before; without this every shutdown
-    loses up to one flush interval of traffic_summary and detection_features
-    rows (the latter being the ML training collector and TEA replay input).
-    """
     import atexit
 
     def _final_flush():
@@ -501,20 +496,15 @@ def register_exit_flush() -> None:
     atexit.register(_final_flush)
 
 # ---------------------------------------------------------------------------
-# ip_attack_history — one record per IP per attack session
+# ip_attack_history -- one record per IP per attack session
 # ---------------------------------------------------------------------------
 
+# Write a completed attack session to ip_attack_history.
 def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
                        confidence: float, priority: str, phase_reached: int,
                        first_seen: str, unblock_reason: str,
                        ban_level: int = 0,
                        offence_count: int = 0) -> None:
-    """Write a completed attack session to ip_attack_history.
-
-    Called by state_machine._clear() (TTL expiry) and manual_release().
-    first_seen: ISO timestamp when IP entered phase 1.
-    unblock_reason: 'TTL Expired' | 'Manual Release' | 'Manual Block Escalation'
-    """
     global _reputation_seq
     unblocked_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -630,12 +620,12 @@ def get_offense_count(src_ip: str) -> float:
 
         return min(round(score, 4), 10.0)
     except Exception as exc:
-        log.warning("writer: failed to get offense count for %s — %s", src_ip, exc)
+        log.warning("writer: failed to get offense count for %s -- %s", src_ip, exc)
         return 0.0
 
 
 def get_offense_total_count(src_ip: str) -> int:
-    # Raw count of past offenses for this IP — simple "caught N times".
+    # Raw count of past offenses for this IP -- simple "caught N times".
     # Returns the persisted offence_totals ledger total plus live episode
     # rows: the ledger is only written at benchmark reset, which then deletes
     # the live rows, so the sum is correct mid-session and post-reset.
@@ -659,7 +649,7 @@ def get_offense_total_count(src_ip: str) -> int:
             return ledger_total + int(rows[0]["cnt"])
         return ledger_total
     except Exception as exc:
-        log.warning("writer: failed to get offense total count for %s — %s", src_ip, exc)
+        log.warning("writer: failed to get offense total count for %s -- %s", src_ip, exc)
         return 0
 
 
@@ -676,12 +666,12 @@ def get_ban_level(src_ip: str) -> int:
             return int(rows[0]["max_ban"])
         return 0
     except Exception as exc:
-        log.warning("writer: failed to get ban level for %s — %s", src_ip, exc)
+        log.warning("writer: failed to get ban level for %s -- %s", src_ip, exc)
         return 0
 
 
+# Return distinct dates (YYYY-MM-DD) that have attack history records.
 def get_history_dates() -> list[str]:
-    """Return distinct dates (YYYY-MM-DD) that have attack history records."""
     try:
         rows = query(
             "SELECT DISTINCT date(unblocked_at) AS d FROM ip_attack_history ORDER BY d ASC"
@@ -690,47 +680,6 @@ def get_history_dates() -> list[str]:
     except Exception:
         log.exception("Failed to get history dates")
         return []
-
-
-# ML metrics
-def get_ml_metrics(start: str, end: str) -> dict:
-    """Compute Precision, Recall, F1, Accuracy, FPR, FNR, TPR, TNR from DB."""
-    try:
-        rows = query("""
-            SELECT SUM(tp) as tp, SUM(false_positives) as fp,
-                   SUM(tn) as tn, SUM(fn) as fn
-            FROM traffic_summary
-            WHERE timestamp >= ? AND timestamp <= ?
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
-        r  = rows[0] if rows else {}
-        tp = float(r.get("tp") or 0)
-        fp = float(r.get("fp") or 0)
-        tn = float(r.get("tn") or 0)
-        fn = float(r.get("fn") or 0)
-
-        precision  = tp / max(tp + fp, 1)
-        recall     = tp / max(tp + fn, 1)   # TPR
-        f1         = 2 * precision * recall / max(precision + recall, 1e-9)
-        accuracy   = (tp + tn) / max(tp + fp + tn + fn, 1)
-        fpr        = fp / max(fp + tn, 1)
-        fnr        = fn / max(fn + tp, 1)
-        tpr        = recall
-        tnr        = tn / max(tn + fp, 1)
-
-        return {
-            "tp": int(tp), "fp": int(fp), "tn": int(tn), "fn": int(fn),
-            "precision": round(precision * 100, 2),
-            "recall":    round(recall    * 100, 2),
-            "f1":        round(f1        * 100, 2),
-            "accuracy":  round(accuracy  * 100, 2),
-            "fpr":       round(fpr       * 100, 2),
-            "fnr":       round(fnr       * 100, 2),
-            "tpr":       round(tpr       * 100, 2),
-            "tnr":       round(tnr       * 100, 2),
-        }
-    except Exception:
-        log.exception("Failed to compute ML metrics")
-        return {}
 
 
 def _calc_metrics(tp, fp, tn, fn) -> dict:
@@ -751,8 +700,8 @@ def _calc_metrics(tp, fp, tn, fn) -> dict:
     }
 
 
+# IF-level metrics based on if_tp/if_fp/if_tn/if_fn.
 def get_if_metrics(start: str, end: str) -> dict:
-    """IF-level metrics — based on if_tp/if_fp/if_tn/if_fn."""
     try:
         rows = query("""
             SELECT SUM(if_tp) as tp, SUM(if_fp) as fp,
@@ -768,12 +717,8 @@ def get_if_metrics(start: str, end: str) -> dict:
         return {}
 
 
+# Micro-averaged Precision/Recall/F1/Accuracy from a 3x3 confusion matrix.
 def _calc_overall_from_confusion(cm: dict) -> dict:
-    """Micro-averaged Precision/Recall/F1/Accuracy from a 3x3 confusion matrix.
-
-    Standard approach for multi-class: with one predicted label per flow,
-    micro precision = micro recall = micro accuracy = overall correct / total.
-    """
     correct = cm["syn_as_syn"] + cm["icmp_as_icmp"] + cm["udp_as_udp"]
     total   = sum(cm.values())
     acc     = correct / max(total, 1)
@@ -786,8 +731,8 @@ def _calc_overall_from_confusion(cm: dict) -> dict:
     }
 
 
+# RF-level metrics (overall and per-class SYN/ICMP/UDP).
 def get_rf_metrics(start: str, end: str) -> dict:
-    """RF-level metrics — overall + per-class (SYN/ICMP/UDP)."""
     try:
         rows = query("""
             SELECT SUM(rf_tp) as tp, SUM(rf_fp) as fp,
@@ -836,8 +781,8 @@ def get_rf_metrics(start: str, end: str) -> dict:
         return {}
 
 
+# Average Detection Time and Mitigation Response Time in milliseconds.
 def get_latency_metrics(start: str, end: str) -> dict:
-    """Avg Detection Time and Mitigation Response Time, in milliseconds."""
     try:
         rows = query("""
             SELECT AVG(detection_ms) as avg_detect, AVG(mitigation_ms) as avg_mitigate
@@ -898,27 +843,8 @@ def log_obs_snapshot(snap: dict) -> None:
         log.exception("Failed to log obs snapshot")
 
 
-def get_system_metrics_avg(start: str, end: str) -> dict:
-    try:
-        rows = query("""
-            SELECT AVG(cpu_percent) as cpu, AVG(mem_mb) as mem,
-                   AVG(pps_processed) as pps
-            FROM system_metrics
-            WHERE timestamp >= ? AND timestamp <= ?
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
-        r = rows[0] if rows else {}
-        return {
-            "avg_cpu":  round(float(r.get("cpu") or 0), 2),
-            "avg_mem":  round(float(r.get("mem") or 0), 2),
-            "avg_pps":  round(float(r.get("pps") or 0), 2),
-        }
-    except Exception:
-        log.exception("Failed to get system metrics avg")
-        return {}
-
-
+# Return average Controller CPU during attack, baseline, and active mitigation.
 def get_system_metrics_attack_vs_baseline(start: str, end: str) -> dict:
-    """Returns avg Controller CPU during attack, baseline, and active mitigation."""
     try:
         rows = query("""
             SELECT

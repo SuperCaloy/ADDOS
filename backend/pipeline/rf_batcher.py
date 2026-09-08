@@ -2,7 +2,7 @@ import threading
 import time
 from concurrent.futures import Future
 
-from backend.config import RF_BATCH_MAX, RF_BATCH_WINDOW_MS
+from backend.config import RF_BATCH_MAX
 from backend.models import rf_pipeline
 
 _lock = threading.Lock()

@@ -1,5 +1,5 @@
 """
-frontend/app.py — FastAPI application factory
+frontend/app.py -- FastAPI application factory
 """
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles

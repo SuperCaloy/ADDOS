@@ -14,7 +14,7 @@ _SEND_TIMEOUT_MS   = 500
 class ZmqCommander:
     """Sends OpenFlow commands to Ryu over ZeroMQ PUSH socket.
 
-    Ryu being offline does not crash the backend — commands are dropped
+    Ryu being offline does not crash the backend -- commands are dropped
     with a warning and retried on next reconnect.
     """
 
@@ -37,7 +37,7 @@ class ZmqCommander:
         log.info("ZMQ commander connected to %s", ZMQ_COMMAND_ADDR)
 
     def send(self, command: dict) -> None:
-        """Send a command dict to Ryu. Non-blocking — drops if Ryu is offline."""
+        """Send a command dict to Ryu. Non-blocking -- drops if Ryu is offline."""
         payload = json.dumps(command).encode()
         with self._lock:
             try:
@@ -57,7 +57,7 @@ class ZmqCommander:
             except zmq.Again:
                 log.debug("ZMQ command dropped (Ryu unavailable): %s", command)
             except zmq.ZMQError as e:
-                log.warning("ZMQ send error: %s — reconnecting", e)
+                log.warning("ZMQ send error: %s -- reconnecting", e)
                 self._reconnect_safe()
 
     def _reconnect_safe(self) -> None:
@@ -74,5 +74,5 @@ class ZmqCommander:
                 self._sock.close()
 
 
-# Module-level singleton — injected into state_machine in main.py
+# Module-level singleton -- injected into state_machine in main.py
 commander = ZmqCommander()

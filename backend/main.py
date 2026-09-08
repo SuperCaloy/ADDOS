@@ -1,7 +1,4 @@
 import logging
-import threading
-import time
-import os
 
 from flask import Flask
 from flask_cors import CORS
@@ -41,7 +38,7 @@ def create_app() -> Flask:
     # the commander is wired and before the tick thread starts.
     state_machine.restore_from_db()
 
-    # Wire deception module — must happen before start_tick_thread
+    # Wire deception module -- must happen before start_tick_thread
     deception.set_commander(commander)
     deception.set_callbacks(
         escalate_fn = lambda src_ip, if_score, attack_vector, confidence: (
@@ -54,9 +51,7 @@ def create_app() -> Flask:
     start_tick_thread()
     log.info("State machine started")
 
-    # Wire resource_guard — monitors CPU/memory, clears entries under strain
-    resource_guard.set_state_machine(state_machine)
-    resource_guard.set_deception(deception)
+    # Wire resource_guard -- monitors CPU/memory, clears entries under strain
     resource_guard.start()
     log.info("Resource guard started")
 
@@ -72,7 +67,7 @@ def create_app() -> Flask:
     from backend.pipeline import observability
     observability.start()
 
-    # --- Start ZMQ telemetry receiver (resilient — ok if Ryu is offline) ---
+    # --- Start ZMQ telemetry receiver (resilient -- ok if Ryu is offline) ---
     from backend.transport import zmq_receiver
     zmq_receiver.start()
 
@@ -81,7 +76,7 @@ def create_app() -> Flask:
     start_flush_thread()
     register_exit_flush()
 
-    # --- Start database archiver (hot → archive rotation every hour) ---
+    # --- Start database archiver (hot -> archive rotation every hour) ---
     from backend.database import archiver
     archiver.start()
 

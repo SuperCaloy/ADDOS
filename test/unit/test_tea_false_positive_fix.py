@@ -68,7 +68,7 @@ class TestMagnitudeCheck:
     def test_small_absolute_change_not_high(self):
         """A value 1.5x the mean should NOT be flagged as high (needs 2x)."""
         base = self._make_baseline(mean=1.0, variance=100.0)
-        # z_score = (1.5 - 1.0) / 10.0 = 0.05 — way below sigma
+        # z_score = (1.5 - 1.0) / 10.0 = 0.05 -- way below sigma
         # But even if is_high were True, magnitude check prevents it
         # is_high returns False since z=0.05 < attack_sigma
         assert not base.is_high(1.5, sigma=2.5)
@@ -217,14 +217,14 @@ class TestAlwaysLearnDuringAttack:
         ea.feedback_tea(True, "high", eval_seq=1)
         assert ea.attack_latched
 
-        # Feed 10 attack intervals — baselines should drift (capped)
+        # Feed 10 attack intervals -- baselines should drift (capped)
         for i in range(10):
             clock.t = 350.0 + i * 0.5
             ea._last_eval_time = 0.0
             ea.update(1, [_flow(i * 9 + j, pps=50.0) for j in range(9)])
 
         mean_after = ea._global_state.pps_base.mean
-        # Baselines must have moved (even if capped) — NOT frozen
+        # Baselines must have moved (even if capped) -- NOT frozen
         assert mean_after != mean_before, (
             "Baselines should update during attack (capped drift), "
             "not freeze at old values."

@@ -18,7 +18,74 @@ from backend.mitigation import behavioral
 
 log = logging.getLogger(__name__)
 
-# ── Phase 1 observation durations ─────────────────────────────────────────
+
+def _build_mitigation_event(
+    src_ip: str,
+    attack_vector: str,
+    confidence: float,
+    priority: str,
+    action_taken: str,
+    if_score: float,
+    phase: str,
+    *,
+    event_type: str = None,
+    reason: str = None,
+    session_id: str = None,
+    is_manual: bool = False,
+    timestamp: str = None,
+    detection_ms: Optional[float] = None,
+    mitigation_ms: Optional[float] = None,
+) -> dict:
+    event = {
+        "timestamp": timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "src_ip": src_ip,
+        "predicted_class": "DDoS",
+        "attack_vector": attack_vector,
+        "confidence": confidence,
+        "priority": priority,
+        "action_taken": action_taken,
+        "if_score": if_score,
+        "phase": phase,
+        "is_manual": is_manual,
+    }
+    if event_type is not None:
+        event["event_type"] = event_type
+    if reason is not None:
+        event["reason"] = reason
+    if session_id is not None:
+        event["session_id"] = session_id
+    if detection_ms is not None:
+        event["detection_ms"] = detection_ms
+    if mitigation_ms is not None:
+        event["mitigation_ms"] = mitigation_ms
+    return event
+
+
+def _build_sse_event(
+    src_ip: str,
+    attack_vector: str,
+    confidence: float,
+    priority: str,
+    action_taken: str,
+    event_type: str,
+    session_id: str,
+    *,
+    timestamp: str = None,
+    predicted_class: str = "DDoS",
+) -> dict:
+    return {
+        "timestamp": timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "src_ip": src_ip,
+        "predicted_class": predicted_class,
+        "attack_vector": attack_vector,
+        "confidence": f"{confidence * 100:.1f}%",
+        "priority": priority,
+        "action_taken": action_taken,
+        "event_type": event_type,
+        "session_id": session_id,
+    }
+
+# -- Phase 1 observation durations -----------------------------------------
 # Strategy 2: Shorter quarantine, longer sinkhole (same for simulation & production)
 PHASE1_DURATION_LOW      = 10.0
 PHASE1_DURATION_MEDIUM   = 10.0
@@ -115,7 +182,7 @@ class StateMachine:
     def set_deception(self, deception_module) -> None:
         self._deception = deception_module
 
-    # ── Startup restore ───────────────────────────────────────────────
+    # -- Startup restore -----------------------------------------------
 
     def restore_from_db(self) -> None:
         rows = writer.load_quarantine_states()
@@ -189,7 +256,7 @@ class StateMachine:
         log.info("Restore complete - %d restored  %d purged  %d TTL-expired",
                  restored, purged, expired)
 
-    # ── Detection entry point ─────────────────────────────────────────
+    # -- Detection entry point -----------------------------------------
 
     def on_prefilter_trip(self, src_ip: str, correlated: bool) -> str:
         # Fast trigger before IF/RF scoring: correlated (2+ protocols) goes to sinkhole, single to quarantine.
@@ -221,20 +288,12 @@ class StateMachine:
                     self._push_command(src_ip, _action)
                 log.info("Prefilter Quarantine: %s (single-protocol trip)", src_ip)
                 self._persist(state)
-                writer.log_mitigation_event({
-                    "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "src_ip":          src_ip,
-                    "predicted_class": "DDoS",
-                    "attack_vector":   state.attack_vector,
-                    "confidence":      state.confidence,
-                    "priority":        state.priority,
-                    "action_taken":    "Quarantined",
-                    "if_score":        state.if_score,
-                    "phase":           "Phase 1",
-                    "is_manual":       False,
-                    "event_type":      "transition",
-                    "reason":          "prefilter trip",
-                })
+                writer.log_mitigation_event(_build_mitigation_event(
+                    src_ip=src_ip, attack_vector=state.attack_vector,
+                    confidence=state.confidence, priority=state.priority,
+                    action_taken="Quarantined", if_score=state.if_score,
+                    phase="Phase 1", event_type="transition", reason="prefilter trip",
+                ))
                 return "Quarantined"
 
         # Correlated: dispatch sinkhole outside the lock since deception manages its own.
@@ -331,24 +390,17 @@ class StateMachine:
                         self._states[src_ip] = state
                         _ban_action, _ban_ttl = resolve_ban_action(ban_secs)
                         self._push_command(src_ip, _ban_action, ttl=_ban_ttl)
-                        log.info("High Priority → Immediate Time Ban: %s  conf=%.1f%%  "
+                        log.info("High Priority -> Immediate Time Ban: %s  conf=%.1f%%  "
                                  "vector=%s  duration=%ds",
                                  src_ip, confidence * 100, attack_class, ban_secs)
                         self._persist(state)
-                        writer.log_mitigation_event({
-                            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "src_ip":          src_ip,
-                            "predicted_class": "DDoS",
-                            "attack_vector":   attack_class,
-                            "confidence":      confidence,
-                            "priority":        _prio,
-                            "action_taken":    f"Time Ban ({ban_secs // 60}m)" if ban_secs >= 60 else f"Time Ban ({ban_secs}s)",
-                            "if_score":        if_score,
-                            "phase":           "Time Ban",
-                            "is_manual":       False,
-                            "event_type":      "transition",
-                            "reason":          "high priority detection",
-                        })
+                        writer.log_mitigation_event(_build_mitigation_event(
+                            src_ip=src_ip, attack_vector=attack_class,
+                            confidence=confidence, priority=_prio,
+                            action_taken=f"Time Ban ({ban_secs // 60}m)" if ban_secs >= 60 else f"Time Ban ({ban_secs}s)",
+                            if_score=if_score, phase="Time Ban",
+                            event_type="transition", reason="high priority detection",
+                        ))
                     else:
                         # Low priority: Phase 1 observation (quarantine).
                         state = IpState(
@@ -394,7 +446,7 @@ class StateMachine:
             if state is not None:
                 return state.action_taken
 
-        # ── Post-lock: re-offence routing ─────────────────────────────
+        # -- Post-lock: re-offence routing -----------------------------
         if _prior_ban > 0:
             self.on_reoffence(
                 src_ip             = src_ip,
@@ -411,7 +463,7 @@ class StateMachine:
 
         return "Unknown"
 
-    # ── Tick - automatic phase progression ───────────────────────────
+    # -- Tick: automatic phase progression ---------------------------
 
     def tick(self) -> None:
         now = time.monotonic()
@@ -431,16 +483,16 @@ class StateMachine:
                         if state.action_taken.startswith(self._UNSCORED_TAG):
                             self._hold_stats["expired_unscored"] += 1
                             writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=0, expired_unscored=1)
-                            log.info("Hold expired unscored: %s → released", src_ip)
+                            log.info("Hold expired unscored: %s -> released", src_ip)
                         else:
                             # Ban expired: record offense and release; re-detection routes via DB history.
-                            log.info("Time ban expired: %s (level %d) → released",
+                            log.info("Time ban expired: %s (level %d) -> released",
                                      src_ip, state.ban_level)
                         self._handle_ban_expiry(src_ip, state)
 
                 elif state.phase == 3:
                     if state.ttl_expires_at and now >= state.ttl_expires_at:
-                        log.info("Blackhole TTL expired: %s → releasing", src_ip)
+                        log.info("Blackhole TTL expired: %s -> releasing", src_ip)
                         self._clear(src_ip, reason="Blackhole TTL Expired")
 
         # Also tick the deception module observation windows
@@ -512,18 +564,12 @@ class StateMachine:
         self._persist(state, block_expires_at=exp_str)
 
         ban_label = f"{ban_secs // 60}m" if ban_secs >= 60 else f"{ban_secs}s"
-        writer.log_mitigation_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          state.src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      state.confidence,
-            "priority":        state.priority,
-            "action_taken":    f"Time Ban ({ban_label})",
-            "if_score":        state.if_score,
-            "phase":           "Time Ban",
-            "is_manual":       False,
-        })
+        writer.log_mitigation_event(_build_mitigation_event(
+            src_ip=state.src_ip, attack_vector=state.attack_vector,
+            confidence=state.confidence, priority=state.priority,
+            action_taken=f"Time Ban ({ban_label})", if_score=state.if_score,
+            phase="Time Ban",
+        ))
         behavioral.record_offense(
             src_ip         = state.src_ip,
             attack_vector  = state.attack_vector,
@@ -537,17 +583,12 @@ class StateMachine:
             offence_count  = state.offence_count,
         )
         from backend.pipeline.decision_engine import _push_sse_event
-        _push_sse_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          state.src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      f"{state.confidence * 100:.1f}%",
-            "priority":        state.priority,
-            "action_taken":    state.action_taken,
-            "event_type":      "transition",
-            "session_id":      state.session_id,
-        }, force=True)
+        _push_sse_event(_build_sse_event(
+            src_ip=state.src_ip, attack_vector=state.attack_vector,
+            confidence=state.confidence, priority=state.priority,
+            action_taken=state.action_taken, event_type="transition",
+            session_id=state.session_id,
+        ), force=True)
 
     def _advance_to_sinkhole(self, state: IpState) -> None:
         # Quarantine could not resolve this IP within the observation window.
@@ -611,34 +652,21 @@ class StateMachine:
         else:
             state.transition_reason = "Time ban expired - clean release"
 
-        writer.log_mitigation_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      state.confidence,
-            "priority":        state.priority,
-            "action_taken":    "Released",
-            "if_score":        state.if_score,
-            "phase":           "Time Ban",
-            "is_manual":       False,
-            "event_type":      "released",
-            "reason":          "Ban Expired",
-            "session_id":      state.session_id,
-        })
+        writer.log_mitigation_event(_build_mitigation_event(
+            src_ip=src_ip, attack_vector=state.attack_vector,
+            confidence=state.confidence, priority=state.priority,
+            action_taken="Released", if_score=state.if_score,
+            phase="Time Ban", event_type="released", reason="Ban Expired",
+            session_id=state.session_id,
+        ))
 
         from backend.pipeline.decision_engine import _push_sse_event
-        _push_sse_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      f"{state.confidence * 100:.1f}%",
-            "priority":        state.priority,
-            "action_taken":    "Released",
-            "event_type":      "released",
-            "session_id":      state.session_id,
-        }, force=True)
+        _push_sse_event(_build_sse_event(
+            src_ip=src_ip, attack_vector=state.attack_vector,
+            confidence=state.confidence, priority=state.priority,
+            action_taken="Released", event_type="released",
+            session_id=state.session_id,
+        ), force=True)
 
         self._push_command(src_ip, resolve_release_action())
         self._states.pop(src_ip, None)
@@ -677,18 +705,12 @@ class StateMachine:
                  state.src_ip, BLACKHOLE_TTL_SECONDS, exp_str)
         self._persist(state, block_expires_at=exp_str)
 
-        writer.log_mitigation_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          state.src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      state.confidence,
-            "priority":        state.priority,
-            "action_taken":    "Blackhole",
-            "if_score":        state.if_score,
-            "phase":           "Blackhole",
-            "is_manual":       False,
-        })
+        writer.log_mitigation_event(_build_mitigation_event(
+            src_ip=state.src_ip, attack_vector=state.attack_vector,
+            confidence=state.confidence, priority=state.priority,
+            action_taken="Blackhole", if_score=state.if_score,
+            phase="Blackhole",
+        ))
         behavioral.record_offense(
             src_ip         = state.src_ip,
             attack_vector  = state.attack_vector,
@@ -702,17 +724,15 @@ class StateMachine:
             offence_count  = state.offence_count,
         )
         from backend.pipeline.decision_engine import _push_sse_event
-        _push_sse_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          state.src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      f"{state.confidence * 100:.1f}%",
-            "priority":        state.priority,
-            "action_taken":    "Blackhole",
-            "event_type":      "transition",
-            "session_id":      state.session_id,
-        }, force=True)
+        _push_sse_event(_build_sse_event(
+            src_ip=state.src_ip,
+            attack_vector=state.attack_vector,
+            confidence=state.confidence,
+            priority=state.priority,
+            action_taken="Blackhole",
+            event_type="transition",
+            session_id=state.session_id,
+        ), force=True)
 
     def _clear(self, src_ip: str, reason: str = "Released") -> None:
         state = self._states.pop(src_ip, None)
@@ -721,20 +741,17 @@ class StateMachine:
         if state is not None:
             state.transition_reason = reason
             # Terminal event: the lifecycle ledger must show why mitigation ended.
-            writer.log_mitigation_event({
-                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "src_ip":          src_ip,
-                "predicted_class": "DDoS",
-                "attack_vector":   state.attack_vector,
-                "confidence":      state.confidence,
-                "priority":        state.priority,
-                "action_taken":    "Released",
-                "if_score":        state.if_score,
-                "phase":           state.phase_label(),
-                "is_manual":       False,
-                "event_type":      "released",
-                "reason":          reason,
-            })
+            writer.log_mitigation_event(_build_mitigation_event(
+                src_ip=src_ip,
+                attack_vector=state.attack_vector,
+                confidence=state.confidence,
+                priority=state.priority,
+                action_taken="Released",
+                if_score=state.if_score,
+                phase=state.phase_label(),
+                event_type="released",
+                reason=reason,
+            ))
             # behavioral.record_offense writes to DB so reputation survives restarts.
             behavioral.record_offense(
                 src_ip         = src_ip,
@@ -749,20 +766,18 @@ class StateMachine:
                 offence_count  = state.offence_count,
             )
             from backend.pipeline.decision_engine import _push_sse_event
-            _push_sse_event({
-                "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "src_ip":          src_ip,
-                "predicted_class": "DDoS",
-                "attack_vector":   state.attack_vector,
-                "confidence":      f"{state.confidence * 100:.1f}%",
-                "priority":        state.priority,
-                "action_taken":    "Released",
-                "event_type":      "released",
-                "session_id":      state.session_id,
-            }, force=True)
+            _push_sse_event(_build_sse_event(
+                src_ip=src_ip,
+                attack_vector=state.attack_vector,
+                confidence=state.confidence,
+                priority=state.priority,
+                action_taken="Released",
+                event_type="released",
+                session_id=state.session_id,
+            ), force=True)
         log.info("Cleared: %s  reason=%s", src_ip, reason)
 
-    # ── Re-offence ────────────────────────────────────────────────────
+    # -- Re-offence ----------------------------------------------------
 
     def on_reoffence(self, src_ip: str, if_score: float,
                      attack_class: str, confidence: float,
@@ -778,7 +793,7 @@ class StateMachine:
             )
             new_ban_lvl = min(prev_ban_level + 1, MAX_BAN_LEVEL)
 
-            # Weighted offense score meets threshold → skip ban, go straight to blackhole.
+            # Weighted offense score meets threshold -> skip ban, go straight to blackhole.
             if behavioral.should_blackhole(src_ip, new_ban_lvl):
                 state = IpState(
                     src_ip        = src_ip,
@@ -794,7 +809,7 @@ class StateMachine:
                 )
                 self._states[src_ip] = state
                 self._advance_to_blackhole(state)
-                log.info("Re-offence → Blackhole (score threshold): %s  offences=%d",
+                log.info("Re-offence -> Blackhole (score threshold): %s  offences=%d",
                          src_ip, state.offence_count)
             elif new_ban_lvl > MAX_BAN_LEVEL:
                 # Max ban level exceeded: route to blackhole.
@@ -812,7 +827,7 @@ class StateMachine:
                 )
                 self._states[src_ip] = state
                 self._advance_to_blackhole(state)
-                log.info("Re-offence → Blackhole (max ban level): %s  offences=%d",
+                log.info("Re-offence -> Blackhole (max ban level): %s  offences=%d",
                          src_ip, state.offence_count)
             else:
                 # Escalate to next ban level via Phase 1 observation first.
@@ -830,23 +845,20 @@ class StateMachine:
                 )
                 self._states[src_ip] = state
                 self._push_command(src_ip, "rate_limit")
-                log.info("Re-offence → Phase 1 (ban_level=%d next): %s  offences=%d",
+                log.info("Re-offence -> Phase 1 (ban_level=%d next): %s  offences=%d",
                          new_ban_lvl, src_ip, state.offence_count)
                 self._persist(state)
-                writer.log_mitigation_event({
-                    "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    "src_ip":          src_ip,
-                    "predicted_class": "DDoS",
-                    "attack_vector":   attack_class,
-                    "confidence":      confidence,
-                    "priority":        _prio,
-                    "action_taken":    "Quarantined",
-                    "if_score":        if_score,
-                    "phase":           f"Phase 1 - Re-offence #{state.offence_count}",
-                    "is_manual":       False,
-                })
+                writer.log_mitigation_event(_build_mitigation_event(
+                    src_ip=src_ip,
+                    attack_vector=attack_class,
+                    confidence=confidence,
+                    priority=_prio,
+                    action_taken="Quarantined",
+                    if_score=if_score,
+                    phase=f"Phase 1 - Re-offence #{state.offence_count}",
+                ))
 
-    # ── Manual operator actions ───────────────────────────────────────
+    # -- Manual operator actions ---------------------------------------
 
     def manual_release(self, src_ip: str) -> bool:
         with self._lock:
@@ -877,17 +889,15 @@ class StateMachine:
             offence_count  = state.offence_count,
         )
         from backend.pipeline.decision_engine import _push_sse_event
-        _push_sse_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      f"{state.confidence * 100:.1f}%",
-            "priority":        state.priority,
-            "action_taken":    "Released",
-            "event_type":      "manual",
-            "session_id":      state.session_id,
-        }, force=True)
+        _push_sse_event(_build_sse_event(
+            src_ip=src_ip,
+            attack_vector=state.attack_vector,
+            confidence=state.confidence,
+            priority=state.priority,
+            action_taken="Released",
+            event_type="manual",
+            session_id=state.session_id,
+        ), force=True)
         log.info("Manual release: %s", src_ip)
         return True
 
@@ -944,17 +954,15 @@ class StateMachine:
             phase         = state.phase_label(),
         )
         from backend.pipeline.decision_engine import _push_sse_event
-        _push_sse_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      f"{state.confidence * 100:.1f}%",
-            "priority":        state.priority,
-            "action_taken":    "Blackhole",
-            "event_type":      "manual",
-            "session_id":      state.session_id if hasattr(state, 'session_id') else None,
-        }, force=True)
+        _push_sse_event(_build_sse_event(
+            src_ip=src_ip,
+            attack_vector=state.attack_vector,
+            confidence=state.confidence,
+            priority=state.priority,
+            action_taken="Blackhole",
+            event_type="manual",
+            session_id=state.session_id if hasattr(state, 'session_id') else None,
+        ), force=True)
         log.info("Manual blackhole (permanent): %s", src_ip)
         return True
 
@@ -994,20 +1002,17 @@ class StateMachine:
                 state.ttl_expires_at = time.monotonic() + ttl_s
                 state.sinkhole_flags = _flag_count
             self._persist(state)
-        writer.log_mitigation_event({
-            "timestamp":       datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "src_ip":          src_ip,
-            "predicted_class": "DDoS",
-            "attack_vector":   state.attack_vector,
-            "confidence":      state.confidence,
-            "priority":        state.priority,
-            "action_taken":    action_label,
-            "if_score":        state.if_score,
-            "phase":           "Phase 2",
-            "is_manual":       False,
-            "event_type":      "transition",
-            "reason":          reason,
-        })
+        writer.log_mitigation_event(_build_mitigation_event(
+            src_ip=src_ip,
+            attack_vector=state.attack_vector,
+            confidence=state.confidence,
+            priority=state.priority,
+            action_taken=action_label,
+            if_score=state.if_score,
+            phase="Phase 2",
+            event_type="transition",
+            reason=reason,
+        ))
         self._push_command(src_ip, "rate_limit", ttl=int(ttl_s))
         log.warning("Holding %s (unscored, reason=%s, ttl=%.0fs)", src_ip, reason, ttl_s)
         return True
@@ -1017,7 +1022,7 @@ class StateMachine:
         with self._lock:
             return dict(self._hold_stats)
 
-    # ── API helpers ───────────────────────────────────────────────────
+    # -- API helpers ---------------------------------------------------
 
     def get_active_list(self) -> list[dict]:
         with self._lock:
@@ -1029,7 +1034,7 @@ class StateMachine:
         with self._lock:
             return src_ip in self._states
 
-    # ── Locked state accessors ───────────────────────────────────────
+    # -- Locked state accessors ---------------------------------------
     # All cross-module reads of _states go through these, returning shallow copies so reads are atomic and live state is never mutated.
 
     def get_state(self, src_ip: str) -> Optional[IpState]:
@@ -1052,7 +1057,7 @@ class StateMachine:
         with self._lock:
             return {ip: replace(s) for ip, s in self._states.items()}
 
-    # ── Internal ─────────────────────────────────────────────────────
+    # -- Internal -----------------------------------------------------
 
     def _persist(self, state: IpState, block_expires_at: Optional[str] = None) -> None:
         writer.save_quarantine_state(

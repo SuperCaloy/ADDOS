@@ -1,5 +1,5 @@
 """
-frontend/config.py — Frontend configuration
+frontend/config.py -- Frontend configuration
 """
 
 # Backend API base URL (your existing Flask/FastAPI backend)

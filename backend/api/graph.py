@@ -13,8 +13,8 @@ _RANGE_SECONDS = {
 }
 
 
+# Returns the backend process start time as a SQL-comparable string.
 def _session_start_ts() -> str:
-    """Returns the backend process start time as a SQL-comparable string."""
     # Stored at import time when the module is first loaded
     return _BACKEND_START
 

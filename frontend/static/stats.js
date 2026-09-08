@@ -2,7 +2,7 @@ let prev = { t: 0, m: 0, n: 0 };
 let _resetPrev = false;  // flag: reset prev on next poll to avoid backgrounding spike
 let _lastFetchTs = 0;    // timestamp of last successful fetchStats call (ms)
 
-/* Shared IF threshold — set once by fetchModelInfo, read by mitigation.js */
+/* Shared IF threshold -- set once by fetchModelInfo, read by mitigation.js */
 let ifThr = 0;
 
 /* Format cumulative change as +X.X% string */
@@ -11,7 +11,7 @@ function _pctDelta(curr, prevVal) {
   return (d >= 0 ? '+' : '') + d.toFixed(1) + '%';
 }
 
-/* Poll /api/stats — update cards and push one chart point */
+/* Poll /api/stats -- update cards and push one chart point */
 async function fetchStats() {
   try {
     const s = await apiFetch('/api/stats');
@@ -31,7 +31,7 @@ async function fetchStats() {
     set('c-thr',     (s.active_threats || 0).toString());
     set('p-rt',      `${(s.mitigation_ms || 0).toFixed(1)} ms`);
 
-    /* FP rate card — color-coded by severity */
+    /* FP rate card -- color-coded by severity */
     const fpRate = typeof s.fp_rate === 'number' ? s.fp_rate : 0;
     const fpEl   = document.getElementById('p-fp');
     if (fpEl) {
@@ -41,15 +41,16 @@ async function fetchStats() {
                        : 'var(--red)';
     }
 
-    /* Feed live chart — compute per-interval deltas from cumulative values */
-    if (range === 'Live') {
+    /* Feed live chart: compute per-interval deltas from cumulative values */
+    const curRange = window.Store ? window.Store.getChartRange() : range;
+    if (curRange === 'Live') {
       const lm     = s.live_malicious || 0;
       const ln     = s.live_normal    || 0;
       const nowMs  = Date.now();
 
       /* After tab was backgrounded, skip one delta to avoid a spike.
        * Also skip if elapsed time since last fetch is > 5s (browser throttled
-       * the interval while tab was hidden — the delta would be inflated). */
+       * the interval while tab was hidden -- the delta would be inflated). */
       const elapsed = _lastFetchTs > 0 ? (nowMs - _lastFetchTs) : 0;
       if (_resetPrev || elapsed > 5000) {
         _resetPrev = false;
@@ -72,7 +73,7 @@ async function fetchStats() {
   } catch (_) {}
 }
 
-/* fetchModelInfo — delegates to pollModelInfo. */
+/* fetchModelInfo -- delegates to pollModelInfo. */
 async function fetchModelInfo() { await pollModelInfo(); }
 /* Poll system metrics (CPU/Memory) every 1s */
 async function fetchSystemMetrics() {
@@ -104,6 +105,9 @@ async function pollModelInfo() {
     const info = await apiFetch('/api/model_info');
     if (info.if_accuracy != null) set('p-if', `Anomaly detection accuracy: ${info.if_accuracy.toFixed(2)}%`);
     if (info.rf_accuracy != null) set('p-rf', `Classification Accuracy: ${info.rf_accuracy.toFixed(2)}%`);
-    if (info.if_threshold) ifThr = info.if_threshold;
+    if (info.if_threshold) {
+      ifThr = info.if_threshold;
+      if (window.Store) window.Store.setIfThreshold(info.if_threshold);
+    }
   } catch (_) {}
 }

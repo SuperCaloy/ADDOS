@@ -15,7 +15,7 @@ from backend.config import ML_ENABLED
 
 bp = Blueprint("report", __name__)
 
-# ── Colors ────────────────────────────────────────────────────────────────────
+# -- Colors --------------------------------------------------------------------
 C_DARK    = colors.HexColor("#1a1a2e")
 C_ACCENT  = colors.HexColor("#16213e")
 C_BLUE    = colors.HexColor("#0f3460")
@@ -84,7 +84,7 @@ def generate_report():
     if not rows and ML_ENABLED:
         return jsonify({"error": "No data found for the selected date range."}), 404
 
-    # --- ML OFF — generate report with only system/controller metrics ---
+    # --- ML OFF -- generate report with only system/controller metrics ---
     if not ML_ENABLED:
         rows = []
 
@@ -96,7 +96,7 @@ def generate_report():
                      as_attachment=True, download_name=filename)
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# -- Helpers -------------------------------------------------------------------
 
 def _section_header(text: str, styles) -> list:
     style = ParagraphStyle("sec", parent=styles["Normal"],
@@ -141,7 +141,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     bold_sm   = ParagraphStyle("bsm", parent=styles["Normal"],
                                fontSize=8.5, fontName="Helvetica-Bold")
 
-    # ── Cover ─────────────────────────────────────────────────────────────────
+    # -- Cover -----------------------------------------------------------------
     story.append(Spacer(1, 1*cm))
     story.append(Paragraph("A-DDoS Mitigation System",
         ParagraphStyle("cover_sub", parent=styles["Normal"],
@@ -173,7 +173,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(HRFlowable(width="100%", thickness=0.5, color=C_BORDER))
     story.append(Spacer(1, 0.4*cm))
 
-    # ── Deduplicate ───────────────────────────────────────────────────────────
+    # -- Deduplicate -----------------------------------------------------------
     seen: set = set()
     deduped = []
     for r in rows:
@@ -215,7 +215,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     if_m    = writer.get_if_metrics(start_str, end_str)
     fp_rate = if_m.get("fpr", 0)
 
-    # ── Section 1: Executive Summary ─────────────────────────────────────────
+    # -- Section 1: Executive Summary -----------------------------------------
     story += _section_header("1.  Executive Summary", styles)
 
     high_count = sum(1 for r in deduped if (r.get("priority") or "").lower() == "high")
@@ -261,8 +261,8 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ["Released",    str(actions.get("Released",    0))],
     ]
 
+    # Create a styled table with optional blue sub-header rows.
     def _kv_table(data, col_widths, section_rows=None):
-        """Create a styled table with optional blue sub-header rows."""
         t = Table(data, colWidths=col_widths)
         style_cmds = [
             ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
@@ -303,11 +303,11 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(side_by_side)
     story.append(Spacer(1, 0.6*cm))
 
-    # ── Page break before Performance Benchmark ────────────────────────────────
+    # -- Page break before Performance Benchmark --------------------------------
     from reportlab.platypus import PageBreak
     story.append(PageBreak())
 
-    # ── Section 2: Performance Benchmark ─────────────────────────────────────
+    # -- Section 2: Performance Benchmark -------------------------------------
     story += _section_header("2.  Performance Benchmark", styles)
 
     rf_m  = writer.get_rf_metrics(start_str, end_str)
@@ -347,7 +347,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         tbl.setStyle(TableStyle(style))
         return tbl
 
-    # ── 2a: Isolation Forest ──────────────────────────────────────────────────
+    # -- 2a: Isolation Forest --------------------------------------------------
     story.append(Paragraph("2a.  Isolation Forest-Anomaly Detection",
         ParagraphStyle("sub", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
@@ -400,7 +400,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(if_cm_wrap)
     story.append(Spacer(1, 0.4*cm))
 
-    # ── 2b: Random Forest ─────────────────────────────────────────────────────
+    # -- 2b: Random Forest -----------------------------------------------------
     story.append(Paragraph("2b.  Random Forest-Attack Classification",
         ParagraphStyle("sub2", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
@@ -482,7 +482,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(rf_cm_wrap)
     story.append(Spacer(1, 0.4*cm))
 
-    # ── 2c: Response Latency ──────────────────────────────────────────────────
+    # -- 2c: Response Latency --------------------------------------------------
     story.append(Paragraph("2c.  Response Latency",
         ParagraphStyle("sub3a", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
@@ -509,7 +509,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(_bench_table(lat_data))
     story.append(Spacer(1, 0.4*cm))
 
-    # ── 2d: Controller Resource Overhead ───────────────────────────────────────
+    # -- 2d: Controller Resource Overhead ---------------------------------------
     story.append(Paragraph("2d.  Controller Resource Overhead",
         ParagraphStyle("sub3", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
@@ -527,7 +527,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(_bench_table(res_data))
     story.append(Spacer(1, 0.6*cm))
 
-    # ── Section 3: Offences Summary ───────────────────────────────────────────
+    # -- Section 3: Offences Summary -------------------------------------------
     story += _section_header("3.  Offences Summary", styles)
 
     off_rows = query("""
@@ -579,7 +579,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     story.append(Spacer(1, 0.6*cm))
 
-    # ── Section 4: Chronological Mitigation Log ───────────────────────────────
+    # -- Section 4: Chronological Mitigation Log -------------------------------
     story.append(PageBreak())
     story += _section_header("4.  Chronological Mitigation Log", styles)
 
@@ -612,7 +612,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(log_tbl)
     story.append(Spacer(1, 0.6*cm))
 
-    # ── Section 5: IP Attack History ─────────────────────────────────────────
+    # -- Section 5: IP Attack History -----------------------------------------
     history_rows = query("""
         SELECT src_ip, attack_vector, if_score, confidence, priority,
                phase_reached, first_seen, unblocked_at, duration_sec,
@@ -625,7 +625,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     if history_rows:
         story += _section_header("5.  IP Attack History (Completed Sessions)", styles)
         # Reason column holds free-form backend text (e.g. "Manual Block
-        # Escalation" measures ~3.1cm — wider than any fixed column width
+        # Escalation" measures ~3.1cm -- wider than any fixed column width
         # could safely guarantee). Wrapping it in a Paragraph lets it break
         # onto a second line within its own cell instead of overflowing.
         reason_style = ParagraphStyle("reason", fontName="Helvetica", fontSize=7,
@@ -668,7 +668,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ]))
         story.append(hist_tbl)
 
-    # ── Verification and Approval ─────────────────────────────────────────
+    # -- Verification and Approval -----------------------------------------
     story.append(Paragraph("Verification and Approval",
         ParagraphStyle("sub6", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",

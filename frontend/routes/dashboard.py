@@ -1,5 +1,5 @@
 """
-frontend/routes/dashboard.py — Dashboard page route
+frontend/routes/dashboard.py -- Dashboard page route
 """
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse

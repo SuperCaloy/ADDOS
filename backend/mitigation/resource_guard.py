@@ -5,7 +5,7 @@ from backend.config import ML_ENABLED
 from backend.mitigation.ml_scorer import get_top_attacker_ips
 from backend.mitigation.mitigation_actions import (
     install_per_ip_meters, remove_per_ip_meters,
-    install_proto_block, remove_proto_block,
+    install_proto_block,
 )
 
 log = logging.getLogger(__name__)
@@ -46,10 +46,6 @@ class ResourceGuard:
     @property
     def throttle_delay(self) -> float:
         return self._throttle_delay
-
-    @property
-    def is_paused(self) -> bool:
-        return False
 
     @property
     def tier(self) -> str:
@@ -205,11 +201,6 @@ class ResourceGuard:
             log.warning("ResourceGuard: sample error -- %s", exc)
             return 0.0, 0.0
 
-    def set_state_machine(self, sm) -> None:
-        pass
-
-    def set_deception(self, dec) -> None:
-        pass
 
 
 resource_guard = ResourceGuard()
