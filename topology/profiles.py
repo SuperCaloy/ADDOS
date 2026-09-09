@@ -3,15 +3,10 @@ import random
 SERVER_IP = "10.0.0.26"
 SINKHOLE_IP = "10.0.0.27"
 
-ATTACK_PKT_COUNTS = {
-    "SYN": 20000,
-    "UDP": 8000,
-    "ICMP": 12000,
-}
-
 
 def attack_pkt_count(atype: str) -> int:
-    return ATTACK_PKT_COUNTS.get(atype, 10000)
+    # Dynamic per-call draw so each host gets a different burst length.
+    return random.randint(30000, 50000)
 
 
 _attack_pkt_count = attack_pkt_count
@@ -58,11 +53,10 @@ _ATTACK_TYPE_PORTS = {
     "ICMP": [0],
 }
 
-_SYN_FLOOD_INSTANCES = 2
-
-
 def flood_spawn_count(atype: str) -> int:
-    return _SYN_FLOOD_INSTANCES if atype == "SYN" else 1
+    # One flood process per host for every type. VM runs cannot afford more.
+    # atype is kept so existing callers do not change.
+    return 1
 
 
 _flood_spawn_count = flood_spawn_count

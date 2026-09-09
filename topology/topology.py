@@ -30,7 +30,6 @@ try:
     from topology.profiles import (
         SERVER_IP,
         SINKHOLE_IP,
-        ATTACK_PKT_COUNTS,
         attack_pkt_count as _attack_pkt_count,
         _LEGIT_NUMS,
         _ATTACKER_NUMS,
@@ -41,7 +40,6 @@ try:
         _ATTACKER_START_DELAYS,
         _ATTACK_TYPE_FLAGS,
         _ATTACK_TYPE_PORTS,
-        _SYN_FLOOD_INSTANCES,
         flood_spawn_count as _flood_spawn_count,
         _ICMP_CONTINUOUS,
         _TCP_PROFILES,
@@ -56,7 +54,6 @@ except (ImportError, ModuleNotFoundError):
     from profiles import (
         SERVER_IP,
         SINKHOLE_IP,
-        ATTACK_PKT_COUNTS,
         attack_pkt_count as _attack_pkt_count,
         _LEGIT_NUMS,
         _ATTACKER_NUMS,
@@ -67,7 +64,6 @@ except (ImportError, ModuleNotFoundError):
         _ATTACKER_START_DELAYS,
         _ATTACK_TYPE_FLAGS,
         _ATTACK_TYPE_PORTS,
-        _SYN_FLOOD_INSTANCES,
         flood_spawn_count as _flood_spawn_count,
         _ICMP_CONTINUOUS,
         _TCP_PROFILES,
@@ -980,22 +976,18 @@ def start_udp_flood_campaign() -> None:
 
 
 def start_mixed_campaign(stagger_s: float = 2.0) -> None:
-# Launch all attackers with sequential types, no two same at a time. Each attacker gets a sequential type (SYN/UDP/ICMP) with balanced distribution. Staggered start prevents simultaneous launches.
+# Launch all attackers with sequential types, no two same at a time. Each attacker gets a sequential type (SYN/UDP/ICMP) with balanced distribution. All hosts fire at once for a consistent flood.
     global _mixed_stop_event, _campaign_threads
     _stop_active_workers()
     _mixed_stop_event.clear()
     _campaign_threads.clear()
 
-    # Sequential assignment: 4 SYN, 3 UDP, 3 ICMP in order
-    nums = sorted(_ATTACKER_NUMS)
+    # Sequential assignment derived from _ATTACKER_VARIANTS (same 4/3/3
+    # sets as the old index thresholds, but cannot drift from them).
     assignments = {}
-    for i, num in enumerate(nums):
-        if i < 4:
-            assignments[num] = "SYN"
-        elif i < 7:
-            assignments[num] = "UDP"
-        else:
-            assignments[num] = "ICMP"
+    for atype in ("SYN", "UDP", "ICMP"):
+        for num in _attackers_of_type(atype):
+            assignments[num] = atype
 
     info("\n" + "=" * 65 + "\n")
     info("  [MIXED CAMPAIGN]  All 10 attackers\n")
@@ -1003,15 +995,9 @@ def start_mixed_campaign(stagger_s: float = 2.0) -> None:
     info(f"  {'HOST':<8} {'IP':<16} {'TYPE':<6} {'FLAGS'}\n")
     info("  " + "-" * 60 + "\n")
 
-    # Build schedule with staggered delays per type group
-    schedule = {}
-    base = 0.0
-    for i, atype in enumerate(("SYN", "UDP", "ICMP")):
-        if i:
-            base += random.uniform(stagger_s * 0.5, stagger_s)
-        for num, assigned_type in assignments.items():
-            if assigned_type == atype:
-                schedule[num] = base + _ATTACKER_START_DELAYS.get(num, 0)
+    # No start delays: every host fires at once for a consistent flood.
+    # stagger_s is kept so existing callers do not change.
+    schedule = {num: 0.0 for num in assignments}
 
     # Launch threads
     for num in sorted(schedule):
@@ -1032,25 +1018,13 @@ def start_mixed_campaign(stagger_s: float = 2.0) -> None:
         )
         _campaign_threads.append(thread)
         thread.start()
+        # 100ms stagger -- prevents simultaneous OVS hit and switch disconnects
+        time.sleep(0.1)
 
     _start_attack_watchdog(list(_ATTACKER_NUMS), _mixed_stop_event)
     info("=" * 65 + "\n")
     info("  Stop: py stop_all_attacks()\n")
     info("=" * 65 + "\n\n")
-
-
-# Randomly assign attack types to attackers, at most ceil(N/3) per type.
-def _randomize_mixed_attacks() -> dict[int, str]:
-    nums = sorted(_ATTACKER_NUMS)
-    n = len(nums)
-    per_type = (n + 2) // 3  # ceil division: 10 attackers -> 4/3/3
-
-    # Create pool: 4 SYN, 3 UDP, 3 ICMP
-    pool = ["SYN"] * 4 + ["UDP"] * 3 + ["ICMP"] * 3
-    pool = pool[:n]  # trim to exact count
-    random.shuffle(pool)
-
-    return dict(zip(nums, pool))
 
 
 # Build hping3 command for a given attack type (randomized campaigns).
@@ -1078,20 +1052,29 @@ def _attacker_cycle_worker_randomized(num: int, stop_event: threading.Event,
         time.sleep(0.1)
         waited += 0.1
 
-    count = _attack_pkt_count(atype)
-    cmd = _hping_cmd_randomized(num, SERVER_IP, atype, count)
+    # Continuous flood with no -c count: hping3 runs until the campaign stops,
+    # so there are no burst exit gaps. Pkt counts only matter for one-shot launchers.
+    cmd = _hping_cmd_randomized(num, SERVER_IP, atype)
 
     _notify_attack_start(ip, atype)
     _active_attackers.add(ip)
 
-    # Restart loop
+    # Restart loop -- guarded so a transient spawn/monitor failure retries
+    # instead of silently killing this worker for the rest of the campaign.
+    # (_notify_attack_start above already swallows its own errors, so only
+    # this loop needs the guard. The stop event is re-checked every pass,
+    # so a lingering worker still exits promptly on stop.)
     while not stop_event.is_set():
-        for _ in range(_flood_spawn_count(atype)):
-            _nsrun(h, cmd)
-        while not stop_event.is_set():
-            time.sleep(1)
-            if _hping_state(h) is False:
-                break
+        try:
+            for _ in range(_flood_spawn_count(atype)):
+                _nsrun(h, cmd)
+            while not stop_event.is_set():
+                time.sleep(1)
+                if _hping_state(h) is False:
+                    break
+        except Exception as e:
+            info(f"    h{num}: worker error ({e}), retrying\n")
+            time.sleep(2.0)
 
     _nsrun(h, "pkill -9 -x hping3 2>/dev/null; true", wait=True)
     _notify_attack_stop(ip)
@@ -1757,9 +1740,9 @@ def _print_banner(edge_switches: list) -> None:
     info("  COMMANDS\n")
     info("  " + "-" * 65 + "\n")
     info("  -- BURST (finite) --------------------------------------------\n")
-    info(f"  py launch_syn_flood()                  # {ATTACK_PKT_COUNTS['SYN']:,} pkts, h16\n")
-    info(f"  py launch_icmp_flood()                 # {ATTACK_PKT_COUNTS['ICMP']:,} pkts, h23\n")
-    info(f"  py launch_udp_flood()                  # {ATTACK_PKT_COUNTS['UDP']:,} pkts, h20\n\n")
+    info("  py launch_syn_flood()                  # 10k-50k pkts random per call, h16\n")
+    info("  py launch_icmp_flood()                 # 10k-50k pkts random per call, h23\n")
+    info("  py launch_udp_flood()                  # 10k-50k pkts random per call, h20\n\n")
     info("  -- SUSTAINED (unlimited) -------------------------------------\n")
     info("  py launch_syn_flood_sustained()        # h16\n")
     info("  py launch_icmp_flood_sustained()       # h23\n")

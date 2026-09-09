@@ -56,9 +56,11 @@ async function fetchQuarantine() {
                   : sc >= currentThr       ? 'sc-amb'
                   : 'sc-grn';
 
-      const ttlRemaining = e.ttl_remaining_sec != null
-        ? ` <span style="color:var(--amber,#ffb300);font-size:11px;font-family:var(--mono)">[${Math.floor(e.ttl_remaining_sec/60)}m ${e.ttl_remaining_sec%60}s]</span>`
-        : '';
+      // Every phase always shows a bracketed time: the TTL countdown when the
+      // backend provides one, otherwise the elapsed time in phase (permanent
+      // blackholes have no TTL, but time_in_phase_sec is always present).
+      const ttlSec = e.ttl_remaining_sec != null ? e.ttl_remaining_sec : ts;
+      const ttlRemaining = ` <span style="color:var(--amber,#ffb300);font-size:11px;font-family:var(--mono)">[${Math.floor(ttlSec/60)}m ${ttlSec%60}s]</span>`;
 
       const priBadge = renderPriority(e.priority);
       const phaseDisplay = e.phase_label || e.phase || '--';

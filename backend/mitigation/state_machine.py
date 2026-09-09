@@ -208,6 +208,7 @@ class StateMachine:
                         purged += 1
                         continue
 
+                    action_taken = r.get("action_taken", "Quarantined")
                     if expires_at is not None:
                         try:
                             exp_dt      = datetime.datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
@@ -228,8 +229,11 @@ class StateMachine:
                     else:
                         ttl_expires_at = None
                         ttl_for_cmd    = None
-
-                    action_taken = r.get("action_taken", "Quarantined")
+                        if r["phase"] == 3 and action_taken == "Blackhole":
+                            # Legacy TTL-less manual block from before the max-TTL
+                            # policy: grant a fresh mode TTL instead of living forever.
+                            ttl_expires_at = time.monotonic() + get_blackhole_ttl()
+                            ttl_for_cmd    = get_blackhole_ttl()
                     state = IpState(
                         src_ip         = src_ip,
                         phase          = r["phase"],
@@ -332,7 +336,7 @@ class StateMachine:
         with self._lock:
             state = self._states.get(src_ip)
 
-            # Permanent manual blackhole; never re-evaluate.
+            # Legacy TTL-less permanent states are never re-evaluated.
             if state and state.permanent and state.ttl_expires_at is None:
                 return state.action_taken
 
@@ -469,7 +473,7 @@ class StateMachine:
         now = time.monotonic()
         with self._lock:
             for src_ip, state in list(self._states.items()):
-                # Permanent manual blackhole; never auto-expires.
+                # TTL-less permanent states never auto-expire.
                 if state.permanent and state.ttl_expires_at is None:
                     continue
 
@@ -680,7 +684,7 @@ class StateMachine:
         if state.phase == 3:
             return
 
-        # Escalate to Phase 3 Blackhole (max severity, 1hr TTL). Clears SSE dedup so the event reaches the audit log.
+        # Escalate to Phase 3 Blackhole (max severity, mode TTL). Clears SSE dedup so the event reaches the audit log.
         try:
             from backend.pipeline.decision_engine import _sse_dedup, _sse_lock
             with _sse_lock:
@@ -924,7 +928,9 @@ class StateMachine:
             self._sinkhole_history.clear()
 
     def manual_block(self, src_ip: str) -> bool:
-        # Permanent manual blackhole with no TTL.
+        # Manual blackhole capped at the mode blackhole TTL (1hr sim, 1 day prod).
+        # Stays permanent (survives restart and clear-all) but auto-releases via tick().
+        bh_ttl = get_blackhole_ttl()
         with self._lock:
             state = self._states.get(src_ip)
             if state is None:
@@ -933,7 +939,7 @@ class StateMachine:
                     phase          = 3,
                     action_taken   = "Blackhole",
                     permanent      = True,
-                    ttl_expires_at = None,
+                    ttl_expires_at = time.monotonic() + bh_ttl,
                 )
                 self._states[src_ip] = state
             else:
@@ -941,9 +947,12 @@ class StateMachine:
                 state.phase_entered  = time.monotonic()
                 state.action_taken   = "Blackhole"
                 state.permanent      = True
-                state.ttl_expires_at = None
-            self._persist(state, block_expires_at=None)
-        self._push_command(src_ip, "block", ttl=None)
+                state.ttl_expires_at = time.monotonic() + bh_ttl
+            exp_str = (datetime.datetime.now()
+                       + datetime.timedelta(seconds=bh_ttl)).strftime("%Y-%m-%d %H:%M:%S")
+            self._persist(state, block_expires_at=exp_str)
+        _bh_action, _bh_ttl = resolve_blackhole_action(bh_ttl)
+        self._push_command(src_ip, _bh_action, ttl=_bh_ttl)
         writer.log_manual_action(
             src_ip,
             "manual_block",
@@ -963,7 +972,7 @@ class StateMachine:
             event_type="manual",
             session_id=state.session_id if hasattr(state, 'session_id') else None,
         ), force=True)
-        log.info("Manual blackhole (permanent): %s", src_ip)
+        log.info("Manual blackhole: %s  TTL=%ds", src_ip, get_blackhole_ttl())
         return True
 
     _UNSCORED_TAG = "Holding (unscored"

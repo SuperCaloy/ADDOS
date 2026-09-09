@@ -13,8 +13,8 @@ else:
 
 MAX_BAN_LEVEL      = len(BAN_LEVELS) - 1
 
-# Phase 3 blackhole TTL
-BLACKHOLE_TTL_SECONDS = 3600  # 1 hour
+# Phase 3 blackhole TTL: hard ceiling per mode, 1 hour in simulation, 1 day in production.
+BLACKHOLE_TTL_SECONDS = 3600 if SIMULATION_MODE else 86400
 
 # Phase 1 rate limit: OpenFlow Meter threshold (pps). Excess packets are dropped; traffic below the limit still reaches the server.
 RATE_LIMIT_PPS = 1000 if SIMULATION_MODE else 5000

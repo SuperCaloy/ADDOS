@@ -354,6 +354,16 @@ function _actionColor(a) {
 }
 
 /**
+ * Splits a backend action string like "Time Ban (19m 43s)" into its action
+ * name and trailing countdown, so the time always renders in full.
+ */
+function _splitActionTime(action) {
+  const m = /^(.*?)\s*(\([^)]*\))\s*$/.exec(action || '');
+  if (m && m[1]) return { action: m[1], time: m[2] };
+  return { action: action || '--', time: '' };
+}
+
+/**
  * Renders the multi-stage traffic processing pipeline from SDN ingress to mitigation enforcement.
  * Highlights current phase progression and displays timestamps for executed actions.
  */
@@ -398,6 +408,14 @@ function _renderPipeline(d, ml, st, isAnomaly) {
     };
   }
 
+  // Peel the countdown off the action name so the time gets its own
+  // line and is never truncated, e.g. "Time Ban" + "(19m 43s)".
+  if (step4) {
+    const split = _splitActionTime(step4.label);
+    step4.label = split.action;
+    step4.time = split.time;
+  }
+
   const allSteps = step4 ? [...baseSteps, step4] : baseSteps;
 
   pipelineEl.innerHTML = `
@@ -424,11 +442,13 @@ function _renderPipeline(d, ml, st, isAnomaly) {
               </div>
               <div style="font-size:11px;color:var(--sub,#9499b7);
                    font-family:var(--mono,'Space Mono',monospace);
-                   margin-bottom:2px;text-align:center;white-space:nowrap">${s.sub}</div>
+                   margin-bottom:2px;text-align:center;overflow-wrap:anywhere">${s.sub}</div>
               <div style="font-size:12px;font-weight:700;color:${s.color};
                    font-family:var(--mono,'Space Mono',monospace);
-                   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-                   max-width:80px;text-align:center">${s.label}</div>
+                   text-align:center;overflow-wrap:anywhere">${s.label}</div>
+              ${s.time ? `<div style="font-size:11px;font-weight:700;color:${s.color};
+                   font-family:var(--mono,'Space Mono',monospace);margin-top:2px;
+                   text-align:center;white-space:nowrap">${s.time}</div>` : ''}
               ${s.ts ? `<div style="font-size:11px;color:var(--sub,#9499b7);
                    font-family:var(--mono,'Space Mono',monospace);margin-top:2px">${s.ts}</div>` : ''}
             </div>

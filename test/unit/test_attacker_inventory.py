@@ -96,18 +96,45 @@ def test_no_hardcoded_campaign_rosters_in_source():
         assert lit not in src
 
 
-def test_mixed_campaign_launches_randomized():
-    # Randomized realism (2026-08-29): the mixed campaign must randomly assign
-    # attack types (SYN/UDP/ICMP) to attackers with no two same at a time.
-    import re
+def test_mixed_campaign_assignment_derived_from_variants():
+    # Sequential mixed campaign (supersedes 2026-08-29 randomization): the
+    # per-host types must be derived from _ATTACKER_VARIANTS via
+    # _attackers_of_type(), never index thresholds or a random shuffle.
+    # The stale randomized test was rewritten for this on 2026-09-09 because
+    # committed code assigns sequentially and _randomize_mixed_attacks() has
+    # zero callers.
+    src = open("topology/topology.py").read()
+    assert "def _randomize_mixed_attacks" not in src
+    i = src.find("def start_mixed_campaign")
+    body = src[i:src.find("\ndef ", i)]
+    assert "_attackers_of_type" in body
+    # Simultaneous start: no wave schedule, every worker gets delay 0.0.
+    assert "random.uniform" not in body
+    assert "_ATTACKER_START_DELAYS" not in body
+    # uses randomized worker
+    assert "_attacker_cycle_worker_randomized" in body
+    # derived rosters cover every attacker exactly once
+    rosters = [set(topo._attackers_of_type(t)) for t in ("SYN", "UDP", "ICMP")]
+    assert sum(map(len, rosters)) == len(set().union(*rosters))
+    assert set().union(*rosters) == set(topo._ATTACKER_NUMS)
+
+
+def test_mixed_campaign_staggers_thread_starts():
+    # Every other launcher staggers starts to avoid a simultaneous OVS hit;
+    # the mixed campaign must do the same (0.1s, single-vector pattern).
     src = open("topology/topology.py").read()
     i = src.find("def start_mixed_campaign")
     body = src[i:src.find("\ndef ", i)]
-    # randomized type assignment
-    assert "_randomize_mixed_attacks()" in body
-    assert "_ATTACKER_START_DELAYS" in body
-    # uses randomized worker
-    assert "_attacker_cycle_worker_randomized" in body
+    assert "time.sleep(0.1)" in body
+
+
+def test_randomized_worker_has_exception_guard():
+    # A transient spawn/monitor failure must retry, never silently kill the
+    # worker thread for the rest of the campaign.
+    src = open("topology/topology.py").read()
+    i = src.find("def _attacker_cycle_worker_randomized")
+    body = src[i:src.find("\ndef ", i)]
+    assert "try:" in body and "except Exception" in body
 
 
 def test_attacker_worker_accepts_delay_override():

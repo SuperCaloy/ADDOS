@@ -98,6 +98,16 @@ def generate_report():
 
 # -- Helpers -------------------------------------------------------------------
 
+def _fmt_period(start_str: str, end_str: str) -> str:
+    # Human readable report range like "Sep 2, 2026 - Sep 9, 2026".
+    # Falls back to the raw strings if parsing fails.
+    try:
+        s = datetime.date.fromisoformat(start_str)
+        e = datetime.date.fromisoformat(end_str)
+        return f"{s.strftime('%b')} {s.day}, {s.year} - {e.strftime('%b')} {e.day}, {e.year}"
+    except ValueError:
+        return f"{start_str} - {end_str}"
+
 def _section_header(text: str, styles) -> list:
     style = ParagraphStyle("sec", parent=styles["Normal"],
                            fontSize=12, fontName="Helvetica-Bold",
@@ -155,7 +165,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     gen_ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     meta_data = [
-        ["Report Period", f"{start_str} - {end_str}"],
+        ["Report Period", _fmt_period(start_str, end_str)],
         ["Generated At",  gen_ts],
         ["Classification", "ML: Isolation Forest + Random Forest"],
     ]
@@ -223,7 +233,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     sum_left = [
         ["Metric", "Value"],
-        ["Report Period",           f"{start_str} - {end_str}"],
         ["Total Threats Mitigated", str(total_threats)],
         ["High Priority",           str(high_count)],
         ["Low Priority",            str(low_count)],
@@ -288,7 +297,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     # Inner-table widths sum to match their outer container cells (8.7cm/8.0cm),
     # and the value column (4.2cm) fits the longest real value.
-    side_by_side = Table([[_kv_table(sum_left,  [4.5*cm, 4.2*cm], section_rows=[8]),
+    side_by_side = Table([[_kv_table(sum_left,  [4.5*cm, 4.2*cm], section_rows=[7]),
                             Spacer(0.3*cm, 1),
                             _kv_table(sum_right, [5.0*cm, 3.0*cm], section_rows=[0, 6, 12])]],
                          colWidths=[8.7*cm, 0.3*cm, 8*cm])

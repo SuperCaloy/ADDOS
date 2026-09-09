@@ -34,6 +34,7 @@ async function fetchStats() {
     set('c-norm-s',  `+${((cn / tot) * 100).toFixed(1)}%`);
     set('c-thr',     (s.active_threats || 0).toString());
     set('p-rt',      `${(s.mitigation_ms || 0).toFixed(1)} ms`);
+    _fitMetricCards();
 
     const fpRate = typeof s.fp_rate === 'number' ? s.fp_rate : 0;
     const fpEl   = document.getElementById('p-fp');
@@ -73,6 +74,35 @@ async function fetchStats() {
 
 // Queries machine learning model telemetry and synchronizes the shared anomaly threshold across components.
 async function fetchModelInfo() { await pollModelInfo(); }
+
+// Shrinks one card value until it fits its card on a single line.
+// Keeps full numeric precision instead of wrapping or clipping.
+function _fitCardValue(el) {
+  if (!el) return;
+  el.style.fontSize = '';
+  let size = parseFloat(getComputedStyle(el).fontSize) || 34;
+  let guard = 0;
+  while (el.scrollWidth > el.clientWidth && size > 14 && guard++ < 40) {
+    size -= 1;
+    el.style.fontSize = size + 'px';
+  }
+}
+
+// Fits the four headline metric values to their cards.
+function _fitMetricCards() {
+  ['c-total', 'c-mal', 'c-norm', 'c-thr'].forEach(id => _fitCardValue(document.getElementById(id)));
+}
+
+// Refits when the grid width changes (viewport resize, side panel open/close).
+(function _initCardFit() {
+  const grid = document.querySelector('.cards-grid');
+  if (!grid) return;
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => _fitMetricCards()).observe(grid);
+  } else {
+    window.addEventListener('resize', _fitMetricCards);
+  }
+})();
 
 // Polls controller CPU and memory utilization from the backend and updates hardware capacity bars.
 async function fetchSystemMetrics() {
