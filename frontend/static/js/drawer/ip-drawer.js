@@ -1,51 +1,25 @@
 /**
- * Threat Analysis IP drawer controller and telemetry visualization engine.
- * Manages modal visibility, real-time polling, and ML diagnostic rendering for inspected IP addresses.
+ * Threat Analysis IP side panel controller and telemetry visualization engine.
+ * Manages side panel visibility, real-time polling, and ML diagnostic rendering for inspected IP addresses.
  */
 
-// Drawer state tracking active IP, live polling timer, and return focus element.
+// Drawer state tracking active IP and live polling timer.
 let _drawerCurrentIp = null;
 let _drawerLiveTimer = null;
 let _drawerIsLive = false;
-let _drawerReturnFocus = null;
+// Last full render args, reused to refresh the expert section without refetching.
+let _drawerLastRender = null;
+
+// Binds the left-edge drag handle. The panel is non-modal, so Tab focus is
+// intentionally free to leave the panel for the dashboard beside it.
+if (window.SidePanel) SidePanel.initResize('ip-drawer', 'idd-resize-handle', 'ip-drawer-width');
 
 /**
- * Traps keyboard Tab focus inside the drawer element to preserve modal accessibility.
- * Cycles focus between the first and last focusable elements when the drawer is open.
- */
-function _initDrawerFocusTrap() {
-  const drawer = document.getElementById('ip-drawer');
-  if (!drawer) return;
-  drawer.addEventListener('keydown', function _trapFocus(e) {
-    if (e.key !== 'Tab') return;
-    const focusable = [...drawer.querySelectorAll(
-      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
-    )].filter(el => !el.closest('[aria-hidden="true"]'));
-    if (!focusable.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (e.shiftKey) {
-      if (document.activeElement === first) { e.preventDefault(); last.focus(); }
-    } else {
-      if (document.activeElement === last) { e.preventDefault(); first.focus(); }
-    }
-  });
-}
-
-// Initializes the keyboard focus trap when the DOM content has fully loaded.
-if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', _initDrawerFocusTrap);
-} else {
-  _initDrawerFocusTrap();
-}
-
-/**
- * Opens the threat detail drawer for an IP address and displays its telemetry.
- * Captures currently focused element for restoration, updates headers, and starts data fetching.
+ * Opens the threat detail side panel for an IP address and displays its telemetry.
+ * Updates headers and starts data fetching. Shell behavior lives in SidePanel.
  */
 function openIpDrawer(ip) {
   if (!ip || ip === '--') return;
-  _drawerReturnFocus = document.activeElement;
   _drawerCurrentIp = ip;
   const ipEl = document.getElementById('idd-ip');
   const badgeEl = document.getElementById('idd-status-badge');
@@ -53,50 +27,34 @@ function openIpDrawer(ip) {
   if (badgeEl) badgeEl.innerHTML = '';
   _iddShow('loading');
 
-  const overlay = document.getElementById('ip-drawer-overlay');
-  const drawer = document.getElementById('ip-drawer');
-  if (overlay) overlay.style.display = 'block';
-  if (drawer) {
-    drawer.style.pointerEvents = 'all';
-    drawer.style.opacity = '1';
-    drawer.style.transform = 'translate(-50%,-50%) scale(1)';
-    drawer.setAttribute('aria-hidden', 'false');
-  }
-
-  requestAnimationFrame(() => {
-    const closeBtn = document.getElementById('idd-close-btn');
-    if (closeBtn) closeBtn.focus();
-  });
+  if (window.SidePanel) SidePanel.open('ip-drawer', { storageKey: 'ip-drawer-width', focusSel: '#idd-close-btn' });
 
   _fetchIpDetail(ip);
 }
 
 /**
- * Closes the threat detail drawer and restores focus to the previously active element.
- * Halts live polling loops and resets modal styling and accessibility attributes.
+ * Closes the threat detail side panel. Halts live polling loops.
+ * Focus restoration is handled by SidePanel.
  */
 function closeIpDrawer() {
   _stopLivePolling();
-  const returnTo = _drawerReturnFocus;
   _drawerCurrentIp = null;
-  _drawerReturnFocus = null;
-  const overlay = document.getElementById('ip-drawer-overlay');
-  const drawer = document.getElementById('ip-drawer');
-  if (overlay) overlay.style.display = 'none';
-  if (drawer) {
-    drawer.style.opacity = '0';
-    drawer.style.transform = 'translate(-50%,-48%) scale(0.97)';
-    drawer.style.pointerEvents = 'none';
-    drawer.setAttribute('aria-hidden', 'true');
-  }
+  if (window.SidePanel) SidePanel.close('ip-drawer');
   const tip = document.getElementById('idd-tooltip');
   if (tip) tip.style.display = 'none';
-  if (returnTo && typeof returnTo.focus === 'function') returnTo.focus();
 }
 
 // Dismisses the threat detail drawer when the Escape key is pressed.
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && _drawerCurrentIp) closeIpDrawer();
+});
+
+// Refreshes the Algorithm Trace section live when Expert Mode is toggled
+// while the panel is open. Reuses cached data, no refetch, no loading flash.
+if (window.Store) window.Store.subscribe('expertActive', () => {
+  if (!_drawerCurrentIp || !_drawerLastRender) return;
+  const r = _drawerLastRender;
+  _renderExpertTrace(r.d, r.ml, r.st, r.f, r.th);
 });
 
 window.openIpDrawer = openIpDrawer;
@@ -244,6 +202,7 @@ function _renderIpDetail(d) {
   const ml = d.ml || {};
   const st = d.state || {};
   const th = d.thresholds || {};
+  _drawerLastRender = { d, ml, st, f, th };
 
   _setBadge(!!d.is_live);
 
@@ -678,12 +637,12 @@ function _renderExpertTrace(d, ml, st, f, th) {
     pkt_rate_per_duration: (f.pps || 0) / Math.max(f.duration_sec || 1, 1),
   };
 
-  let ifHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Isolation Forest (IF) model evaluated 16 flow features. IF is an unsupervised anomaly detector that scores each flow by how distinctly it separates from normal traffic patterns. Higher scores indicate greater deviation.</div>';
+  let ifHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Isolation Forest (IF) model evaluated flow features. IF is an unsupervised anomaly detector that scores each flow by how distinctly it separates from normal traffic patterns. Higher scores indicate greater deviation.</div>';
   ifHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
   ifHtml += ifFeatures.map(feat => cardRenderer(feat, vals[feat.key])).join('');
   ifHtml += '</div>';
 
-  let rfHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Random Forest (RF) model classified the flagged anomaly using 15 flow features. RF is a supervised classifier that matches traffic patterns against known attack profiles.</div>';
+  let rfHtml = '<div style="font-size:12px;color:var(--sub);font-family:var(--mono);margin-bottom:12px">The Random Forest (RF) model classified the flagged anomaly using flow features. RF is a supervised classifier that matches traffic patterns against known attack profiles.</div>';
   rfHtml += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">';
   rfHtml += rfFeatures.map(feat => cardRenderer(feat, vals[feat.key])).join('');
   rfHtml += '</div>';

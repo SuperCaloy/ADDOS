@@ -33,8 +33,12 @@ var ExpertPipeline = {
   reducedMotion: false,
   _animFrame: null,
   _resizeHandler: null,
+  _resizeObs: null,
   _clickHandler: null,
   _observer: null,
+  _cssW: 0,
+  _cssH: 0,
+  _glowTarget: {},
   latchState: { locked: false, streak: 0 },
   _hasSinkhole: false,
 
@@ -47,7 +51,7 @@ var ExpertPipeline = {
     if_node:        { x: 600, y: 460, label: 'Isolation Forest' },
     rf:             { x: 350, y: 460, label: 'Random Forest' },
     decision:       { x: 150, y: 360, label: 'Decision + Mitigation' },
-    deception:      { x: 50,  y: 480, label: 'Deception / Sinkhole' },
+    deception:      { x: 50,  y: 480, label: 'Deception' },
     resource_guard: { x: 50,  y: 120, label: 'Resource Guard' }
   },
 
@@ -89,6 +93,12 @@ var ExpertPipeline = {
       this._resizeHandler = this.resize.bind(this);
       window.addEventListener('resize', this._resizeHandler);
     }
+    // Reflow when the container itself changes size (side panel open/close,
+    // inspector restack) even if the window size did not change.
+    if (!this._resizeObs && typeof ResizeObserver !== 'undefined') {
+      this._resizeObs = new ResizeObserver(function() { this.resize(); }.bind(this));
+      this._resizeObs.observe(this.container);
+    }
 
     // Pre-render glow sprites using unified helper
     this._nodeGlows = {};
@@ -114,9 +124,10 @@ var ExpertPipeline = {
         var rect = this.canvas.getBoundingClientRect();
         var cx = e.clientX - rect.left;
         var cy = e.clientY - rect.top;
+        var hitR = Math.max(18, Math.min(35, (this._cssW || this.VIRTUAL_W) / 30));
         for (var key in this.nodes) {
           var c = this._coords(this.nodes[key].x, this.nodes[key].y);
-          if (Math.hypot(cx - c.x, cy - c.y) < 30) {
+          if (Math.hypot(cx - c.x, cy - c.y) < hitR) {
             ExpertStages.updateInspector(key);
             break;
           }
@@ -141,22 +152,42 @@ var ExpertPipeline = {
 
   /**
    * Resizes the canvas buffer to match the parent container dimensions.
-   * Guarantees a minimum height while maintaining responsive scaling ratios.
+   * Scales the buffer by devicePixelRatio so rendering stays sharp on HiDPI
+   * and VM scaled displays. All drawing uses CSS pixel coordinates.
    */
   resize: function() {
     if (!this.container || !this.canvas) return;
-    this.canvas.width = this.container.clientWidth;
-    this.canvas.height = Math.max(380, this.container.clientHeight);
+    var dpr = window.devicePixelRatio || 1;
+    var w = this.container.clientWidth;
+    var h = Math.max(380, this.container.clientHeight);
+    this._cssW = w;
+    this._cssH = h;
+    this.canvas.width = Math.round(w * dpr);
+    this.canvas.height = Math.round(h * dpr);
+    this.canvas.style.width = w + 'px';
+    this.canvas.style.height = h + 'px';
+    if (this.ctx) this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   },
 
   /**
-   * Maps virtual design coordinate space to actual rendered canvas pixel coordinates.
-   * Ensures topology layout scales proportionally across varying display resolutions.
+   * Proportional font scale factor from the current CSS width.
+   * 1.0 at the 950px design width, clamped to avoid tiny or huge text.
+   */
+  _scale: function() {
+    var w = this._cssW || this.VIRTUAL_W;
+    return Math.max(0.75, Math.min(1.3, w / this.VIRTUAL_W));
+  },
+
+  /**
+   * Maps virtual design coordinate space to actual rendered canvas coordinates.
+   * Uses CSS pixel dimensions so layout stays correct under DPR scaling.
    */
   _coords: function(nx, ny) {
+    var w = this._cssW || this.canvas.width;
+    var h = this._cssH || this.canvas.height;
     return {
-      x: nx * (this.canvas.width / this.VIRTUAL_W),
-      y: ny * (this.canvas.height / this.VIRTUAL_H)
+      x: nx * (w / this.VIRTUAL_W),
+      y: ny * (h / this.VIRTUAL_H)
     };
   },
 
@@ -262,7 +293,8 @@ var ExpertPipeline = {
 
   /**
    * Calculates node activity glow intensities based on current system polling telemetry.
-   * Adjusts visual highlight brightness to reflect active queue sizes, anomalies, and resource tiers.
+   * Writes target values. drawScene eases the displayed glow toward the target
+   * each frame so state changes animate smoothly instead of snapping.
    */
   updateNodeGlow: function(pollData) {
     var flagged = (pollData.pipeline && pollData.pipeline.flood_prefilter_flagged) || 0;
@@ -275,17 +307,18 @@ var ExpertPipeline = {
     var activeWorkers = (pollData.pipeline && pollData.pipeline.workers_active) || 0;
     var isLive = (qSize > 0 || activeWorkers > 0);
 
-    this.nodeGlow.mininet = isLive ? 0.6 : 0;
-    this.nodeGlow.ryu = isLive ? 0.6 : 0;
-    this.nodeGlow.zmq_rx = Math.min(qSize / 500, 1) || (isLive ? 0.3 : 0);
-    this.nodeGlow.flood = Math.min(flagged / 10, 1);
-    this.nodeGlow.if_node = Math.min(ifAnomalies / 5, 1);
-    this.nodeGlow.decision = Math.min(smCount / 3, 1);
-    this.nodeGlow.entropy = (pollData.tea && pollData.tea.global && pollData.tea.global.is_attack) ? 0.8 : 0;
-    this.nodeGlow.rf = (pollData.rf && pollData.rf.recent_classifications && pollData.rf.recent_classifications.length > 0) ? 0.6 : 0;
-    this.nodeGlow.deception = Math.min(sinkholeCount / 3, 1);
+    var t = this._glowTarget;
+    t.mininet = isLive ? 0.6 : 0;
+    t.ryu = isLive ? 0.6 : 0;
+    t.zmq_rx = Math.min(qSize / 500, 1) || (isLive ? 0.3 : 0);
+    t.flood = Math.min(flagged / 10, 1);
+    t.if_node = Math.min(ifAnomalies / 5, 1);
+    t.decision = Math.min(smCount / 3, 1);
+    t.entropy = (pollData.tea && pollData.tea.global && pollData.tea.global.is_attack) ? 0.8 : 0;
+    t.rf = (pollData.rf && pollData.rf.recent_classifications && pollData.rf.recent_classifications.length > 0) ? 0.6 : 0;
+    t.deception = Math.min(sinkholeCount / 3, 1);
     this._hasSinkhole = sinkholeCount > 0;
-    this.nodeGlow.resource_guard = rgTier === 'CRIT' ? 1 : rgTier === 'HIGH' ? 0.7 : rgTier === 'WARN' ? 0.4 : 0;
+    t.resource_guard = rgTier === 'CRIT' ? 1 : rgTier === 'HIGH' ? 0.7 : rgTier === 'WARN' ? 0.4 : 0;
 
     var teaGlobal = pollData.tea && pollData.tea.global;
     if (teaGlobal) {
@@ -363,14 +396,30 @@ var ExpertPipeline = {
           var cY2 = (start.y + end.y) / 2 + (path.curve || -80) * scaleY;
           lx = 0.25 * start.x + 0.5 * cX2 + 0.25 * end.x;
           ly = 0.25 * start.y + 0.5 * cY2 + 0.25 * end.y;
+          // Push the label off the curve toward open space (control-point side)
+          // so it never sits on a node or node label. Tangent at t=0.5 is the
+          // chord direction, so the perpendicular is the curve normal.
+          var nx = -(end.y - start.y), ny = (end.x - start.x);
+          var nl = Math.hypot(nx, ny) || 1;
+          nx /= nl; ny /= nl;
+          var mx = (start.x + end.x) / 2, my = (start.y + end.y) / 2;
+          if (nx * (cX2 - mx) + ny * (cY2 - my) < 0) { nx = -nx; ny = -ny; }
+          lx += nx * 20; ly += ny * 20;
         } else {
           lx = (start.x + end.x) / 2;
           ly = (start.y + end.y) / 2 - 10;
         }
-        ctx.font = '600 11px "Fira Code", monospace';
+        ctx.font = '600 ' + Math.round(11 * this._scale()) + 'px "Fira Code", monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        var label = path.kind === 'redirect' ? 'redirects to sinkhole' : 'Sends decisions';
+        var label = path.kind === 'redirect' ? 'to sinkhole' : 'Sends decisions';
+        // Clamp the pill inside the canvas so it never clips at an edge.
+        var pillHalf = ctx.measureText(label).width / 2 + 10;
+        var boundW = this._cssW || this.canvas.width;
+        var boundH = this._cssH || this.canvas.height;
+        if (boundW > pillHalf * 2 + 8) lx = Math.max(pillHalf + 4, Math.min(boundW - pillHalf - 4, lx));
+        ly = Math.max(12, Math.min(boundH - 12, ly));
+        this._labelPill(ctx, label, lx, ly);
         var color = path.kind === 'redirect'
           ? (this.isLightMode ? 'rgba(139,92,246,0.8)' : 'rgba(139,92,246,0.6)')
           : (this.isLightMode ? 'rgba(180,83,9,0.8)' : 'rgba(245,158,11,0.6)');
@@ -381,35 +430,43 @@ var ExpertPipeline = {
       if (path.label && !path.kind) {
         var fLx = (start.x + end.x) / 2;
         var fLy = (start.y + end.y) / 2 - 10;
-        ctx.font = '600 10px "Fira Code", monospace';
+        ctx.font = '600 ' + Math.round(10 * this._scale()) + 'px "Fira Code", monospace';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        var tw = ctx.measureText(path.label).width;
-        var px = fLx - tw / 2 - 5;
-        var py = fLy - 8;
-        var pw = tw + 10;
-        var ph = 15;
-        var pr = 4;
-        ctx.beginPath();
-        ctx.moveTo(px + pr, py);
-        ctx.lineTo(px + pw - pr, py);
-        ctx.arcTo(px + pw, py, px + pw, py + pr, pr);
-        ctx.lineTo(px + pw, py + ph - pr);
-        ctx.arcTo(px + pw, py + ph, px + pw - pr, py + ph, pr);
-        ctx.lineTo(px + pr, py + ph);
-        ctx.arcTo(px, py + ph, px, py + ph - pr, pr);
-        ctx.lineTo(px, py + pr);
-        ctx.arcTo(px, py, px + pr, py, pr);
-        ctx.closePath();
-        ctx.fillStyle = this.isLightMode ? 'rgba(255,255,255,0.85)' : 'rgba(30,41,59,0.85)';
-        ctx.fill();
-        ctx.strokeStyle = this.isLightMode ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)';
-        ctx.lineWidth = 1;
-        ctx.stroke();
+        this._labelPill(ctx, path.label, fLx, fLy);
         ctx.fillStyle = this.isLightMode ? 'rgba(51,65,85,0.7)' : 'rgba(248,250,252,0.5)';
         ctx.fillText(path.label, fLx, fLy);
       }
     }.bind(this));
+  },
+
+  /**
+   * Draws a rounded backdrop pill behind a path label so text stays readable
+   * over curves and nodes. Caller sets font before invoking (for measuring).
+   */
+  _labelPill: function(ctx, text, cx, cy) {
+    var tw = ctx.measureText(text).width;
+    var px = cx - tw / 2 - 5;
+    var py = cy - 8;
+    var pw = tw + 10;
+    var ph = 15;
+    var pr = 4;
+    ctx.beginPath();
+    ctx.moveTo(px + pr, py);
+    ctx.lineTo(px + pw - pr, py);
+    ctx.arcTo(px + pw, py, px + pw, py + pr, pr);
+    ctx.lineTo(px + pw, py + ph - pr);
+    ctx.arcTo(px + pw, py + ph, px + pw - pr, py + ph, pr);
+    ctx.lineTo(px + pr, py + ph);
+    ctx.arcTo(px, py + ph, px, py + ph - pr, pr);
+    ctx.lineTo(px, py + pr);
+    ctx.arcTo(px, py, px + pr, py, pr);
+    ctx.closePath();
+    ctx.fillStyle = this.isLightMode ? 'rgba(255,255,255,0.85)' : 'rgba(30,41,59,0.85)';
+    ctx.fill();
+    ctx.strokeStyle = this.isLightMode ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
   },
 
   /**
@@ -543,13 +600,13 @@ var ExpertPipeline = {
         ctx.stroke();
       }
 
-      ctx.font = '700 14px "Fira Code", monospace';
+      ctx.font = '700 ' + Math.round(14 * this._scale()) + 'px "Fira Code", monospace';
       ctx.fillStyle = this.isLightMode ? '#1e293b' : '#F8FAFC';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(ExpertStages.data[key].num, c.x, c.y);
 
-      ctx.font = '600 12px "Fira Code", monospace';
+      ctx.font = '600 ' + Math.round(12 * this._scale()) + 'px "Fira Code", monospace';
       ctx.fillStyle = this.isLightMode ? '#334155' : (isSel ? '#F8FAFC' : 'rgba(248,250,252,0.7)');
       ctx.textBaseline = 'alphabetic';
       ctx.fillText(node.label, c.x, c.y + 42);
@@ -574,7 +631,9 @@ var ExpertPipeline = {
    * Positions a translucent pill box containing color badges and descriptive labels.
    */
   _drawLegend: function(ctx) {
-    var legendX = this.canvas.width - 196;
+    var cssW = this._cssW || this.canvas.width;
+    var legendW = Math.min(180, cssW * 0.18);
+    var legendX = cssW - legendW - 16;
     var legendY = 12;
     var legendBg = this.isLightMode ? 'rgba(255,255,255,0.9)' : 'rgba(30,41,59,0.9)';
     var legendBorder = this.isLightMode ? 'rgba(0,0,0,0.08)' : 'rgba(255,255,255,0.08)';
@@ -584,11 +643,11 @@ var ExpertPipeline = {
     ctx.strokeStyle = legendBorder;
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.roundRect(legendX, legendY, 180, 78, 8);
+    ctx.roundRect(legendX, legendY, legendW, 78, 8);
     ctx.fill();
     ctx.stroke();
 
-    ctx.font = '600 10px "Fira Code", monospace';
+    ctx.font = '600 ' + Math.round(10 * this._scale()) + 'px "Fira Code", monospace';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
 
@@ -630,9 +689,17 @@ var ExpertPipeline = {
       return;
     }
 
+    // Ease displayed glow toward the latest polled targets.
+    for (var gk in this._glowTarget) {
+      var cur = this.nodeGlow[gk] || 0;
+      this.nodeGlow[gk] = cur + (this._glowTarget[gk] - cur) * 0.15;
+    }
+
     var ctx = this.ctx;
-    ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    var scaleY = this.canvas.height / this.VIRTUAL_H;
+    var cssW = this._cssW || this.canvas.width;
+    var cssH = this._cssH || this.canvas.height;
+    ctx.clearRect(0, 0, cssW, cssH);
+    var scaleY = cssH / this.VIRTUAL_H;
 
     this._drawPaths(ctx, scaleY);
     this._drawParticles(ctx, performance.now(), scaleY);
@@ -663,6 +730,10 @@ var ExpertPipeline = {
     if (this._observer) {
       this._observer.disconnect();
       this._observer = null;
+    }
+    if (this._resizeObs) {
+      this._resizeObs.disconnect();
+      this._resizeObs = null;
     }
     this.particles = [];
     this.feedbackParticles = [];

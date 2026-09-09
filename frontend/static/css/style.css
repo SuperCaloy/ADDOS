@@ -169,7 +169,7 @@ body::before {
   z-index: 0;
 }
 
-#app { position: relative; z-index: 1; max-width: clamp(1200px, 90vw, 2200px); margin: 0 auto; padding: 0 36px 80px; }
+#app { position: relative; z-index: 1; max-width: clamp(1200px, 90vw, 2200px); margin: 0 auto; padding: 0 36px 80px; container-type: inline-size; }
 
 /* -- HEADER --------------------------------------------------- */
 header {
@@ -212,7 +212,9 @@ header {
 .metric-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: var(--accent); opacity: .75; }
 .metric-card:hover { border-color: var(--border2); }
 .m-label { font-size: 11px; font-weight: 600; color: var(--sub); text-transform: uppercase; letter-spacing: .1em; margin-bottom: 13px; font-family: var(--sans); }
-.m-value { font-family: var(--sans); font-size: 34px; font-weight: 700; line-height: 1; color: var(--text); margin-bottom: 9px; }
+.m-value { font-family: var(--sans); font-size: clamp(18px, 2.9cqi, 34px); font-weight: 700; line-height: 1.15; color: var(--text); margin-bottom: 9px; overflow-wrap: anywhere; }
+/* Narrower single-line values while a side panel squeezes the grid (beats the fixed media-query sizes below) */
+#app.drawer-open .m-value { font-size: clamp(14px, 2.1cqi, 22px); white-space: nowrap; }
 .m-sub   { font-size: 12px; font-weight: 600; color: var(--accent); font-family: var(--sans); }
 
 /* -- PANEL ----------------------------------------------------- */
@@ -810,7 +812,7 @@ body.light .expert-terminal div { color: #334155; }
 
 .expert-inspector-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 1fr);
   gap: 16px;
   margin-top: 16px;
 }
@@ -1103,24 +1105,29 @@ body.light .expert-terminal div { color: #334155; }
 body.light .expert-pf-stat { background: #F1F5F9; border-color: #C8CED9; }
 body.light .expert-pf-proto-item { background: #F1F5F9; border-color: #C8CED9; }
 
-/* Expert Modal */
-.expert-modal-overlay {
-  position: fixed; inset: 0; z-index: 1000;
-  background: rgba(0,0,0,0.65); backdrop-filter: blur(6px);
-  display: flex; align-items: center; justify-content: center;
-  opacity: 0; pointer-events: none; transition: opacity .2s;
+/* Docked side panels (IP Threat Analysis, Expert algorithm details) */
+#app { transition: margin-right .25s ease; }
+#app.resizing-margin { transition: none; }
+#ip-drawer, #expert-side-panel {
+  position: fixed; top: 0; right: 0; bottom: 0;
+  width: 480px; max-width: 60vw; z-index: 9991;
+  transform: translateX(102%);
+  transition: transform .25s ease;
+  display: flex; flex-direction: column; overflow-y: auto; overflow-x: hidden;
+  background: var(--card, #fff);
+  border-left: 1px solid var(--border2, #e2e4ed);
+  box-shadow: -24px 0 60px rgba(0,0,0,0.18);
+  scrollbar-width: thin; scrollbar-color: var(--border2, #e2e4ed) transparent;
 }
-.expert-modal-overlay.open { opacity: 1; pointer-events: auto; }
-.expert-modal {
-  background: var(--card); border: 1px solid var(--border);
-  border-radius: 18px; width: 96%; max-width: 900px;
-  max-height: 88vh; overflow-y: auto;
-  box-shadow: 0 32px 80px rgba(0,0,0,0.5);
-  transform: translateY(12px); transition: transform .2s;
+#ip-drawer.open, #expert-side-panel.open { transform: translateX(0); }
+#ip-drawer.resizing, #expert-side-panel.resizing { transition: none; }
+.side-panel-resize-handle {
+  position: absolute; top: 0; left: -4px; bottom: 0;
+  width: 8px; cursor: col-resize; z-index: 2;
 }
-.expert-modal-overlay.open .expert-modal { transform: translateY(0); }
-.expert-modal::-webkit-scrollbar { width: 4px; }
-.expert-modal::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
+.side-panel-resize-handle:hover { background: var(--blue); opacity: .3; }
+#expert-side-panel::-webkit-scrollbar { width: 4px; }
+#expert-side-panel::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
 .expert-modal-head {
   display: flex; align-items: center; gap: 14px;
   padding: 26px 32px 20px; border-bottom: 1px solid var(--border);
@@ -1190,33 +1197,13 @@ body.light .expert-hiw-btn { background: #F1F5F9; border-color: #C8CED9; }
 body.light .expert-hiw-btn:hover { background: #DBEAFE; border-color: #3B82F6; }
 .expert-how-it-works { margin-top: 12px; }
 
-/* Light mode expert modal */
-body.light .expert-modal { background: var(--card); border-color: #C8CED9; }
+/* Light mode expert side panel */
+body.light #expert-side-panel { background: var(--card); border-color: #C8CED9; }
 body.light .expert-modal-desc { color: #374151; }
 body.light .expert-modal-logic { background: #F8FAFC; border-color: #C8CED9; color: #334155; }
 body.light .expert-modal-signal-row { border-color: #C8CED9; }
 body.light .expert-modal-gauge-track { background: #F1F5F9; border-color: #C8CED9; }
 
-/* IP Threat Analysis Drawer */
-#ip-drawer-overlay {
-  display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  z-index: 9990; background: rgba(0,0,0,0.45);
-  backdrop-filter: blur(4px); -webkit-backdrop-filter: blur(4px);
-  cursor: pointer;
-}
-#ip-drawer {
-  position: fixed; top: 50%; left: 50%;
-  transform: translate(-50%, -48%) scale(0.97);
-  width: min(1050px, 95vw); max-height: 92vh; z-index: 9991;
-  display: flex; flex-direction: column; overflow: hidden;
-  transition: opacity 0.2s ease, transform 0.2s ease;
-  opacity: 0; pointer-events: none;
-  background: var(--card, #fff);
-  border: 1px solid var(--border2, #e2e4ed);
-  border-radius: 16px;
-  box-shadow: 0 24px 80px rgba(0,0,0,0.18);
-  scrollbar-width: thin; scrollbar-color: var(--border2, #e2e4ed) transparent;
-}
 #idd-tooltip {
   position: fixed; z-index: 9999; pointer-events: none;
   background: var(--card, #fff); border: 1px solid var(--border2, #e2e4ed);

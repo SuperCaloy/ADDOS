@@ -269,16 +269,15 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
 
 </div><!-- /app -->
 
-<!-- Expert Algorithm Modal -->
-<div class="expert-modal-overlay" id="expert-modal-overlay" onclick="ExpertModals.close()">
-  <div class="expert-modal" onclick="event.stopPropagation()">
-    <div class="expert-modal-head">
-      <div class="expert-modal-badge">0</div>
-      <h3 class="expert-modal-title"></h3>
-      <button class="expert-modal-close" onclick="ExpertModals.close()">&times;</button>
-    </div>
-    <div class="expert-modal-body" id="expert-modal-body"></div>
+<!-- Expert Algorithm Side Panel -->
+<div id="expert-side-panel" class="side-panel" role="dialog" aria-label="Algorithm Details" aria-hidden="true">
+  <div class="side-panel-resize-handle" id="expert-panel-resize-handle"></div>
+  <div class="expert-modal-head">
+    <div class="expert-modal-badge">0</div>
+    <h3 class="expert-modal-title"></h3>
+    <button class="expert-modal-close" onclick="ExpertModals.close()">&times;</button>
   </div>
+  <div class="expert-modal-body" id="expert-modal-body"></div>
 </div>
 
 <!-- Report Modal -->
@@ -356,9 +355,9 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
   </div>
 </div>
 
-<!-- Threat Analysis IP Drawer -->
-<div id="ip-drawer-overlay" onclick="closeIpDrawer()"></div>
-<div id="ip-drawer" role="dialog" aria-modal="true" aria-label="IP Threat Analysis" aria-hidden="true">
+<!-- Threat Analysis IP Side Panel -->
+<div id="ip-drawer" class="side-panel" role="dialog" aria-modal="false" aria-label="IP Threat Analysis" aria-hidden="true">
+  <div class="side-panel-resize-handle" id="idd-resize-handle"></div>
   <!-- Header -->
   <div id="idd-head" style="display:flex;align-items:flex-start;justify-content:space-between;padding:24px 28px 18px;border-bottom:1px solid var(--border);flex-shrink:0">
     <div style="display:flex;flex-direction:column;gap:6px">
@@ -452,7 +451,8 @@ button.cal-day{all:unset;text-align:center;font-size:12px;font-family:var(--mono
 <script src="/static/js/dashboard/stats.js?v=9"></script>
 <script src="/static/js/dashboard/mitigation.js?v=9"></script>
 <script src="/static/js/dashboard/log.js?v=9"></script>
-<script src="/static/js/dashboard/main.js?v=10"></script>
+  <script src="/static/js/dashboard/main.js?v=10"></script>
+  <script src="/static/js/core/side-panel.js?v=10"></script>
 <!-- Threat Analysis Drawer -->
 <script src="/static/js/drawer/attack-context.js?v=10"></script>
 <script src="/static/js/drawer/drawer-signals.js?v=10"></script>

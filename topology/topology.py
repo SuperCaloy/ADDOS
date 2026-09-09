@@ -460,6 +460,23 @@ def start_server() -> None:
 
 # === ATTACKS ===
 
+def _display_flags(flags: str) -> str:
+# CLI display only: strip `-p <port>` and `--data <size>` numbers so
+# launch lines read clean (e.g. `--udp --flood`). Never applied to real
+# hping3 commands, which keep their ports and payload sizes.
+    out = []
+    skip_next = False
+    for tok in flags.split():
+        if skip_next:
+            skip_next = False
+            continue
+        if tok in ("-p", "--data"):
+            skip_next = True
+            continue
+        out.append(tok)
+    return " ".join(out)
+
+
 def _hping_cmd(attacker_num: int, target: str, count: int = None) -> str:
 # Build the hping3 command from the attacker variant config; --flood keeps full-rate behavior and payload sizes stay within the VM budget.
     variant = _ATTACKER_VARIANTS.get(attacker_num, ("SYN", "-S -p 80", 0, 0))
@@ -673,7 +690,7 @@ def launch_attack(sustained: bool = True) -> None:
         flags = _ATTACK_TYPE_FLAGS[atype].format(
             port=random.choice(_ATTACK_TYPE_PORTS[atype])
         )
-        info(f"    h{num} [{atype}] {flags}\n")
+        info(f"    h{num} [{atype}] {_display_flags(flags)}\n")
 
         t = threading.Thread(
             target=_attacker_cycle_worker_randomized,
@@ -897,7 +914,7 @@ def start_syn_flood_campaign() -> None:
         )
         _campaign_threads.append(t)
         t.start()
-        info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+        info(f"  h{num} ({h.IP()})  {_display_flags(_ATTACKER_VARIANTS[num][1])}\n")
         # 100ms stagger -- prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
     _start_attack_watchdog(nums, _mixed_stop_event)
@@ -925,7 +942,7 @@ def start_icmp_flood_campaign() -> None:
         )
         _campaign_threads.append(t)
         t.start()
-        info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+        info(f"  h{num} ({h.IP()})  {_display_flags(_ATTACKER_VARIANTS[num][1])}\n")
         # 100ms stagger -- prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
     _start_attack_watchdog(nums, _mixed_stop_event)
@@ -953,7 +970,7 @@ def start_udp_flood_campaign() -> None:
         )
         _campaign_threads.append(t)
         t.start()
-        info(f"  h{num} ({h.IP()})  {_ATTACKER_VARIANTS[num][1]}\n")
+        info(f"  h{num} ({h.IP()})  {_display_flags(_ATTACKER_VARIANTS[num][1])}\n")
         # 100ms stagger -- prevents simultaneous OVS hit and switch disconnects
         time.sleep(0.1)
     _start_attack_watchdog(nums, _mixed_stop_event)
@@ -1004,7 +1021,7 @@ def start_mixed_campaign(stagger_s: float = 2.0) -> None:
             port=random.choice(_ATTACK_TYPE_PORTS[atype])
         )
         delay = schedule[num]
-        info(f"  h{num:<5} ({h.IP()})  {atype:<6} {flags}\n")
+        info(f"  h{num:<5} ({h.IP()})  {atype:<6} {_display_flags(flags)}\n")
 
         thread = threading.Thread(
             target=_attacker_cycle_worker_randomized,
@@ -1577,7 +1594,7 @@ def check_traffic() -> None:
             status = "[OK] HTTP running" if srv_up else "[WARN] server down"
         elif is_attacker:
             role        = "ATTACKER"
-            attack_type = next((f"[{a['attack_type']}] {a['flags']}"
+            attack_type = next((f"[{a['attack_type']}] {_display_flags(a['flags'])}"
                                 for a in _attack_assignments if a["attacker"] == h.name), "?")
             mit          = quarantine.get(ip)
             is_attacking = ip in _active_attackers
@@ -1730,7 +1747,7 @@ def _print_banner(edge_switches: list) -> None:
             role, atype = "SINKHOLE", "(silent dummy)"
         elif num in _ATTACKER_NUMS:
             role  = "ATTACKER"
-            atype = next((f"[{a['attack_type']}] {a['flags']}"
+            atype = next((f"[{a['attack_type']}] {_display_flags(a['flags'])}"
                           for a in _attack_assignments if a["attacker"] == h.name), "?")
         else:
             role, atype = "legit", "-"

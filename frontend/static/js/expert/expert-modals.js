@@ -1,5 +1,5 @@
 /**
- * Algorithm detail popup modal controller and specialized telemetry renderers for Expert Mode.
+ * Algorithm detail side panel controller and specialized telemetry renderers for Expert Mode.
  * Displays real-time mathematical inspections for Flood Prefilter, Entropy Analyzer, Isolation Forest, and Random Forest.
  */
 
@@ -12,10 +12,10 @@ var ExpertModals = {
    * Configures header badges, injects initial body markup, and polls live data every two seconds.
    */
   open: function(stageKey) {
-    var overlay = document.getElementById('expert-modal-overlay');
+    var panel = document.getElementById('expert-side-panel');
     var body = document.getElementById('expert-modal-body');
     var head = document.querySelector('.expert-modal-head');
-    if (!overlay || !body) return;
+    if (!panel || !body) return;
     var s = (window.ExpertStages && window.ExpertStages.data) ? window.ExpertStages.data[stageKey] : null;
     if (!s) return;
 
@@ -30,13 +30,15 @@ var ExpertModals = {
     if (title) title.textContent = s.title;
 
     this._renderBody(stageKey, body);
-    overlay.classList.add('open');
+    if (window.SidePanel) SidePanel.open('expert-side-panel', { storageKey: 'expert-panel-width', focusSel: '.expert-modal-close' });
 
     var self = this;
     if (this._pollTimer) clearInterval(this._pollTimer);
     this._pollTimer = setInterval(function() {
-      var modalOverlay = document.getElementById('expert-modal-overlay');
-      if (!modalOverlay || !modalOverlay.classList.contains('open')) {
+      var isOpen = window.SidePanel
+        ? SidePanel.isOpen('expert-side-panel')
+        : document.getElementById('expert-side-panel').classList.contains('open');
+      if (!isOpen) {
         clearInterval(self._pollTimer);
         self._pollTimer = null;
         return;
@@ -46,12 +48,11 @@ var ExpertModals = {
   },
 
   /**
-   * Closes the active algorithm inspection modal and terminates background refresh polling.
-   * Removes overlay visibility classes and clears the polling timer reference.
+   * Closes the active algorithm inspection side panel and terminates background refresh polling.
+   * Clears the polling timer reference. Visibility is handled by SidePanel.
    */
   close: function() {
-    var overlay = document.getElementById('expert-modal-overlay');
-    if (overlay) overlay.classList.remove('open');
+    if (window.SidePanel) SidePanel.close('expert-side-panel');
     if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
   },
 
@@ -392,7 +393,10 @@ var ExpertModals = {
   }
 };
 
-// Dismisses the active expert modal popup when the Escape key is pressed.
+// Binds the left-edge drag handle for the expert side panel.
+if (window.SidePanel) SidePanel.initResize('expert-side-panel', 'expert-panel-resize-handle', 'expert-panel-width');
+
+// Dismisses the active expert side panel when the Escape key is pressed.
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape') ExpertModals.close();
 });
