@@ -1760,7 +1760,7 @@ def _print_banner(edge_switches: list) -> None:
     info("  py stop_all_attacks()                  # kill + flush + clear\n")
     info("  py stop_baseline()                     # stop baseline\n\n")
     info("  -- BENCHMARK -------------------------------------------------\n")
-    info("  py run_benchmark()                     # 60-min session, auto-stop + reset + exit\n\n")
+    info("  py run_benchmark()                     # 5 sessions x 5-min, auto-stop + reset + exit\n\n")
     info("  -- OTHER -----------------------------------------------------\n")
     info("  py flash_crowd()                       # 30s spike to server\n")
     info("  py flash_crowd(duration=60)            # custom duration\n")
@@ -1814,9 +1814,10 @@ if __name__ == "__main__":
         globals()[_h.name] = _h
 
     # Module-level function so `py run_benchmark()` evals it from the CLI.
-    def run_benchmark(minutes: int = 60):
+    def run_benchmark(minutes: int = 5, sessions: int = 5):
         try:
-            benchmark.run(sys.modules[__name__], net, hosts, minutes * 60)
+            benchmark.run(sys.modules[__name__], net, hosts, minutes * 60,
+                          sessions=sessions)
         except KeyboardInterrupt:
             info("*** Benchmark interrupted, stopping attacks...\n")
             try:
@@ -1844,8 +1845,8 @@ if __name__ == "__main__":
 
     import argparse
     _ap = argparse.ArgumentParser(add_help=False)
-    _ap.add_argument("--benchmark", type=int, nargs="?", const=60, default=None,
-                     help="run benchmark mode for N minutes then auto-exit")
+    _ap.add_argument("--benchmark", type=int, nargs="?", const=5, default=None,
+                     help="run benchmark mode: N sessions x 5 minutes then auto-exit")
     _args, _rest = _ap.parse_known_args()
 
     # Last-resort root-namespace survivor sweep: detached hping3/ping run in the shared root PID namespace with start_new_session=True, so if net.stop() fails they are reparented to PID 1 and keep flooding. An atexit hook and the finally block both run a global pkill backstop.
@@ -1860,7 +1861,8 @@ if __name__ == "__main__":
 
     try:
         if _args.benchmark is not None:
-            benchmark.run(sys.modules[__name__], net, hosts, _args.benchmark * 60)
+            benchmark.run(sys.modules[__name__], net, hosts, 300,
+                          sessions=_args.benchmark or 5)
         else:
             TopologyCLI(net)
     except SystemExit:

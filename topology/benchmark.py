@@ -1,4 +1,4 @@
-"""Topology-side 60-minute benchmark mode.
+"""Topology-side 5-minute benchmark mode, 5 sessions per command.
 
 Imports no topology code (no __init__.py in topology/). All helpers are
 passed in via the topology module object by topology.py.
@@ -8,6 +8,8 @@ import os
 import threading
 import sqlite3
 import json
+import statistics
+import urllib.request
 from pathlib import Path
 
 
@@ -20,40 +22,31 @@ def _fetch_backend_json(url: str, timeout: float = 2.0) -> dict:
         return json.load(r)
 
 
-# fractions of the 60-minute evaluated window (T_eval_start relative)
-_PHASES = [   # (start_frac, kind, action)
-    (0/60,  "soak",    None),                       # T+0-4   baseline soak
-    (4/60,  "probe",   "flash"),                    # T+4-6   flash-crowd FP probe
-    (6/60,  "settle",  None),                       # T+6-9   settle/confirm
-    (9/60,  "wave",    "syn"),                      # T+9-15  SYN wave
-    (15/60, "quiet",   None),                       # T+15-19 quiet
-    (19/60, "wave",    "icmp"),                     # T+19-25 ICMP wave
-    (25/60, "quiet",   None),                       # T+25-29 quiet
-    (29/60, "wave",    "udp"),                      # T+29-35 UDP wave
-    (35/60, "quiet",   None),                       # T+35-39 quiet
-    (39/60, "wave",    "mixed_a"),                  # T+39-47 Mixed wave A
-    (47/60, "quiet",   None),                       # T+47-51 quiet
-    (51/60, "wave",    "mixed_b"),                  # T+51-57 Mixed wave B
-    (57/60, "recover", None),                       # T+57-60 recovery
+# Absolute 5-minute evaluated timetable (seconds from T_eval_start).
+# One session: 2:00 benign, 0:30 SYN, 0:30 UDP, 0:30 ICMP, 0:30 quiet,
+# 1:00 mixed. Five sessions per command = 25:00 evaluated total.
+_SESSION_S = 300
+_PHASES_300 = [  # (start_s, kind, action, duration_s)
+    (0,   "benign", None,    120),  # T+0:00-2:00 legit hosts only
+    (120, "wave",   "syn",    30),  # T+2:00-2:30 SYN h16-h19
+    (150, "wave",   "udp",    30),  # T+2:30-3:00 UDP h20-h22
+    (180, "wave",   "icmp",   30),  # T+3:00-3:30 ICMP h23-h25
+    (210, "quiet",  None,     30),  # T+3:30-4:00 all attacks stopped
+    (240, "wave",   "mixed",  60),  # T+4:00-5:00 mixed campaign
 ]
 _WAVES = {"syn": "start_syn_flood_campaign",
-          "icmp": "start_icmp_flood_campaign",
           "udp": "start_udp_flood_campaign",
-          "mixed_a": "start_mixed_campaign",
-          "mixed_b": "start_mixed_campaign"}
+          "icmp": "start_icmp_flood_campaign",
+          "mixed": "start_mixed_campaign"}
 
 # Human-readable per-step labels shown in the operator progress output.
 _PHASE_LABELS = {
-    ("soak",    None):      "baseline soak (benign-only, FPR reference)",
-    ("probe",   "flash"):   "flash-crowd FP probe (2 min, clean state)",
-    ("settle",  None):      "settle/confirm (waiting for empty quarantine)",
+    ("benign",  None):      "benign baseline (legit-only, FPR reference)",
     ("wave",    "syn"):     "SYN wave (4 SYN attackers)",
-    ("wave",    "icmp"):    "ICMP wave (3 ICMP attackers)",
     ("wave",    "udp"):     "UDP wave (3 UDP attackers)",
-    ("wave",    "mixed_a"): "mixed wave A (all 10, staged SYN/UDP/ICMP)",
-    ("wave",    "mixed_b"): "mixed wave B (all 10, repeat offenders)",
-    ("quiet",   None):      "quiet window (attacks stopped, ban-expiry evidence)",
-    ("recover", None):      "recovery observation (final settle)",
+    ("wave",    "icmp"):    "ICMP wave (3 ICMP attackers)",
+    ("quiet",   None):      "quiet window (attacks stopped, settle)",
+    ("wave",    "mixed"):   "mixed wave (all 10, staged SYN/UDP/ICMP)",
 }
 
 # session summary, printed at the end of every run
@@ -307,11 +300,141 @@ def _status_print(msg: str) -> None:
         _tick_active = False
 
 
-def run(topo, net, hosts, duration_s: int = 3600,
+def _iso_now() -> str:
+    # Matches the backend mitigation_events timestamp format exactly so
+    # window-exact TEXT comparison works lexicographically.
+    import datetime
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _fire_phase(topo, kind: str, action):
+    # Execute one phase action with no waiting. Split out so tests can
+    # drive the timetable without spending wall-clock time.
+    if kind == "wave":
+        getattr(topo, _WAVES[action])()
+        if action == "mixed":
+            _log_tier_snapshot(topo)
+    elif kind == "quiet":
+        # calm window stops any lingering attacks (idempotent)
+        topo.stop_all_attacks()
+    # benign: nothing to start (baseline already running)
+
+
+def _session_stats(db_path: Path, start_iso: str, end_iso: str) -> dict:
+    # Window-exact per-session counts from the live table. Read-only,
+    # never fatal: any failure returns zeros and the run continues.
+    row = {"events": 0, "ips": 0, "det_ms": None, "mit_ms": None}
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5)
+        conn.row_factory = sqlite3.Row
+        try:
+            r = conn.execute(
+                "SELECT COUNT(*) n, COUNT(DISTINCT src_ip) ips "
+                "FROM mitigation_events WHERE timestamp BETWEEN ? AND ?",
+                (start_iso, end_iso)).fetchone()
+            row["events"], row["ips"] = r["n"], r["ips"]
+            det = [x[0] for x in conn.execute(
+                "SELECT detection_ms FROM mitigation_events "
+                "WHERE timestamp BETWEEN ? AND ? AND detection_ms IS NOT NULL",
+                (start_iso, end_iso)).fetchall()]
+            mit = [x[0] for x in conn.execute(
+                "SELECT mitigation_ms FROM mitigation_events "
+                "WHERE timestamp BETWEEN ? AND ? AND mitigation_ms IS NOT NULL",
+                (start_iso, end_iso)).fetchall()]
+            if det:
+                row["det_ms"] = round(statistics.median(det), 1)
+            if mit:
+                row["mit_ms"] = round(statistics.median(mit), 1)
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"BENCHMARK: session stats unavailable ({e})")
+    return row
+
+
+def _print_campaign_table(stats: list) -> None:
+    # One row per session plus the cross-session median row.
+    print("BENCHMARK: campaign results (per-session windows):")
+    print("BENCHMARK: ses  events  ips   det_ms_med  mit_ms_med")
+    dets = [s["det_ms"] for s in stats if s["det_ms"] is not None]
+    mits = [s["mit_ms"] for s in stats if s["mit_ms"] is not None]
+    for i, s in enumerate(stats, 1):
+        print(f"BENCHMARK: {i:>3}  {s['events']:>6}  {s['ips']:>3}  "
+              f"{str(s['det_ms']):>10}  {str(s['mit_ms']):>10}")
+    if dets:
+        print(f"BENCHMARK: median det_ms={statistics.median(dets)} "
+              f"mit_ms={statistics.median(mits) if mits else None} "
+              f"over {len(stats)} sessions")
+
+
+def _run_single_session(topo, duration_s: int, calibration_gate,
+                        reset_fn, session_idx: int, sessions: int) -> dict:
+    # One 5:00 evaluated session with a hard stop at T+300. Returns the
+    # wall-clock bounds for window-exact aggregation.
+    tick_stop = threading.Event()
+    bounds = {"start": _iso_now(), "end": None}
+    try:
+        calibration_gate(topo, cap_s=min(90.0, 0.25 * duration_s))
+        t0 = time.monotonic()  # T_eval_start
+        deadline = t0 + duration_s
+        total_min, total_sec = divmod(int(duration_s), 60)
+        threading.Thread(target=_clock_ticker,
+                         args=(t0, duration_s, tick_stop),
+                         name="benchmark-clock", daemon=True).start()
+
+        def wait_until(target):
+            target = min(target, deadline)
+            while time.monotonic() < target:
+                time.sleep(0.25)
+
+        n = len(_PHASES_300)
+        for i, (start_s, kind, action, _) in enumerate(_PHASES_300):
+            if time.monotonic() >= deadline:
+                break  # hard stop: a slow phase never stretches the session
+            wait_until(t0 + start_s)
+            emin, esec = divmod(int(start_s), 60)
+            label = _PHASE_LABELS.get((kind, action), kind)
+            _status_print(f"BENCHMARK: [session {session_idx}/{sessions}] "
+                          f"[T+{emin:02d}:{esec:02d}/{total_min:02d}:{total_sec:02d}] "
+                          f"step {i + 1}/{n}: {label}")
+            try:
+                _fire_phase(topo, kind, action)
+                if kind == "quiet":
+                    # clean-poll window so the mixed wave is true first detection
+                    _clean_poll_gate(topo, t0 + 240)
+            except Exception as e:
+                # one bad wave must not abort the whole run
+                _status_print(f"BENCHMARK: phase {kind}/{action} error ({e}); continuing")
+            finally:
+                # Re-echo the current status after the phase (noisy actions
+                # bury it) so the newest line always shows the session state.
+                nxt = _PHASES_300[i + 1][0] if i + 1 < n else duration_s
+                nm, ns = divmod(int(nxt), 60)
+                _status_print(f"BENCHMARK: (still on) step {i + 1}/{n}: "
+                              f"{label} - next step at T+{nm:02d}:{ns:02d}")
+    finally:
+        # UNCONDITIONAL stop + reset on EVERY exit path.
+        tick_stop.set()
+        _status_print("BENCHMARK: session done; stopping attacks, resetting "
+                      "reputation.")
+        try:
+            topo.stop_all_attacks()
+        except Exception:
+            pass
+        try:
+            reset_fn(topo)
+        except Exception as e:
+            print(f"BENCHMARK: reset warning: {e}")
+        bounds["end"] = _iso_now()
+    return bounds
+
+
+def run(topo, net, hosts, duration_s: int = _SESSION_S, sessions: int = 5,
         calibration_gate=None, reset_fn=None, db_gate=None) -> None:
-    if duration_s < 600 and calibration_gate is None and reset_fn is None:
-# Mixed-wave vector staging is fixed at ~10s, so shorter runs overlap and the ICMP wave never gets its turn. Require a sane floor unless the caller injects test doubles.
-        raise ValueError("benchmark needs duration_s >= 600s")
+    # Timetable is fixed at 300 s per session; duration_s exists only so a
+    # wrong value fails loudly instead of silently misscaling the clock.
+    if duration_s != _SESSION_S and calibration_gate is None and reset_fn is None:
+        raise ValueError("benchmark timetable is fixed at 300s per session")
     calibration_gate = calibration_gate or _default_calibration_gate
     reset_fn = reset_fn or _reset_reputation_keep_offences
     db_gate = db_gate or _await_backend_db
@@ -319,73 +442,26 @@ def run(topo, net, hosts, duration_s: int = 3600,
     _write_db_marker()
     _status_print("BENCHMARK: Restart the backend now so it boots onto "
                   "benchmark/benchmark.db; this run waits for confirmation.")
-    tick_stop = threading.Event()
+    stats = []
     try:
         # DB GATE FIRST, exception-safe and time-bounded, so the backend is
         # the right one before the calibration gate consumes its window.
         try:
-            db_gate(topo, cap_s=min(90.0, 0.25 * duration_s))
+            db_gate(topo, cap_s=min(90.0, 0.25 * _SESSION_S))
         except Exception as e:
             _status_print(f"BENCHMARK: db gate error ({e}); proceeding")
-        try:
-            calibration_gate(topo, cap_s=min(90.0, 0.25 * duration_s))
-        except Exception as e:
-            _status_print(f"BENCHMARK: calibration gate error ({e}); proceeding degraded")
-
-        t0 = time.monotonic()  # T_eval_start
-        total_min, total_sec = divmod(int(duration_s), 60)
-        threading.Thread(target=_clock_ticker,
-                         args=(t0, duration_s, tick_stop),
-                         name="benchmark-clock", daemon=True).start()
-        def at(frac):
-            return t0 + frac * duration_s
-        def wait_until(target):
-            while time.monotonic() < target:
-                time.sleep(0.25)
-
-        for i, (start_frac, kind, action) in enumerate(_PHASES):
-            wait_until(at(start_frac))
-            # Per-step progress so the operator always knows the current step
-            # and its position on the eval clock while the session runs.
-            emin, esec = divmod(int(round(start_frac * duration_s)), 60)
-            label = _PHASE_LABELS.get((kind, action), kind)
-            _status_print(f"BENCHMARK: [T+{emin:02d}:{esec:02d}/{total_min:02d}:{total_sec:02d}] "
-                          f"step {i + 1}/{len(_PHASES)}: {label}")
-            try:
-                if kind == "probe":
-                    topo._WATCHDOG_SUPPRESS.set()
-                    try:
-                        topo.flash_crowd(duration=int((2/60) * duration_s))
-                    finally:
-                        t = threading.Timer((2/60) * duration_s + 5,
-                                            topo._WATCHDOG_SUPPRESS.clear)
-                        t.daemon = True  # never block process exit
-                        t.start()
-                elif kind == "wave":
-                    getattr(topo, _WAVES[action])()
-                    if action == "mixed_b":
-                        _log_tier_snapshot(topo)
-                elif kind in ("quiet", "settle", "recover"):
-                    # every calm window stops any lingering attacks (idempotent)
-                    topo.stop_all_attacks()
-                    if kind == "settle":
-                        # clean-poll window so the SYN wave is a true first detection
-                        _clean_poll_gate(topo, at(9/60))
-                # soak: nothing to start (baseline already running)
-            except Exception as e:
-                # one bad wave must not abort the whole run
-                _status_print(f"BENCHMARK: phase {kind}/{action} error ({e}); continuing")
-            finally:
-# Re-echo the current status after the phase (noisy actions like stop_all_attacks bury it) so the newest line always shows where the session is.
-                nxt_frac = _PHASES[i + 1][0] if i + 1 < len(_PHASES) else 1.0
-                nm, ns = divmod(int(round(nxt_frac * duration_s)), 60)
-                _status_print(f"BENCHMARK: (still on) step {i + 1}/{len(_PHASES)}: "
-                              f"{label} - next step at T+{nm:02d}:{ns:02d}")
+        for s in range(1, sessions + 1):
+            _status_print(f"BENCHMARK: starting session {s}/{sessions}")
+            bounds = _run_single_session(topo, _SESSION_S, calibration_gate,
+                                         reset_fn, s, sessions)
+            stats.append(_session_stats(_resolve_db_path(),
+                                        bounds["start"], bounds["end"]))
+            if s < sessions:
+                # verify the reset left a clean backend before next session
+                _clean_poll_gate(topo, time.monotonic() + 60)
+        _print_campaign_table(stats)
     finally:
-# UNCONDITIONAL final stop + reset on EVERY exit path. Stop the restore-poller / baseline-watchdog loops first (they poll these Events) so they don't touch the hosts list while net.stop() tears it down.
-        tick_stop.set()
-        _status_print("BENCHMARK: all steps done; stopping attacks, resetting "
-                      "reputation, then auto-exit.")
+# Stop the restore-poller / baseline-watchdog loops first (they poll these Events) so they don't touch the hosts list while net.stop() tears it down.
         try:
             topo._RESTORE_POLLER_STOP.set()
             topo._BASELINE_WATCHDOG_STOP.set()
@@ -395,10 +471,6 @@ def run(topo, net, hosts, duration_s: int = 3600,
             topo.stop_all_attacks()
         except Exception:
             pass
-        try:
-            reset_fn(topo)
-        except Exception as e:
-            print(f"BENCHMARK: reset warning: {e}")
         # Marker removed last: the next normal backend start returns to
         # logs/ddos.db automatically, no env vars to remember.
         _remove_db_marker()

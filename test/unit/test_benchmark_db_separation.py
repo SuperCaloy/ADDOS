@@ -79,12 +79,29 @@ def test_reset_falls_back_to_benchmark_db(monkeypatch):
     assert str(resolved) == str(expected)
 
 
-def _run_with_doubles(b, topo, capture=None, marker=None):
+def _fast_clock(monkeypatch):
+    # Virtual clock so a 300 s session runs in milliseconds.
+    import topology.benchmark as b
+    now = [1000.0]
+
+    def _sleep(s):
+        now[0] += s
+
+    monkeypatch.setattr(b.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(b.time, "sleep", _sleep)
+
+
+def _run_with_doubles(b, topo, capture=None, marker=None, monkeypatch=None):
     # marker: hermetic marker path so tests never touch the real repo file
     if marker is not None:
         mock.patch.object(b, "_marker_path", lambda: marker).start()
+    if monkeypatch is not None:
+        _fast_clock(monkeypatch)
+        mock.patch.object(b, "_clean_poll_gate",
+                          lambda topo, limit: None).start()
     try:
-        b.run(topo, net=mock.MagicMock(), hosts=[], duration_s=12,
+        b.run(topo, net=mock.MagicMock(), hosts=[], duration_s=300,
+              sessions=1,
               calibration_gate=lambda t, cap_s: None,
               reset_fn=lambda t: None,
               db_gate=lambda t, cap_s: capture is not None and capture.append(
@@ -99,7 +116,8 @@ def test_run_writes_then_removes_db_marker(monkeypatch, tmp_path):
     marker = tmp_path / "DB_TARGET"
     assert not marker.exists()
     seen = []
-    _run_with_doubles(b, mock.MagicMock(), capture=seen, marker=marker)
+    _run_with_doubles(b, mock.MagicMock(), capture=seen, marker=marker,
+                      monkeypatch=monkeypatch)
     assert seen == [True], "marker must exist while the session runs"
     assert not marker.exists(), "marker must be removed at session end"
 
@@ -108,7 +126,8 @@ def test_run_prints_restart_instruction(capsys, monkeypatch, tmp_path):
     import topology.benchmark as b
     monkeypatch.delenv("DDOS_DB_PATH", raising=False)
     marker = tmp_path / "DB_TARGET"
-    _run_with_doubles(b, mock.MagicMock(), marker=marker)
+    _run_with_doubles(b, mock.MagicMock(), marker=marker,
+                      monkeypatch=monkeypatch)
     out = capsys.readouterr().out
     assert "Restart the backend" in out
     assert "benchmark/benchmark.db" in out
@@ -130,7 +149,8 @@ def test_cleanup_stale_marker_removes_and_reports(tmp_path, monkeypatch):
 def test_run_still_works_with_env_override_set(capsys, monkeypatch, tmp_path):
     import topology.benchmark as b
     monkeypatch.setenv("DDOS_DB_PATH", str(tmp_path_fixture() / "bench.db"))
-    _run_with_doubles(b, mock.MagicMock(), marker=tmp_path / "DB_TARGET")
+    _run_with_doubles(b, mock.MagicMock(), marker=tmp_path / "DB_TARGET",
+                      monkeypatch=monkeypatch)
     out = capsys.readouterr().out
     assert "Restart the backend" in out  # marker flow is unconditional
 
