@@ -288,7 +288,7 @@ var ExpertModals = {
     }
 
     el.innerHTML =
-      '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Looks at every flow (a conversation between two IPs) and asks: does this look like the normal traffic I was trained on? It randomly cuts the data into pieces. Normal flows need many cuts to separate. Anomalous flows stand out quickly with fewer cuts. The fewer cuts needed, the more suspicious the flow.</div></div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Looks at every flow (a conversation between two IPs).It randomly cuts the data into pieces. Normal flows need many cuts to separate. Anomalous flows stand out quickly with fewer cuts. The fewer cuts needed, the more suspicious the flow.</div></div>' +
 
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Current Score</div>' +
         '<div style="display:flex;align-items:baseline;gap:16px;margin-bottom:10px">' +

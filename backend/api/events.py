@@ -1,3 +1,6 @@
+# Server-Sent Events (SSE) streaming and historical event replay API endpoints.
+# Streams live mitigation decisions and expert telemetry to connected dashboard clients.
+
 import time
 import json
 import threading
@@ -14,7 +17,7 @@ _expert_buffer: deque = deque(maxlen=200)
 
 
 def push_expert_event(payload: dict) -> None:
-    """Called by entropy_analyzer.update() and worker._process_item() to push live TEA/IF/RF data."""
+    # Pushes live TEA, IF, and RF telemetry events into the ring buffer for SSE subscribers.
     entry = {
         "type": "expert",
         "ts": time.strftime("%H:%M:%S"),
@@ -25,6 +28,7 @@ def push_expert_event(payload: dict) -> None:
 
 
 def drain_expert_events() -> list[dict]:
+    # Atomically extracts and empties queued expert telemetry events from the ring buffer.
     with _expert_lock:
         events = list(_expert_buffer)
         _expert_buffer.clear()
@@ -33,6 +37,7 @@ def drain_expert_events() -> list[dict]:
 
 @bp.get("/api/events")
 def events():
+    # Long-lived SSE response stream pushing real-time detection and mitigation events.
     def _stream():
         while True:
             new_events = drain_sse_events()
@@ -55,16 +60,8 @@ def events():
 
 @bp.get("/api/recent_events")
 def recent_events():
-    """Return the most recent mitigation log entries from the DB.
-
-    Called by the frontend on page load and SSE reconnect to replay events
-    that were fired before the browser connected (or while it was disconnected).
-
-    Query params:
-        limit  -- max rows to return (default 100, max 10000)
-        since  -- optional ISO timestamp; only return rows strictly after this time
-        before -- optional ISO timestamp; only return rows strictly before this time (for infinite scroll)
-    """
+    # Returns historical mitigation events from SQLite storage for initial dashboard replay.
+    # Supports limit, since, and before cursor filters for infinite scroll and pagination.
     limit = min(int(request.args.get("limit", 100)), 10000)
     since = request.args.get("since", "")
     before = request.args.get("before", "")

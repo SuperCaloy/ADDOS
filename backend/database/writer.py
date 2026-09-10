@@ -1,3 +1,5 @@
+# Asynchronous and batched database persistence for mitigation events and telemetry.
+# Manages write buffers for traffic summary, detection features, and attack history.
 import datetime
 import threading
 import logging
@@ -7,9 +9,7 @@ import json
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Dedup cache
-# ---------------------------------------------------------------------------
 _dedup_lock  = threading.Lock()
 _dedup_cache: dict[tuple, float] = {}
 _DEDUP_TTL   = 10.0
@@ -32,9 +32,7 @@ def _is_duplicate(src_ip: str, if_score: float, action_taken: str,
     return False
 
 
-# ---------------------------------------------------------------------------
-# Batch buffer for traffic_summary writes -- flushed every 5 seconds
-# ---------------------------------------------------------------------------
+# Batch buffer for traffic_summary writes: flushed every 5 seconds
 _summary_lock   = threading.Lock()
 _summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
                    "tp": 0, "tn": 0, "fn": 0,
@@ -49,9 +47,7 @@ _summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
                    "held": 0, "rescored": 0, "expired_unscored": 0}
 
 
-# ---------------------------------------------------------------------------
-# mitigation_events
-# ---------------------------------------------------------------------------
+# Mitigation events logging
 
 def log_mitigation_event(event: dict) -> None:
     if _is_duplicate(
@@ -116,16 +112,14 @@ def log_manual_action(src_ip: str, action: str,
         log.exception("Failed to write manual action for %s", src_ip)
 
 
-# ---------------------------------------------------------------------------
-# detection_features
-# ---------------------------------------------------------------------------
+# Detection features logging
 
 def log_detection_features(src_ip: str, if_score: float,
                             is_anomaly: bool, attack_class: str,
                             confidence: float,
                             flow_stats: dict,
                             switch_stats: dict) -> None:
-    # --- ML OFF -- skip DB write to avoid polluting dataset ---
+    # ML OFF: skip DB write to avoid polluting dataset
     if not ML_ENABLED:
         return
     try:
@@ -199,11 +193,9 @@ def log_detection_features(src_ip: str, if_score: float,
         log.exception("Failed to write detection_features for %s", src_ip)
 
 
-# ---------------------------------------------------------------------------
-# detection_features batcher
+# Detection features batcher
 # Rows buffer in arrival order and flush every cycle. Timestamps are taken at
-# enqueue time (above) so stored order matches completion order.
-# ---------------------------------------------------------------------------
+# enqueue time so stored order matches completion order.
 
 _FEATURES_INSERT_SQL = """
     INSERT INTO detection_features (
@@ -280,9 +272,7 @@ def flush_detection_features() -> int:
     return flushed
 
 
-# ---------------------------------------------------------------------------
-# quarantine_state
-# ---------------------------------------------------------------------------
+# Quarantine state persistence
 
 # Persist quarantine state including TTL expiry for backend restarts.
 def save_quarantine_state(src_ip: str, phase: int, attack_vector: str,
@@ -334,9 +324,28 @@ def load_quarantine_states() -> list[dict]:
         return []
 
 
-# ---------------------------------------------------------------------------
-# traffic_summary
-# ---------------------------------------------------------------------------
+# Traffic summary buffering and flusher
+
+def _accumulate_summary(metrics: dict) -> None:
+    # Aggregates interval traffic summary metrics into the in-memory buffer.
+    # Thread-safe under summary lock; ignores unbuffered metric keys.
+    with _summary_lock:
+        for key, val in metrics.items():
+            if key in _summary_buffer and val:
+                _summary_buffer[key] += val
+
+
+def _drain_summary_buffer() -> dict | None:
+    # Drains and resets in-memory summary metrics buffer under lock.
+    # Returns snapshot dictionary of accumulated counts, or None if buffer is empty.
+    with _summary_lock:
+        if not any(_summary_buffer.values()):
+            return None
+        snapshot = _summary_buffer.copy()
+        for k in _summary_buffer:
+            _summary_buffer[k] = 0
+        return snapshot
+
 
 def log_traffic_summary(total: int, threats: int,
                         true_neg: int, fp: int,
@@ -351,55 +360,31 @@ def log_traffic_summary(total: int, threats: int,
                         rf_udp_as_syn:  int = 0, rf_udp_as_icmp: int = 0,
                         held: int = 0, rescored: int = 0,
                         expired_unscored: int = 0) -> None:
-    # --- ML OFF -- skip metric writes to keep dataset clean ---
+    # Records flow and packet evaluation counts from detection and mitigation pipelines.
+    # Skips metric writes when ML is disabled to maintain dataset cleanliness.
     if not ML_ENABLED:
         return
-    with _summary_lock:
-        _summary_buffer["total"]    += total
-        _summary_buffer["threats"]  += threats
-        _summary_buffer["true_neg"] += true_neg
-        _summary_buffer["fp"]       += fp
-        _summary_buffer["tp"]       += tp
-        _summary_buffer["tn"]       += tn
-        _summary_buffer["fn"]       += fn
-        _summary_buffer["if_tp"]    += if_tp
-        _summary_buffer["if_fp"]    += if_fp
-        _summary_buffer["if_tn"]    += if_tn
-        _summary_buffer["if_fn"]    += if_fn
-        _summary_buffer["rf_tp"]    += rf_tp
-        _summary_buffer["rf_fp"]    += rf_fp
-        _summary_buffer["rf_tn"]    += rf_tn
-        _summary_buffer["rf_fn"]    += rf_fn
-        _summary_buffer["rf_tp_syn"]  += rf_tp_syn
-        _summary_buffer["rf_fp_syn"]  += rf_fp_syn
-        _summary_buffer["rf_tn_syn"]  += rf_tn_syn
-        _summary_buffer["rf_fn_syn"]  += rf_fn_syn
-        _summary_buffer["rf_tp_icmp"] += rf_tp_icmp
-        _summary_buffer["rf_fp_icmp"] += rf_fp_icmp
-        _summary_buffer["rf_tn_icmp"] += rf_tn_icmp
-        _summary_buffer["rf_fn_icmp"] += rf_fn_icmp
-        _summary_buffer["rf_tp_udp"]  += rf_tp_udp
-        _summary_buffer["rf_fp_udp"]  += rf_fp_udp
-        _summary_buffer["rf_tn_udp"]  += rf_tn_udp
-        _summary_buffer["rf_fn_udp"]  += rf_fn_udp
-        _summary_buffer["rf_syn_as_icmp"] += rf_syn_as_icmp
-        _summary_buffer["rf_syn_as_udp"]  += rf_syn_as_udp
-        _summary_buffer["rf_icmp_as_syn"] += rf_icmp_as_syn
-        _summary_buffer["rf_icmp_as_udp"] += rf_icmp_as_udp
-        _summary_buffer["rf_udp_as_syn"]  += rf_udp_as_syn
-        _summary_buffer["rf_udp_as_icmp"] += rf_udp_as_icmp
-        _summary_buffer["held"]             += held
-        _summary_buffer["rescored"]         += rescored
-        _summary_buffer["expired_unscored"] += expired_unscored
+    _accumulate_summary({
+        "total": total, "threats": threats, "true_neg": true_neg, "fp": fp,
+        "tp": tp, "tn": tn, "fn": fn,
+        "if_tp": if_tp, "if_fp": if_fp, "if_tn": if_tn, "if_fn": if_fn,
+        "rf_tp": rf_tp, "rf_fp": rf_fp, "rf_tn": rf_tn, "rf_fn": rf_fn,
+        "rf_tp_syn": rf_tp_syn, "rf_fp_syn": rf_fp_syn, "rf_tn_syn": rf_tn_syn, "rf_fn_syn": rf_fn_syn,
+        "rf_tp_icmp": rf_tp_icmp, "rf_fp_icmp": rf_fp_icmp, "rf_tn_icmp": rf_tn_icmp, "rf_fn_icmp": rf_fn_icmp,
+        "rf_tp_udp": rf_tp_udp, "rf_fp_udp": rf_fp_udp, "rf_tn_udp": rf_tn_udp, "rf_fn_udp": rf_fn_udp,
+        "rf_syn_as_icmp": rf_syn_as_icmp, "rf_syn_as_udp": rf_syn_as_udp,
+        "rf_icmp_as_syn": rf_icmp_as_syn, "rf_icmp_as_udp": rf_icmp_as_udp,
+        "rf_udp_as_syn": rf_udp_as_syn, "rf_udp_as_icmp": rf_udp_as_icmp,
+        "held": held, "rescored": rescored, "expired_unscored": expired_unscored,
+    })
 
 
 def flush_summary() -> None:
-    with _summary_lock:
-        if not any(_summary_buffer.values()):
-            return
-        snapshot = _summary_buffer.copy()
-        for k in _summary_buffer:
-            _summary_buffer[k] = 0
+    # Flushes accumulated traffic summary metrics from buffer to database table.
+    # Commits atomic snapshot timestamped with current wall clock time.
+    snapshot = _drain_summary_buffer()
+    if not snapshot:
+        return
 
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -495,9 +480,7 @@ def register_exit_flush() -> None:
 
     atexit.register(_final_flush)
 
-# ---------------------------------------------------------------------------
-# ip_attack_history -- one record per IP per attack session
-# ---------------------------------------------------------------------------
+# Attack history tracking: one record per IP per attack session
 
 # Write a completed attack session to ip_attack_history.
 def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
@@ -555,13 +538,8 @@ def log_attack_history(src_ip: str, attack_vector: str, if_score: float,
         log.exception("Failed to write attack history for %s", src_ip)
 
 
-# ---------------------------------------------------------------------------
 # Reputation timestamp-list cache (detection-time optimization).
-# It stores raw unblocked_at strings per src_ip and is updated atomically with
-# a sequence counter by log_attack_history.
-# A miss-path load reads the counter around its unlocked SELECT and retries on
-# a mid-query commit, so served counts never omit a committed offense.
-# ---------------------------------------------------------------------------
+# Stores raw unblocked_at strings per src_ip, updated atomically with a sequence counter.
 
 _reputation_lock = threading.Lock()
 _reputation_cache: dict[str, list[tuple[str, float]]] = {}
@@ -620,12 +598,12 @@ def get_offense_count(src_ip: str) -> float:
 
         return min(round(score, 4), 10.0)
     except Exception as exc:
-        log.warning("writer: failed to get offense count for %s -- %s", src_ip, exc)
+        log.warning("writer: failed to get offense count for %s: %s", src_ip, exc)
         return 0.0
 
 
 def get_offense_total_count(src_ip: str) -> int:
-    # Raw count of past offenses for this IP -- simple "caught N times".
+    # Raw count of past offenses for this IP: simple count of recorded offenses.
     # Returns the persisted offence_totals ledger total plus live episode
     # rows: the ledger is only written at benchmark reset, which then deletes
     # the live rows, so the sum is correct mid-session and post-reset.
@@ -649,7 +627,7 @@ def get_offense_total_count(src_ip: str) -> int:
             return ledger_total + int(rows[0]["cnt"])
         return ledger_total
     except Exception as exc:
-        log.warning("writer: failed to get offense total count for %s -- %s", src_ip, exc)
+        log.warning("writer: failed to get offense total count for %s: %s", src_ip, exc)
         return 0
 
 
@@ -666,7 +644,7 @@ def get_ban_level(src_ip: str) -> int:
             return int(rows[0]["max_ban"])
         return 0
     except Exception as exc:
-        log.warning("writer: failed to get ban level for %s -- %s", src_ip, exc)
+        log.warning("writer: failed to get ban level for %s: %s", src_ip, exc)
         return 0
 
 

@@ -1,3 +1,5 @@
+# DDoS incident and system performance PDF report generation blueprint.
+# Formats historical attack events, confusion matrices, and resource utilization into ReportLab documents.
 import io
 import datetime
 from flask import Blueprint, jsonify, request, send_file
@@ -7,7 +9,7 @@ from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    HRFlowable, PageBreak, KeepTogether
+    HRFlowable, PageBreak
 )
 from backend.database.db import query
 from backend.database import writer
@@ -15,7 +17,7 @@ from backend.config import ML_ENABLED
 
 bp = Blueprint("report", __name__)
 
-# -- Colors --------------------------------------------------------------------
+# Report styling palette
 C_DARK    = colors.HexColor("#1a1a2e")
 C_ACCENT  = colors.HexColor("#16213e")
 C_BLUE    = colors.HexColor("#0f3460")
@@ -84,7 +86,7 @@ def generate_report():
     if not rows and ML_ENABLED:
         return jsonify({"error": "No data found for the selected date range."}), 404
 
-    # --- ML OFF -- generate report with only system/controller metrics ---
+    # ML OFF: generate report with only system/controller metrics
     if not ML_ENABLED:
         rows = []
 
@@ -96,7 +98,7 @@ def generate_report():
                      as_attachment=True, download_name=filename)
 
 
-# -- Helpers -------------------------------------------------------------------
+# Helper formatting functions
 
 def _fmt_period(start_str: str, end_str: str) -> str:
     # Human readable report range like "Sep 2, 2026 - Sep 9, 2026".
@@ -139,19 +141,12 @@ def _metric_table(data: list, col_widths: list) -> Table:
     return tbl
 
 
-def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
-    buf  = io.BytesIO()
-    doc  = SimpleDocTemplate(buf, pagesize=A4,
-                             leftMargin=2*cm, rightMargin=2*cm,
-                             topMargin=2*cm, bottomMargin=2*cm)
-    styles = getSampleStyleSheet()
-    story  = []
-
-    normal_sm = ParagraphStyle("nsm", parent=styles["Normal"], fontSize=8.5)
-    bold_sm   = ParagraphStyle("bsm", parent=styles["Normal"],
-                               fontSize=8.5, fontName="Helvetica-Bold")
-
-    # -- Cover -----------------------------------------------------------------
+def _build_pdf_cover_and_summary(story: list, styles, start_str: str, end_str: str,
+                                 deduped: list[dict], total_threats: int,
+                                 manual_release: int, manual_block: int,
+                                 vectors: dict[str, int], actions: dict[str, int]) -> None:
+    # Builds the report cover header, metadata table, and executive summary tables.
+    # Appends formatted tables with left-side threat totals and right-side traffic telemetry.
     story.append(Spacer(1, 1*cm))
     story.append(Paragraph("A-DDoS Mitigation System",
         ParagraphStyle("cover_sub", parent=styles["Normal"],
@@ -183,27 +178,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(HRFlowable(width="100%", thickness=0.5, color=C_BORDER))
     story.append(Spacer(1, 0.4*cm))
 
-    # -- Deduplicate -----------------------------------------------------------
-    seen: set = set()
-    deduped = []
-    for r in rows:
-        key = (r["src_ip"], r["action_taken"])
-        if key not in seen:
-            seen.add(key)
-            deduped.append(r)
-
-    total_threats = len(deduped)
-    vectors: dict[str, int] = {}
-    actions: dict[str, int] = {}
-    for r in deduped:
-        v = r["attack_vector"] or "Uncertain"
-        a = r["action_taken"]  or "-"
-        vectors[v] = vectors.get(v, 0) + 1
-        actions[a] = actions.get(a, 0) + 1
-
-    manual_release = sum(1 for r in deduped if r["is_manual"] and "Release" in str(r["action_taken"]))
-    manual_block   = sum(1 for r in deduped if r["is_manual"] and "Block"   in str(r["action_taken"]))
-
     summary_rows = query("""
         SELECT SUM(total_flows_observed) AS total_flows,
                SUM(true_negatives_passed) AS true_neg,
@@ -216,7 +190,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     true_neg  = sr.get("true_neg")    or 0
     fp_count  = sr.get("fp")          or 0
 
-    # Get packet-level metrics from global_counters
     pkt_rows = query("SELECT total_packets, malicious_dropped FROM global_counters WHERE id = 1")
     pkt_row  = pkt_rows[0] if pkt_rows else {}
     tot_packets     = pkt_row.get("total_packets") or 0
@@ -225,7 +198,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     if_m    = writer.get_if_metrics(start_str, end_str)
     fp_rate = if_m.get("fpr", 0)
 
-    # -- Section 1: Executive Summary -----------------------------------------
     story += _section_header("1.  Executive Summary", styles)
 
     high_count = sum(1 for r in deduped if (r.get("priority") or "").lower() == "high")
@@ -248,7 +220,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ["IF Accuracy",             f"{if_m.get('accuracy',0):.2f}%"],
         ["", ""],
         ["", ""],
-
     ]
     sum_right = [
         ["Traffic Summary", "Count"],
@@ -270,7 +241,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ["Released",    str(actions.get("Released",    0))],
     ]
 
-    # Create a styled table with optional blue sub-header rows.
     def _kv_table(data, col_widths, section_rows=None):
         t = Table(data, colWidths=col_widths)
         style_cmds = [
@@ -286,7 +256,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
             ("FONTNAME",      (0, 1), (0, -1),  "Helvetica-Bold"),
             ("TEXTCOLOR",     (0, 1), (0, -1),  C_GRAY),
         ]
-        # Style sub-header rows with blue background
         if section_rows:
             for row_idx in section_rows:
                 style_cmds.append(("BACKGROUND", (0, row_idx), (-1, row_idx), C_ACCENT))
@@ -295,14 +264,10 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         t.setStyle(TableStyle(style_cmds))
         return t
 
-    # Inner-table widths sum to match their outer container cells (8.7cm/8.0cm),
-    # and the value column (4.2cm) fits the longest real value.
     side_by_side = Table([[_kv_table(sum_left,  [4.5*cm, 4.2*cm], section_rows=[7]),
                             Spacer(0.3*cm, 1),
                             _kv_table(sum_right, [5.0*cm, 3.0*cm], section_rows=[0, 6, 12])]],
                          colWidths=[8.7*cm, 0.3*cm, 8*cm])
-    # The outer wrapper's cell padding is zeroed so the inner tables keep the
-    # full width allocated to them and do not overflow their cells.
     side_by_side.setStyle(TableStyle([
         ("LEFTPADDING",   (0, 0), (-1, -1), 0),
         ("RIGHTPADDING",  (0, 0), (-1, -1), 0),
@@ -312,13 +277,14 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(side_by_side)
     story.append(Spacer(1, 0.6*cm))
 
-    # -- Page break before Performance Benchmark --------------------------------
-    from reportlab.platypus import PageBreak
-    story.append(PageBreak())
 
-    # -- Section 2: Performance Benchmark -------------------------------------
+def _build_pdf_benchmarks(story: list, styles, start_str: str, end_str: str) -> None:
+    # Generates Section 2 covering Isolation Forest and Random Forest performance benchmarks.
+    # Includes confusion matrices, detection latencies, and controller CPU utilization panels.
+    story.append(PageBreak())
     story += _section_header("2.  Performance Benchmark", styles)
 
+    if_m  = writer.get_if_metrics(start_str, end_str)
     rf_m  = writer.get_rf_metrics(start_str, end_str)
     sys   = writer.get_system_metrics_attack_vs_baseline(start_str, end_str)
     lat_m = writer.get_latency_metrics(start_str, end_str)
@@ -328,9 +294,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
             "bench_desc", fontName="Helvetica", fontSize=8.5,
             leading=11, textColor=C_DARK
         )
-        # Wrap column 2 (Description) in Paragraph so long strings
-        # line-wrap inside the cell instead of overflowing the column.
-        # Plain strings in reportlab never wrap regardless of column width.
         wrapped = []
         for i, row in enumerate(data):
             if len(row) >= 3 and i > 0:
@@ -356,8 +319,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         tbl.setStyle(TableStyle(style))
         return tbl
 
-    # -- 2a: Isolation Forest --------------------------------------------------
-    story.append(Paragraph("2a.  Isolation Forest-Anomaly Detection",
+    story.append(Paragraph("2a.  Isolation Forest: Anomaly Detection",
         ParagraphStyle("sub", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
@@ -376,7 +338,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(_bench_table(if_data))
     story.append(Spacer(1, 0.3*cm))
 
-    # IF 2x2 Confusion Matrix
     _tp = if_m.get('tp', 0); _fp = if_m.get('fp', 0)
     _tn = if_m.get('tn', 0); _fn = if_m.get('fn', 0)
     _lbl_if = ParagraphStyle("cml", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
@@ -409,8 +370,7 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(if_cm_wrap)
     story.append(Spacer(1, 0.4*cm))
 
-    # -- 2b: Random Forest -----------------------------------------------------
-    story.append(Paragraph("2b.  Random Forest-Attack Classification",
+    story.append(Paragraph("2b.  Random Forest: Attack Classification",
         ParagraphStyle("sub2", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
@@ -444,7 +404,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(rf_tbl)
     story.append(Spacer(1, 0.3*cm))
 
-    # RF 3x3 Confusion Matrix
     _lbl = ParagraphStyle("rfl", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
 
     def _cm_cell(val, is_diag):
@@ -491,13 +450,11 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(rf_cm_wrap)
     story.append(Spacer(1, 0.4*cm))
 
-    # -- 2c: Response Latency --------------------------------------------------
     story.append(Paragraph("2c.  Response Latency",
         ParagraphStyle("sub3a", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
 
-    # Helper: show N/A when ML is OFF or value is zero (no data collected)
     def _ms(val):
         if not ML_ENABLED or val == 0:
             return "N/A"
@@ -518,7 +475,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(_bench_table(lat_data))
     story.append(Spacer(1, 0.4*cm))
 
-    # -- 2d: Controller Resource Overhead ---------------------------------------
     story.append(Paragraph("2d.  Controller Resource Overhead",
         ParagraphStyle("sub3", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
@@ -536,7 +492,10 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(_bench_table(res_data))
     story.append(Spacer(1, 0.6*cm))
 
-    # -- Section 3: Offences Summary -------------------------------------------
+
+def _build_pdf_offences_summary(story: list, styles, normal_sm, start_str: str, end_str: str) -> None:
+    # Builds Section 3 displaying aggregated offence records by IP address.
+    # Lists attack session counts, max severity phases reached, and timeline bounds.
     story += _section_header("3.  Offences Summary", styles)
 
     off_rows = query("""
@@ -588,7 +547,10 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     story.append(Spacer(1, 0.6*cm))
 
-    # -- Section 4: Chronological Mitigation Log -------------------------------
+
+def _build_pdf_mitigation_log(story: list, styles, deduped: list[dict]) -> None:
+    # Builds Section 4 listing chronological mitigation decisions and actions.
+    # Details timestamp, detected vector, classification confidence, and action taken.
     story.append(PageBreak())
     story += _section_header("4.  Chronological Mitigation Log", styles)
 
@@ -621,7 +583,10 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     story.append(log_tbl)
     story.append(Spacer(1, 0.6*cm))
 
-    # -- Section 5: IP Attack History -----------------------------------------
+
+def _build_pdf_history_and_signatures(story: list, styles, start_str: str, end_str: str) -> None:
+    # Builds Section 5 for completed attack sessions and network admin verification block.
+    # Provides administrator sign-off fields for report validation and auditing.
     history_rows = query("""
         SELECT src_ip, attack_vector, if_score, confidence, priority,
                phase_reached, first_seen, unblocked_at, duration_sec,
@@ -633,10 +598,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
 
     if history_rows:
         story += _section_header("5.  IP Attack History (Completed Sessions)", styles)
-        # Reason column holds free-form backend text (e.g. "Manual Block
-        # Escalation" measures ~3.1cm -- wider than any fixed column width
-        # could safely guarantee). Wrapping it in a Paragraph lets it break
-        # onto a second line within its own cell instead of overflowing.
         reason_style = ParagraphStyle("reason", fontName="Helvetica", fontSize=7,
                                        leading=8.4, textColor=C_DARK)
 
@@ -677,7 +638,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ]))
         story.append(hist_tbl)
 
-    # -- Verification and Approval -----------------------------------------
     story.append(Paragraph("Verification and Approval",
         ParagraphStyle("sub6", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
@@ -693,7 +653,6 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         '<b>Network Administrator</b>',
         ParagraphStyle("sigrole", parent=styles["Normal"], fontSize=10.5,
                        alignment=1))
-    # Middle column is an empty spacer so the two rules stay separated.
     sig_data = [
         ["", "", ""],
         ["SIGNATURE OVER PRINTED NAME", "", "DATE"],
@@ -702,10 +661,8 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
     sig_tbl = Table(sig_data, colWidths=[7.2*cm, 1.6*cm, 6.2*cm],
                     hAlign="CENTER")
     sig_tbl.setStyle(TableStyle([
-        # signing space above the rule
         ("TOPPADDING",    (0, 0), (-1, 0), 0),
         ("BOTTOMPADDING", (0, 0), (-1, 0), 26),
-        # solid rule: top edge of the caption row (left and right only)
         ("LINEABOVE",     (0, 1), (0, 1), 1, colors.black),
         ("LINEABOVE",     (2, 1), (2, 1), 1, colors.black),
         ("FONTNAME",      (0, 1), (-1, 1), "Helvetica"),
@@ -717,6 +674,49 @@ def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
         ("VALIGN",        (0, 0), (-1, -1), "BOTTOM"),
     ]))
     story.append(sig_tbl)
+
+
+def _build_pdf(start_str: str, end_str: str, rows: list[dict]) -> bytes:
+    # Generates a complete PDF document summarizing network security events for the specified date window.
+    # Coordinates cover generation, benchmarks, offence logs, and administrator sign-off flowables.
+    buf  = io.BytesIO()
+    doc  = SimpleDocTemplate(buf, pagesize=A4,
+                             leftMargin=2*cm, rightMargin=2*cm,
+                             topMargin=2*cm, bottomMargin=2*cm)
+    styles = getSampleStyleSheet()
+    story  = []
+
+    normal_sm = ParagraphStyle("nsm", parent=styles["Normal"], fontSize=8.5)
+
+    # Deduplicate entries by (src_ip, action_taken)
+    seen: set = set()
+    deduped = []
+    for r in rows:
+        key = (r["src_ip"], r["action_taken"])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(r)
+
+    total_threats = len(deduped)
+    vectors: dict[str, int] = {}
+    actions: dict[str, int] = {}
+    for r in deduped:
+        v = r["attack_vector"] or "Uncertain"
+        a = r["action_taken"]  or "-"
+        vectors[v] = vectors.get(v, 0) + 1
+        actions[a] = actions.get(a, 0) + 1
+
+    manual_release = sum(1 for r in deduped if r["is_manual"] and "Release" in str(r["action_taken"]))
+    manual_block   = sum(1 for r in deduped if r["is_manual"] and "Block"   in str(r["action_taken"]))
+
+    # Assemble report sections sequentially
+    _build_pdf_cover_and_summary(story, styles, start_str, end_str,
+                                 deduped, total_threats, manual_release, manual_block,
+                                 vectors, actions)
+    _build_pdf_benchmarks(story, styles, start_str, end_str)
+    _build_pdf_offences_summary(story, styles, normal_sm, start_str, end_str)
+    _build_pdf_mitigation_log(story, styles, deduped)
+    _build_pdf_history_and_signatures(story, styles, start_str, end_str)
 
     doc.build(story)
     return buf.getvalue()

@@ -1,3 +1,5 @@
+# Random forest feature extraction and multi-class attack classification.
+# Transforms flow statistics into scaled 15-feature vectors and infers attack class.
 import math
 import warnings
 import numpy as np
@@ -31,7 +33,7 @@ def extract_rf_features(flow_stats: dict) -> np.ndarray:
     avg_bytes_per_pkt      = byt / (pkt + eps)
     flow_intensity         = math.log1p(max(pkt * bps, 0))
     bytes_per_duration     = math.log1p(max(byt / (fds + eps), 0))
-    # eps here, not +1 -- matches training denominator exactly
+    # eps here, not +1: matches training denominator exactly
     pkt_size_uniformity    = math.log1p(max(avg_bytes_per_pkt / (bps + eps), 0))
     flow_src_intensity     = math.log1p(max(fcps * pps, 0))
 
@@ -67,8 +69,8 @@ def extract_rf_features(flow_stats: dict) -> np.ndarray:
         return loader.rf_scaler.transform(vec.reshape(1, -1))
 
 
+# Evaluates a single scaled feature vector, returning (attack_class, confidence).
 def run_rf_inference(vec_scaled: np.ndarray) -> tuple[str, float]:
-    """Return (attack_class_or_Uncertain, confidence)."""
     loader.require_loaded()
 
     proba = loader.rf_model.predict_proba(vec_scaled)[0]
@@ -83,12 +85,9 @@ def run_rf_inference(vec_scaled: np.ndarray) -> tuple[str, float]:
     return attack_class, conf
 
 
+# Decodes a stacked batch of already-scaled rows.
+# Per-row semantics identical to run_rf_inference; tree dispatch is amortized across rows.
 def run_rf_inference_batch(vecs_scaled) -> list[tuple[str, float]]:
-    """Decode a stacked batch of already-scaled rows.
-
-    Per-row semantics identical to run_rf_inference; only the tree dispatch
-    is amortized across rows.
-    """
     loader.require_loaded()
 
     mat = np.vstack([np.asarray(v) for v in vecs_scaled])

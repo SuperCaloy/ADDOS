@@ -1,3 +1,6 @@
+# Dynamic micro-batcher for Isolation Forest anomaly score inference.
+# Groups incoming feature vectors across a sliding time window to saturate vectorized batch scoring.
+
 import threading
 import time
 from concurrent.futures import Future
@@ -14,6 +17,8 @@ _items = 0
 
 
 def ensure_started() -> None:
+    # Ensures the background batch processing thread is active and ready to consume vectors.
+    # Lazily initializes the daemon thread under thread-safe locking.
     global _thread
     with _lock:
         if _thread is not None and _thread.is_alive():
@@ -23,6 +28,8 @@ def ensure_started() -> None:
 
 
 def infer(vec_scaled) -> Future:
+    # Submits a scaled feature vector to the batching queue and returns a Future.
+    # Wakes the background worker loop to process when batch size or time window expires.
     fut = Future()
     with _cond:
         _tray.append((vec_scaled, fut))
@@ -31,6 +38,8 @@ def infer(vec_scaled) -> Future:
 
 
 def _loop() -> None:
+    # Background worker loop waiting for batch window timeout or capacity thresholds.
+    # Invokes vectorized inference and completes waiting futures with score results.
     global _batches, _items
     window_s = IF_BATCH_WINDOW_MS / 1000.0
     while True:
@@ -61,6 +70,8 @@ def _loop() -> None:
 
 
 def stats() -> dict:
+    # Returns operational metrics for active tray length, total batches, and processed items.
+    # Used by observability inspectors and test suites.
     with _cond:
         return {
             "tray_len": len(_tray),
@@ -70,5 +81,7 @@ def stats() -> dict:
 
 
 def reset_for_tests() -> None:
+    # Clears pending feature vectors in the tray.
+    # Used to reset batching state between test fixture executions.
     with _cond:
         _tray.clear()

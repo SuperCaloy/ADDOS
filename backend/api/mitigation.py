@@ -1,3 +1,6 @@
+# REST API endpoints for quarantine inspection and manual mitigation actions.
+# Allows operators to inspect active quarantined hosts, release false positives, and clear state.
+
 import logging
 from flask import Blueprint, jsonify, request
 from backend.mitigation.state_machine import state_machine
@@ -11,6 +14,8 @@ bp = Blueprint("quarantine", __name__)
 
 @bp.get("/api/quarantine_list")
 def quarantine_list():
+    # Returns combined list of currently quarantined and sinkholed IP addresses.
+    # Combines state machine active mitigations and deceptive honeypot redirections.
     rows = state_machine.get_active_list()
     for e in deception.get_active_list():
         rows.append({
@@ -21,13 +26,13 @@ def quarantine_list():
             "confidence":        e["confidence"],
             "time_in_phase_sec": e.get("elapsed_sec", 0),
             "priority":          "Low",
-
         })
     return jsonify(rows)
 
 
 @bp.post("/api/quarantine/release")
 def release():
+    # Releases an IP address from active quarantine and records a false positive count.
     src_ip = (request.get_json(silent=True) or {}).get("src_ip", "").strip()
     if not src_ip:
         return jsonify({"error": "src_ip required"}), 400
@@ -49,6 +54,7 @@ def release():
 
 @bp.post("/api/quarantine/block")
 def block():
+    # Manually escalates an IP address to permanent blocking.
     src_ip = (request.get_json(silent=True) or {}).get("src_ip", "").strip()
     if not src_ip:
         return jsonify({"error": "src_ip required"}), 400
@@ -59,22 +65,22 @@ def block():
 
 @bp.post("/api/quarantine/clear_all")
 def clear_all():
+    # Clears all active non-permanent mitigations from state machine and sinkhole redirects.
     cleared = state_machine.clear_all_non_permanent()
-    # S5/Round 5: the sinkhole registry lives OUTSIDE the state machine;
-    # skipping it left ghost watchlist rows and active redirect rules after
-    # every stop_all_attacks().
     cleared += deception.emergency_clear()
     return jsonify({"status": "ok", "cleared": cleared})
 
 
 @bp.get("/api/pending_restores")
 def pending_restores():
+    # Returns list of IP addresses scheduled for rule restoration on controller switches.
     ips = drain_pending_restores()
     return jsonify({"ips": ips})
 
 
 @bp.post("/api/cache/invalidate")
 def invalidate_cache():
+    # Flushes cached flow tracker predictions for a specific source IP.
     src_ip = (request.get_json(silent=True) or {}).get("src_ip", "").strip()
     if not src_ip:
         return jsonify({"error": "src_ip required"}), 400
@@ -86,6 +92,7 @@ def invalidate_cache():
 # Local admin endpoint for benchmark live reset, no auth layer in this backend.
 @bp.post("/api/admin/reset_reputation")
 def reset_reputation():
+    # Resets in-memory reputation scores, offense ledger caches, and state machine records.
     from backend.database.writer import clear_reputation_cache
 
     clear_reputation_cache()

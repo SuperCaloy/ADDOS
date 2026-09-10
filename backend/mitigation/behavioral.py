@@ -1,10 +1,12 @@
+# Behavioral offense tracking and priority tier assignment.
+# Computes reputation decay scores and determines escalation paths for repeat offenders.
 import logging
 import math
 from backend.database import writer
 
 log = logging.getLogger(__name__)
 
-# -- Thresholds -------------------------------------------------------------
+# Thresholds
 # Weighted offense score triggering direct blackhole (half-life decay, 24h). 5 rapid attacks accumulate to 10.0.
 BLACKHOLE_OFFENSE_THRESHOLD = 10.0
 

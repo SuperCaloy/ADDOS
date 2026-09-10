@@ -1,10 +1,12 @@
+# Traffic filtering policies, action constants, and duration calculations.
+# Defines ban durations, rate limit thresholds, and sinkhole entry rules.
 import logging
 
 from backend.config import SIMULATION_MODE
 
 log = logging.getLogger(__name__)
 
-# -- Ban durations per level ------------------------------------------------
+# Ban durations per level
 # state_machine calls get_ban_duration(ban_level) and never hardcodes durations.
 if SIMULATION_MODE:
     BAN_LEVELS = [30, 60, 120, 300, 600, 1200]       # 30s -> 20m
@@ -32,7 +34,7 @@ def get_blackhole_ttl() -> int:
     return BLACKHOLE_TTL_SECONDS
 
 
-# -- Action constants sent verbatim to ZmqCommander -> Ryu ------------------
+# Action constants sent verbatim to ZmqCommander to Ryu
 ACTION_QUARANTINE = "quarantine"   # priority-90 drop rule
 ACTION_RATE_LIMIT = "rate_limit"   # priority-80 meter rule
 ACTION_BLOCK      = "block"        # priority-100 full drop
@@ -85,7 +87,7 @@ def should_sinkhole(attack_vector: str, confidence: float, phase: int) -> bool:
     result = (attack_vector == "Uncertain") and (confidence < SINKHOLE_CONFIDENCE_THRESHOLD)
 
     if result:
-        log.debug("TrafficFilter: sinkhole -- vector=%s  conf=%.2f", attack_vector, confidence)
+        log.debug("TrafficFilter: sinkhole: vector=%s  conf=%.2f", attack_vector, confidence)
 
     return result
 

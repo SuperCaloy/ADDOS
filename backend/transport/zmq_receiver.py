@@ -1,3 +1,5 @@
+# ZeroMQ telemetry receiver consuming flow statistics and switch counts from Ryu.
+# Parses switch statistics, tracks packet rates, and dispatches to pipeline worker and TEA.
 import zmq
 import json
 import time
@@ -17,19 +19,19 @@ log = logging.getLogger(__name__)
 _RECONNECT_DELAY_S = 3.0
 _RECV_TIMEOUT_MS   = 1000
 
-# --- Raw packet counter for UI stats ---
+# Raw packet counter for UI stats
 _raw_lock       = threading.Lock()
 _raw_total_pkts = 0
 
-# --- Total system PPS (packets per second) ---
+# Total system PPS (packets per second)
 _pps_lock = threading.Lock()
 _total_pps = 0.0
 
-# --- Connected switch count from ZMQ switch_count messages ---
+# Connected switch count from ZMQ switch_count messages
 _switch_count_lock  = threading.Lock()
 _connected_switches = 0
 
-# --- Cumulative packet count per flow key for delta tracking ---
+# Cumulative packet count per flow key for delta tracking
 # OVS packet_count is cumulative so we track prev value to get delta
 _flow_prev_pkts: dict[tuple, int] = {}
 _flow_lock = threading.Lock()
@@ -95,233 +97,199 @@ def _sanitize_flow_stats(flow_stats: dict) -> dict:
     return flow_stats
 
 
-def _parse_and_route(raw: bytes) -> None:
-    global _raw_total_pkts, _connected_switches
+def _handle_switch_count(msg: dict) -> None:
+    # Updates the active connected switch count from Ryu controller telemetry.
+    # Synchronized under switch count lock for thread-safe dashboard reporting.
+    global _connected_switches
+    with _switch_count_lock:
+        _connected_switches = int(msg.get("connected", 0))
 
+
+def _handle_packet_in(msg: dict) -> None:
+    # Processes real-time packet-in notifications to detect early flood patterns.
+    # Evaluates SYN, ICMP, and UDP flood prefilters before full flow stats arrive.
+    src_ip = msg.get("src_ip", "")
+    proto = msg.get("proto", "")
+
+    if not src_ip or src_ip in _WHITELIST_IPS or not ML_ENABLED:
+        return
+
+    if proto == "TCP":
+        if msg.get("tcp_flags_syn") and not msg.get("tcp_flags_ack"):
+            tripped = flood_filter.on_packet(src_ip, "SYN")
+            if tripped:
+                log.info("FloodPreFilter SYN tripped: %s - awaiting real flow_stats", src_ip)
+                state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
+        elif msg.get("tcp_flags_ack"):
+            flood_filter.on_ack(src_ip)
+
+    elif proto == "ICMP":
+        tripped = flood_filter.on_packet(src_ip, "ICMP")
+        if tripped:
+            log.info("FloodPreFilter ICMP tripped: %s - awaiting real flow_stats", src_ip)
+            state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
+
+    elif proto == "UDP":
+        tripped = flood_filter.on_packet(src_ip, "UDP")
+        if tripped:
+            log.info("FloodPreFilter UDP tripped: %s - awaiting real flow_stats", src_ip)
+            state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
+
+
+def _handle_dropped_delta(msg: dict) -> None:
+    # Records physical packet drops reported by OpenFlow switches into decision engine.
+    # Updates aggregate drop counters for system observability and reporting.
+    src_ip = msg.get("src_ip", "")
+    delta = int(msg.get("delta", 0))
+    if src_ip and delta > 0:
+        try:
+            from backend.pipeline.decision_engine import record_dropped_packets
+            record_dropped_packets(src_ip, delta)
+        except Exception:
+            pass
+
+
+def _handle_flow_stats(msg: dict) -> None:
+    # Processes 1-second per-flow telemetry from OpenFlow stats collectors.
+    # Runs TEA analysis, evaluates tiered mitigation phases, and queues work for inference.
+    global _raw_total_pkts, _total_pps
+
+    src_ip = msg.get("src_ip", "")
+    flow_stats = _sanitize_flow_stats(msg.get("flow_stats", {}))
+    switch_stats = msg.get("switch_stats", {})
+    dpid = msg.get("dpid", 0)
+
+    if not src_ip or not flow_stats:
+        return
+
+    pkt_count_cumulative = int(flow_stats.get("packet_count", 0))
+    pps = float(flow_stats.get("packet_count_per_second", 0.0))
+
+    # Delta tracking: compute how many new packets arrived this interval
+    flow_key = (src_ip, dpid)
+    with _flow_lock:
+        prev_count = _flow_prev_pkts.get(flow_key, 0)
+        delta_pkts = max(pkt_count_cumulative - prev_count, 0)
+        _flow_prev_pkts[flow_key] = pkt_count_cumulative
+
+    # Accumulate this flow into the switch-level buffer for TEA
+    with _switch_flows_lock:
+        if dpid not in _switch_flows:
+            _switch_flows[dpid] = []
+        _switch_flows[dpid].append({
+            "src_ip": src_ip,
+            "packet_count_per_second": pps,
+            "byte_count_per_second": float(flow_stats.get("byte_count_per_second", 0.0)),
+            "packet_count": float(flow_stats.get("packet_count", 0.0)),
+            "byte_count": float(flow_stats.get("byte_count", 0.0)),
+            "ip_proto": int(flow_stats.get("ip_proto", 0)),
+            "_ts": time.monotonic(),
+        })
+
+    # Update per-IP TEA profile for small-attacker detection
+    if src_ip not in _WHITELIST_IPS:
+        entropy_analyzer.update_ip(src_ip, pps, float(flow_stats.get("byte_count_per_second", 0.0)))
+
+    # Update raw total for UI
+    with _raw_lock:
+        _raw_total_pkts += delta_pkts
+
+    # Accumulate total PPS from flow pps
+    with _pps_lock:
+        _total_pps += pps
+
+    # Skip TEA and ML inference if ML disabled; count packets directly
+    if not ML_ENABLED:
+        try:
+            from backend.pipeline.decision_engine import on_result
+            on_result(src_ip, 0.0, False, "Normal", 0.0,
+                      flow_stats=flow_stats, switch_stats=switch_stats,
+                      timed_out=False)
+        except Exception:
+            pass
+        return
+
+    if pkt_count_cumulative < 1:
+        return
+
+    # Tiered banned-IP handling (reduce GIL waste)
+    _ip_phase = 0
+    try:
+        from backend.mitigation.state_machine import state_machine as _sm
+        _ip_state = _sm.get_state(src_ip)
+        if _ip_state is not None:
+            _ip_phase = _ip_state.phase
+    except Exception:
+        pass
+
+    if _ip_phase == 3:
+        # Blackhole: traffic dropped at switch; skip submission
+        return
+
+    if _ip_phase == 2:
+        # Time ban: refresh TEA evidence but skip expensive IF/RF inference
+        flow_stats.pop("tea_eval_seq", None)
+        flow_stats["tea_attack_pattern"] = False
+        flow_stats["tea_flash_crowd"] = False
+        flow_stats["tea_confidence"] = "low"
+        flow_stats["tea_is_learned"] = False
+        flow_stats["tea_size_var"] = 0.0
+        flow_stats["tea_intensity_var"] = 0.0
+        switch_stats["dpid"] = dpid
+        worker.submit(src_ip, flow_stats, switch_stats)
+        return
+
+    # Snapshot switch buffer and evaluate entropy metrics
+    with _switch_flows_lock:
+        switch_flow_list = list(_switch_flows.get(dpid, []))
+        if dpid in _switch_flows:
+            _switch_flows[dpid] = []
+
+    tea_result = entropy_analyzer.update(dpid, switch_flow_list)
+
+    flow_stats["tea_attack_pattern"] = tea_result["is_attack_pattern"]
+    flow_stats["tea_flash_crowd"] = tea_result["is_flash_crowd"]
+    flow_stats["tea_confidence"] = tea_result["confidence"]
+    flow_stats["tea_is_learned"] = tea_result["is_learned"]
+    flow_stats["tea_size_var"] = tea_result["size_var"]
+    flow_stats["tea_intensity_var"] = tea_result["intensity_var"]
+    flow_stats["tea_eval_seq"] = tea_result.get("eval_seq")
+    flow_stats["tea_flash_crowd_guidance"] = entropy_analyzer.get_flash_crowd_guidance()
+
+    # Per-IP check for stealthy low-rate attackers
+    ip_verdict = entropy_analyzer.get_ip_verdict(src_ip)
+    if ip_verdict == "attack":
+        if tea_result["is_learned"] and (
+            tea_result["is_attack_pattern"]
+            or tea_result.get("mahalanobis_distance", 0) > 3.0
+        ):
+            flow_stats["tea_attack_pattern"] = True
+            flow_stats["tea_confidence"] = "moderate"
+            log.info("TEA per-IP attack detected: %s", src_ip)
+        else:
+            log.debug("TEA per-IP shadow observation (learning): %s", src_ip)
+
+    switch_stats["dpid"] = dpid
+    worker.submit(src_ip, flow_stats, switch_stats)
+
+
+def _parse_and_route(raw: bytes) -> None:
+    # Deserializes incoming ZMQ messages and delegates to dedicated message handlers.
+    # Safely ignores malformed payloads and unrecognized message categories.
     try:
         msg = json.loads(raw)
     except json.JSONDecodeError:
         return
 
     msg_type = msg.get("type")
-
-    # ------------------------------------------------------------------
-    # switch_count - update how many switches are connected
-    # ------------------------------------------------------------------
     if msg_type == "switch_count":
-        with _switch_count_lock:
-            _connected_switches = int(msg.get("connected", 0))
-        return
-
-    # ------------------------------------------------------------------
-    # packet_in - real-time per-packet event from Ryu
-    # This is where the flood pre-filter runs - no stats poll delay
-    # ------------------------------------------------------------------
+        _handle_switch_count(msg)
     elif msg_type == "packet_in":
-        src_ip = msg.get("src_ip", "")
-        proto  = msg.get("proto", "")
-
-        if not src_ip:
-            return
-
-        # Skip whitelist IPs, server and sinkhole never get flood-filtered.
-        if src_ip in _WHITELIST_IPS:
-            return
-
-        # --- ML OFF - skip all flood prefilter processing ---
-        if not ML_ENABLED:
-            return
-
-        # Map Ryu proto strings to our prefilter keys
-        # SYN is a special case - only pure SYN packets (no ACK) count
-        if proto == "TCP":
-            if msg.get("tcp_flags_syn") and not msg.get("tcp_flags_ack"):
-                # SYN flood tracking
-                tripped = flood_filter.on_packet(src_ip, "SYN")
-                if tripped:
-                    log.info("FloodPreFilter SYN tripped: %s - awaiting real flow_stats", src_ip)
-                    state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
-
-            elif msg.get("tcp_flags_ack"):
-                # ACK means handshake completed - reduce half-open count
-                flood_filter.on_ack(src_ip)
-
-        elif proto == "ICMP":
-            # ICMP flood tracking - count every echo request
-            tripped = flood_filter.on_packet(src_ip, "ICMP")
-            if tripped:
-                log.info("FloodPreFilter ICMP tripped: %s - awaiting real flow_stats", src_ip)
-                state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
-
-        elif proto == "UDP":
-        # UDP flood tracking - the key path for slow UDP detection.
-            tripped = flood_filter.on_packet(src_ip, "UDP")
-            if tripped:
-                log.info("FloodPreFilter UDP tripped: %s - awaiting real flow_stats", src_ip)
-                state_machine.on_prefilter_trip(src_ip, flood_filter.is_correlated(src_ip))
-
-    # ------------------------------------------------------------------
-    # dropped_delta - real physical packet drop count from OVS
-    # ------------------------------------------------------------------
+        _handle_packet_in(msg)
     elif msg_type == "dropped_delta":
-        src_ip = msg.get("src_ip", "")
-        delta  = int(msg.get("delta", 0))
-        if src_ip and delta > 0:
-            try:
-                from backend.pipeline.decision_engine import record_dropped_packets
-                record_dropped_packets(src_ip, delta)
-            except Exception:
-                pass
-
-    # ------------------------------------------------------------------
-    # flow_stats - per-flow telemetry from OVS stats poll (every 1s)
-    # This is where TEA runs - after collecting flow data per switch
-    # ------------------------------------------------------------------
+        _handle_dropped_delta(msg)
     elif msg_type == "flow_stats":
-        src_ip       = msg.get("src_ip", "")
-        flow_stats   = _sanitize_flow_stats(msg.get("flow_stats", {}))
-        switch_stats = msg.get("switch_stats", {})
-        dpid         = msg.get("dpid", 0)
-
-        if not src_ip or not flow_stats:
-            return
-
-        pkt_count_cumulative = int(flow_stats.get("packet_count", 0))
-        pps                  = float(flow_stats.get("packet_count_per_second", 0.0))
-
-        # Delta tracking - compute how many new packets arrived this interval
-        flow_key = (src_ip, dpid)
-        with _flow_lock:
-            prev_count                = _flow_prev_pkts.get(flow_key, 0)
-            delta_pkts                = max(pkt_count_cumulative - prev_count, 0)
-            _flow_prev_pkts[flow_key] = pkt_count_cumulative
-
-        # Accumulate this flow into the switch-level buffer for TEA
-        with _switch_flows_lock:
-            if dpid not in _switch_flows:
-                _switch_flows[dpid] = []
-            _switch_flows[dpid].append({
-                "src_ip":                 src_ip,
-                "packet_count_per_second": pps,
-                "byte_count_per_second":  float(flow_stats.get("byte_count_per_second", 0.0)),
-                "packet_count":           float(flow_stats.get("packet_count", 0.0)),
-                "byte_count":             float(flow_stats.get("byte_count", 0.0)),
-                "ip_proto":               int(flow_stats.get("ip_proto", 0)),
-                "_ts":                    time.monotonic(),
-            })
-
-        # Update per-IP TEA profile for small-attacker detection
-        if src_ip not in _WHITELIST_IPS:
-            entropy_analyzer.update_ip(src_ip, pps, float(flow_stats.get("byte_count_per_second", 0.0)))
-
-        # Update raw total for UI
-        with _raw_lock:
-            _raw_total_pkts += delta_pkts
-
-        # Accumulate total PPS from flow pps (already calculated by Ryu)
-        with _pps_lock:
-            global _total_pps
-            _total_pps += pps
-
-        # --- ML OFF - skip TEA and ML inference, count packet directly ---
-        # Calls on_result() directly so dashboard counters still update.
-        if not ML_ENABLED:
-            try:
-                from backend.pipeline.decision_engine import on_result
-                on_result(src_ip, 0.0, False, "Normal", 0.0,
-                          flow_stats=flow_stats, switch_stats=switch_stats,
-                          timed_out=False)
-            except Exception:
-                pass
-            return
-
-        # Gate check, only skip truly dead flows. TEA and flood
-        # prefilter handle anomaly gating dynamically, no hardcoded MIN_PPS.
-        switch_delta_pps = float(flow_stats.get("switch_delta_pps", 0.0))
-
-        if pkt_count_cumulative < 1:
-            return
-
-        # Tiered banned-IP handling (Fix3 - reduce GIL waste):
-        #   phase 0/1 (normal/learning): full pipeline (TEA + IF/RF)
-        #   phase 2   (time ban):        TEA evidence refresh only, no IF/RF.
-        #                                 Worker rechecks every 10s via
-        #                                 time_in_phase_sec() % 10 window.
-        #   phase 3   (blackhole):       traffic dropped at switch; skip
-        #                                 submission entirely (0 GIL cost).
-        _ip_phase = 0
-        try:
-            from backend.mitigation.state_machine import state_machine as _sm
-            _ip_state = _sm.get_state(src_ip)
-            if _ip_state is not None:
-                _ip_phase = _ip_state.phase
-        except Exception:
-            pass
-
-        if _ip_phase == 3:
-            # Blackhole: traffic is dropped at the OVS switch.
-            # No flow_stats should arrive, but if they do, skip entirely.
-            return
-
-        if _ip_phase == 2:
-            # Time ban: refresh TEA evidence (pps, confidence) for the
-            # ban-expiry safety net, but skip expensive IF/RF inference.
-            # Worker rechecks every 10s via time_in_phase_sec() % 10.
-            flow_stats.pop("tea_eval_seq", None)
-            flow_stats["tea_attack_pattern"] = False
-            flow_stats["tea_flash_crowd"]    = False
-            flow_stats["tea_confidence"]     = "low"
-            flow_stats["tea_is_learned"]     = False
-            flow_stats["tea_size_var"]       = 0.0
-            flow_stats["tea_intensity_var"]  = 0.0
-            switch_stats["dpid"] = dpid
-            worker.submit(src_ip, flow_stats, switch_stats)
-            return
-
-        # TEA gate, snapshot the switch buffer and run entropy analysis.
-        with _switch_flows_lock:
-            switch_flow_list = list(_switch_flows.get(dpid, []))
-            if dpid in _switch_flows:
-                _switch_flows[dpid] = []
-
-        tea_result = entropy_analyzer.update(dpid, switch_flow_list)
-
-        # No pre-ML gate. Every interval reaches IF/RF now, mitigation
-        # gating happens later in decision_engine.should_mitigate().
-
-        # Attach TEA result to flow_stats so decision_engine can gate mitigation
-        # and log it
-        flow_stats["tea_attack_pattern"] = tea_result["is_attack_pattern"]
-        flow_stats["tea_flash_crowd"]    = tea_result["is_flash_crowd"]
-        flow_stats["tea_confidence"]     = tea_result["confidence"]
-        flow_stats["tea_is_learned"]     = tea_result["is_learned"]
-        flow_stats["tea_size_var"]       = tea_result["size_var"]
-        flow_stats["tea_intensity_var"]  = tea_result["intensity_var"]
-        # Interval sequence number: lets worker-side feedback_tea dedup the
-        # cached verdict shared by every flow inside one eval window.
-        flow_stats["tea_eval_seq"]       = tea_result.get("eval_seq")
-        # Flash crowd guidance for IF scoring (Phase 4)
-        flow_stats["tea_flash_crowd_guidance"] = entropy_analyzer.get_flash_crowd_guidance()
-
-        # Check per-IP verdict for small attackers. Only once the global
-        # baseline is learned: during warmup a per-IP 'attack' is shadow-logged
-        # but never acts, so no verdict exists without a calibrated baseline.
-        ip_verdict = entropy_analyzer.get_ip_verdict(src_ip)
-        if ip_verdict == "attack":
-            # Only override if global TEA also shows anomaly to reduce FPs
-            if tea_result["is_learned"] and (
-                tea_result["is_attack_pattern"]
-                or tea_result.get("mahalanobis_distance", 0) > 3.0
-            ):
-                flow_stats["tea_attack_pattern"] = True
-                flow_stats["tea_confidence"] = "moderate"
-                log.info("TEA per-IP attack detected: %s", src_ip)
-            else:
-                log.debug("TEA per-IP shadow observation (learning): %s", src_ip)
-
-        # Pass dpid so decision_engine can feed IF result back to TEA
-        switch_stats["dpid"] = dpid
-        worker.submit(src_ip, flow_stats, switch_stats)
+        _handle_flow_stats(msg)
 
 
 # Evict per-switch flow entries older than one poll cycle (older than 1s).

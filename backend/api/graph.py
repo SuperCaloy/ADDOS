@@ -1,3 +1,6 @@
+# Historical traffic rate time series endpoints for dashboard chart visualization.
+# Buckets packet counts across requested time ranges into evenly spaced intervals.
+
 import time
 import datetime
 from flask import Blueprint, jsonify, request
@@ -24,6 +27,8 @@ _BACKEND_START = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 @bp.get("/api/graph_history")
 def graph_history():
+    # Returns aggregated packet arrival, drop, and pass time series for frontend charts.
+    # Supports 1hr, 12hr, 24hr, and session time windows.
     range_key = request.args.get("range", "1hr")
 
     now_dt = datetime.datetime.now()
@@ -53,7 +58,8 @@ def _bucket_rows(rows: list[dict],
                  start_dt: datetime.datetime,
                  end_dt: datetime.datetime,
                  n_buckets: int) -> list[dict]:
-    """Aggregate rows into n_buckets evenly-spaced time intervals."""
+    # Aggregates raw traffic rows into n_buckets evenly spaced time intervals.
+    # Accumulates incoming, blocked, and forwarded packet metrics per interval bucket.
     total_seconds = max((end_dt - start_dt).total_seconds(), 1)
     bucket_size_s = total_seconds / n_buckets
 

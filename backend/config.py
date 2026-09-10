@@ -1,3 +1,6 @@
+# Central configuration and runtime threshold parameters for backend services.
+# Defines file paths, network endpoints, buffer limits, and machine learning thresholds.
+
 import os
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -16,8 +19,8 @@ RF_SCALER_PATH   = os.path.join(RF_DIR, "scaler.pkl")
 RF_CONTRACT_PATH = os.path.join(RF_DIR, "rf_feature_contract.json")
 RF_ENCODER_PATH  = os.path.join(RF_DIR, "label_encoder.pkl")
 
-# -- Database ---------------------------------------------------------------
-# Resolved via DDOS_DB_PATH, marker file, or default logs/ddos.db.
+# -- Database resolution ----------------------------------------------------
+# Resolves SQLite path from DDOS_DB_PATH env var, target marker file, or logs/ddos.db.
 MARKER_PATH = (os.environ.get("DDOS_DB_MARKER")
                or os.path.join(_ROOT, "benchmark", "DB_TARGET"))
 

@@ -1,3 +1,5 @@
+# Traffic Entropy Analyzer (TEA) for behavioral baseline learning and drift detection.
+# Tracks packet size variance, flow intensity variance, and protocol entropy over time windows.
 import math
 import time
 import threading
@@ -18,9 +20,6 @@ from backend.config import (
     TEA_RELEARN_ALPHA,
     TEA_RELEARN_STABLE_INTERVALS,
     TEA_RELEARN_MIN_CONFIDENCE,
-    TEA_RELEARN_MAX_IF_ANOMALY_RATE,
-    TEA_RELEARN_MAX_CUMULATIVE_DRIFT,
-    TEA_RELEARN_BASELINE_DISTANCE_MAX,
     TEA_IDLE_UNLOCK_S,
     TEA_IP_PROFILE_TTL_S,
     TEA_LATCH_MAX_HOLD_S,
@@ -743,17 +742,8 @@ class EntropyAnalyzer:
                 pps_z = pps_base.z_score(curr["mean_pps"])
                 pps_surge = pps_base.is_high(curr["mean_pps"], _cfg.TEA_PPS_SURGE_SIGMA)
 
-                # Option C: sustained extreme-z while latched means the
-                # baseline itself is wrong (idle cold start, regime change),
-                # not that traffic is anomalous. Wipe and recalibrate. The
-                # IF anomaly-rate gate blocks the restart during a real
-                # flood: otherwise a sustained low-rate attack could get the
-                # fresh baseline calibrated at attack scale.
-                #
-                # FIX: During an active attack, extreme z-scores are EXPECTED
-                # (attack traffic differs from baseline). Never wipe baselines
-                # mid-attack. After the attack ends, the supervised relearning
-                # path handles baseline recalibration if needed.
+                # Sustained extreme z-scores outside active attacks indicate baseline regime change.
+                # Extreme z-scores during active attacks are expected, so recalibration waits until attack ends.
                 if self._attack_latched:
                     # During attack: always reset streak. Extreme z-scores are
                     # expected and NOT a sign of miscalibrated baselines.
@@ -823,10 +813,7 @@ class EntropyAnalyzer:
         else:
             self._multi_dim_streak = 0
         # Flash crowd: high volume + no collapse + not mechanized.
-        # NOTE: proto_surge removed - baseline traffic already uses diverse
-        # protocols (TCP/UDP/ICMP), so flash crowd proto entropy is similar
-        # to baseline. mechanized_cluster already distinguishes crowds from
-        # uniform attacks.
+        # Mechanized clustering distinguishes flash crowds from uniform distributed attacks.
         is_flash_crowd = (
             volume_anomaly
             and not collapse_anomaly
@@ -862,11 +849,8 @@ class EntropyAnalyzer:
             else:
                 confidence = "moderate"  # Single dimension fired
 
-        # Supervised relearning (P2): a stable TEA-side "new normal" force-learns
-        # the frozen baselines without IF confirmation (REG-1 caps drift and excludes
-        # high-confidence snapshots so attack-scale data can't poison baselines).
-        # IF anomaly rate gate removed for latched recovery: frozen baselines
-        # produce false IF anomalies, creating a vicious cycle (AWS: "Post-Attack Tuning").
+        # Supervised relearning: stable normal intervals allow frozen baselines to update.
+        # Limits drift rate to prevent high-confidence attack snapshots from corrupting baselines.
         if not degenerate:
             with self._lock:
                 supervised = (

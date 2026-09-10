@@ -1,3 +1,6 @@
+# Observability background reporter for backend pipeline latency and worker health.
+# Periodically gathers queue depths, drop counters, and detection latency percentiles.
+
 import logging
 import threading
 import time
@@ -9,6 +12,8 @@ log = logging.getLogger(__name__)
 
 
 def build_snapshot() -> dict:
+    # Assembles a comprehensive health snapshot across pipeline worker stages.
+    # Returns dictionary containing queue depth, latency percentiles, and stage drop metrics.
     return {
         "detection_ms": decision_engine.latency_percentiles(),
         "queue_depth": worker.get_queue_depth(),
@@ -21,6 +26,8 @@ def build_snapshot() -> dict:
 
 
 def _loop(interval_s: float) -> None:
+    # Periodic background worker loop collecting and persisting observability snapshots.
+    # Logs summary statistics and commits snapshots to database storage.
     while True:
         time.sleep(interval_s)
         try:
@@ -39,6 +46,8 @@ def _loop(interval_s: float) -> None:
 
 
 def start(interval_s: float = 10.0) -> None:
+    # Launches the background observability daemon thread with the specified interval.
+    # Enables non-blocking periodic instrumentation reporting.
     t = threading.Thread(target=_loop, args=(interval_s,),
                          name="observability", daemon=True)
     t.start()

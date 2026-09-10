@@ -1,3 +1,5 @@
+# Sinkhole deception module for observing uncertain traffic flows.
+# Routes uncertain traffic to a silent sinkhole host and evaluates whether to escalate or release.
 import time
 import threading
 import logging
@@ -12,7 +14,7 @@ from backend.mitigation.state_machine import _build_mitigation_event
 
 log = logging.getLogger(__name__)
 
-# -- Configuration ----------------------------------------------------------
+# Configuration
 # Silent dummy host, must match h27 in topology.py.
 SINKHOLE_IP = "10.0.0.27"
 
@@ -61,7 +63,7 @@ class DeceptionModule:
         self._escalate_callback = escalate_fn
         self._release_callback  = release_fn
 
-    # -- Public ---------------------------------------------------------
+    # Public methods
 
     def enter_sinkhole(self, src_ip: str, attack_vector: str,
                        if_score: float, confidence: float) -> bool:
@@ -81,7 +83,7 @@ class DeceptionModule:
 
         self._push_redirect(src_ip)
 
-        log.info("Deception: sinkhole -- %s  vector=%s  conf=%.2f  observe=%ds  ->%s",
+        log.info("Deception: sinkhole: %s  vector=%s  conf=%.2f  observe=%ds  ->%s",
                  src_ip, attack_vector, confidence, SINKHOLE_OBSERVE_SECONDS, SINKHOLE_IP)
 
         writer.log_mitigation_event(_build_mitigation_event(
@@ -163,7 +165,7 @@ class DeceptionModule:
             log.info("Deception: emergency cleared %d sinkhole entries", len(sinkhole_ips))
         return len(sinkhole_ips)
 
-    # -- Tick -----------------------------------------------------------
+    # Tick and evaluation logic
 
     def tick(self) -> None:
         # Called every second by the tick thread; processes entries whose observation window completed.
@@ -218,7 +220,7 @@ class DeceptionModule:
             if self._release_callback:
                 self._release_callback(src_ip)
 
-    # -- Internal -------------------------------------------------------
+    # Internal helpers
 
     def _push_redirect(self, src_ip: str) -> None:
         if self._commander:

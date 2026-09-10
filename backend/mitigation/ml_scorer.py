@@ -1,3 +1,6 @@
+# Machine learning scoring helper for attacker ranking and triage.
+# Evaluates active flow tracker entries against behavioral and anomaly thresholds.
+
 import logging
 from backend.mitigation.behavioral import get_decay_score
 from backend.pipeline.flow_tracker import tracker
@@ -6,15 +9,8 @@ log = logging.getLogger(__name__)
 
 
 def get_top_attacker_ips(n: int = 10) -> list[str]:
-    """Query ML pipeline for top-N attacker IPs using OR logic.
-
-    Detection triggers if ANY of these are true:
-    - IF score > 0.7 (new attacker, no history needed)
-    - Decay score > 0.5 (repeat offender, normalized from 0-10 scale)
-    - Combined score > 0.5 (both moderate)
-
-    Normal traffic (IF < 0.3 AND decay < 0.2) is explicitly excluded.
-    """
+    # Identifies the highest-risk attacking IPs based on Isolation Forest and behavioral decay scores.
+    # Returns up to n sorted IP addresses prioritized for mitigation enforcement.
     attackers = {}
     for src_ip, entry in tracker._cache.items():
         if not entry.is_valid():

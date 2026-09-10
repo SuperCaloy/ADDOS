@@ -26,6 +26,7 @@ def _mock_topo(calls, advance=None):
     topo.start_icmp_flood_campaign.side_effect = lambda: calls.append("icmp")
     topo.start_udp_flood_campaign.side_effect = lambda: calls.append("udp")
     topo.start_mixed_campaign.side_effect = lambda: calls.append("mixed")
+    topo.flash_crowd.side_effect = lambda **kw: calls.append("flash_crowd")
     topo.stop_all_attacks.side_effect = lambda: calls.append("stop")
     if advance:
         topo.start_udp_flood_campaign.side_effect = advance
@@ -53,7 +54,8 @@ def test_timetable_totals_300s_with_fixed_bounds():
     assert last_start + last_dur == 300
     kinds = [(k, a) for _, k, a, _ in b._PHASES_300]
     assert kinds == [("benign", None), ("wave", "syn"), ("wave", "udp"),
-                     ("wave", "icmp"), ("quiet", None), ("wave", "mixed")]
+                     ("wave", "icmp"), ("quiet", None), ("flash_crowd", None),
+                     ("wave", "mixed")]
 
 
 def test_schedule_fires_expected_campaigns_in_order(tmp_path, monkeypatch,
@@ -64,8 +66,8 @@ def test_schedule_fires_expected_campaigns_in_order(tmp_path, monkeypatch,
     monkeypatch.setattr(b, "_clean_poll_gate", lambda topo, limit: None)
     _run_one(b, topo, tmp_path, monkeypatch)
     # expected sequence of wave starts, in order
-    waves = [c for c in calls if c in ("syn", "icmp", "udp", "mixed")]
-    assert waves == ["syn", "udp", "icmp", "mixed"], waves
+    waves = [c for c in calls if c in ("syn", "icmp", "udp", "flash_crowd", "mixed")]
+    assert waves == ["syn", "udp", "icmp", "flash_crowd", "mixed"], waves
     # stop called on the quiet window AND unconditionally at the end
     assert calls.count("stop") >= 2, calls
     assert calls[-1] == "stop"
@@ -80,17 +82,18 @@ def test_run_prints_per_step_progress_lines(capsys, tmp_path, monkeypatch,
     monkeypatch.setattr(b, "_clean_poll_gate", lambda topo, limit: None)
     _run_one(b, topo, tmp_path, monkeypatch)
     out = capsys.readouterr().out
-    steps = re.findall(r"step (\d+)/6", out)
+    steps = re.findall(r"step (\d+)/7", out)
     # every step appears twice: the start line and the "(still on)" echo
-    assert steps == [str(n) for n in range(1, 7) for _ in range(2)], steps
-    assert out.count("still on") == 6, out.count("still on")
+    assert steps == [str(n) for n in range(1, 8) for _ in range(2)], steps
+    assert out.count("still on") == 7, out.count("still on")
     # every line carries the eval-clock stamp of its phase start (MM:SS)
     assert "T+00:00/05:00" in out
     assert "T+02:00/05:00" in out
     assert "T+04:00/05:00" in out
+    assert "T+04:30/05:00" in out
     # wave and phase labels are human readable and in timeline order
     labels = ["benign baseline", "SYN wave", "UDP wave", "ICMP wave",
-              "quiet window", "mixed wave"]
+              "quiet window", "flash crowd", "mixed wave"]
     pos = [out.index(lbl) for lbl in labels]
     assert pos == sorted(pos), list(zip(labels, pos))
     # teardown line tells the operator the run ended and reset ran

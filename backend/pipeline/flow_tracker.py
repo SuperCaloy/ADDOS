@@ -1,3 +1,6 @@
+# Flow tracker maintaining live flow entries and short-term inference caches.
+# Bounded LRU-style structure preventing unbounded memory growth during high-rate events.
+
 import time
 import threading
 from collections import OrderedDict
@@ -72,7 +75,7 @@ class FlowTracker:
             return len(self._flows)
 
     # ------------------------------------------------------------------
-    # Inference cache -- H6: all operations now lock-protected
+    # Inference cache: thread-safe access to cached predictions
     # ------------------------------------------------------------------
 
     def get_cached(self, src_ip: str) -> InferenceCacheEntry | None:

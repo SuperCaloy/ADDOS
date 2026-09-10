@@ -1,3 +1,5 @@
+# IP detailed forensics and feature inspection API blueprint.
+# Assembles real-time and historical flow metrics, TEA profiles, and mitigation phases for an IP.
 import math
 from flask import Blueprint, jsonify
 from backend.pipeline.flow_tracker import tracker
@@ -11,8 +13,7 @@ bp = Blueprint("ip_detail", __name__)
 
 _PHASE_TO_ID = {label: pid for pid, label in PHASE_LABELS.items()}
 
-
-# -- Helpers --------------------------------------------------------------------
+# Helper functions
 
 def _read_tea_profile(src_ip: str) -> tuple[str, int, float, float]:
     tea_verdict = "uncertain"
@@ -43,90 +44,104 @@ def _is_active(src_ip: str) -> bool:
         return False
 
 
+def _calc_derived_features(stats: dict) -> dict:
+    # Computes derived mathematical signals from raw flow packet and byte telemetry.
+    # Returns normalized metrics for packet size uniformity, port entropy, and intensities.
+    raw_pkts = stats.get("packet_count", 0) or 0
+    pkt_count = max(int(raw_pkts), 1)
+    byte_count = stats.get("byte_count", 0) or 0
+    pps = stats.get("packet_count_per_second", 0) or 0
+    byte_rate = float(stats.get("byte_count_per_second", 0) or 0)
+    duration = stats.get("flow_duration_sec", 0) or 0
+
+    bytes_per_packet = stats.get("bytes_per_packet")
+    if bytes_per_packet is None:
+        bytes_per_packet = round(byte_count / pkt_count, 1)
+
+    pkt_size_uniformity = round(math.log1p(max(bytes_per_packet / (byte_rate + 1), 0)), 4)
+
+    tp_src = float(stats.get("tp_src", 0) or 0)
+    tp_dst = float(stats.get("tp_dst", 0) or 0)
+    port_entropy = round(tp_src / (tp_dst + 1), 4)
+
+    pkt_byte_rate_ratio = round((pps or 0) / (byte_rate or 1), 4)
+    flow_intensity = round(math.log1p(max(raw_pkts * byte_rate, 0)), 4)
+    bytes_per_duration = round(byte_count / max(duration or 1, 1), 4)
+    flow_src_intensity = round(math.log1p(max(raw_pkts * pps, 0)), 4)
+
+    return {
+        "bytes_per_packet": bytes_per_packet,
+        "pkt_size_uniformity": pkt_size_uniformity,
+        "port_entropy": port_entropy,
+        "pkt_byte_rate_ratio": pkt_byte_rate_ratio,
+        "flow_intensity": flow_intensity,
+        "bytes_per_duration": bytes_per_duration,
+        "flow_src_intensity": flow_src_intensity,
+        "tp_src": tp_src,
+        "tp_dst": tp_dst,
+    }
+
+
 def _build_live_features(src_ip: str) -> dict | None:
     # Pull real-time features from flow tracker + inference cache.
     # Returns None if either is missing (stale = treat as inactive).
-    flow   = tracker.get_flow(src_ip)
+    flow = tracker.get_flow(src_ip)
     cached = tracker.get_cached(src_ip)
     if not flow or not cached:
         return None
 
-    fs        = flow.flow_stats or {}
-    pkt_count = max(int(fs.get("packet_count", 0)), 1)
-
-    # ICMP signal: average packet size
-    byte_count        = fs.get("byte_count", 0)
-    byte_rate         = fs.get("byte_count_per_second", 0)
-    bytes_per_packet  = round(byte_count / pkt_count, 1)
-
-    # SYN signal: packet size uniformity (matches IF model feature)
-    # SYN packets are near-identical size (handshake only, no payload)
-    pkt_size_uniformity = round(math.log1p(max(bytes_per_packet / (byte_rate + 1), 0)), 4)
-
-    # UDP signal: source port spread vs dest port (matches IF model feature)
-    tp_src        = float(fs.get("tp_src", 0))
-    tp_dst        = float(fs.get("tp_dst", 0))
-    port_entropy  = round(tp_src / (tp_dst + 1), 4)
+    fs = flow.flow_stats or {}
+    derived = _calc_derived_features(fs)
 
     # Pull live phase/priority from state machine (locked accessor, copy)
-    state    = state_machine.get_state(src_ip)
-    phase    = state.phase        if state else 0
-    priority = state.priority     if state else "--"
-    action   = state.action_taken if state else "--"
+    state = state_machine.get_state(src_ip)
+    phase = state.phase if state else 0
+    priority = state.priority if state else "--"
+    action = state.action_taken if state else "--"
 
     # TEA per-IP profile
     tea_verdict, tea_samples, tea_pps_trend, tea_entropy = _read_tea_profile(src_ip)
 
-    # Expert trace feature fields (from IF/RF feature contracts)
-    flow_count_per_src = fs.get("flow_count_per_src", 0)
-    tp_src        = float(fs.get("tp_src", 0))
-    tp_dst        = float(fs.get("tp_dst", 0))
-    ip_proto      = float(fs.get("ip_proto", 0))
-    pkt_byte_rate_ratio = round((fs.get("packet_count_per_second", 0) or 0) / (fs.get("byte_count_per_second", 1) or 1), 4)
-    flow_intensity = round(math.log1p(max((fs.get("packet_count", 0) or 0) * (fs.get("byte_count_per_second", 0) or 0), 0)), 4)
-    bytes_per_duration = round((fs.get("byte_count", 0) or 0) / max(fs.get("flow_duration_sec", 1) or 1, 1), 4)
-    flow_src_intensity = round(math.log1p(max((fs.get("packet_count", 0) or 0) * (fs.get("packet_count_per_second", 0) or 0), 0)), 4)
-
     return {
-        "src_ip":   src_ip,
-        "is_live":  True,
+        "src_ip": src_ip,
+        "is_live": True,
         "features": {
-            "pkt_count":     fs.get("packet_count", 0),
-            "byte_count":    fs.get("byte_count", 0),
-            "pps":           fs.get("packet_count_per_second", 0),
-            "byte_rate":     fs.get("byte_count_per_second", 0),
-            "active_flows":  tracker.active_count(),
-            "duration_sec":  fs.get("flow_duration_sec", 0),
-            "bytes_per_packet":    bytes_per_packet,
-            "port_entropy":        port_entropy,
-            "pkt_size_uniformity": pkt_size_uniformity,
+            "pkt_count": fs.get("packet_count", 0),
+            "byte_count": fs.get("byte_count", 0),
+            "pps": fs.get("packet_count_per_second", 0),
+            "byte_rate": fs.get("byte_count_per_second", 0),
+            "active_flows": tracker.active_count(),
+            "duration_sec": fs.get("flow_duration_sec", 0),
+            "bytes_per_packet": derived["bytes_per_packet"],
+            "port_entropy": derived["port_entropy"],
+            "pkt_size_uniformity": derived["pkt_size_uniformity"],
             # Expert trace fields
-            "flow_count_per_src": flow_count_per_src,
-            "tp_src":        tp_src,
-            "tp_dst":        tp_dst,
-            "ip_proto":      ip_proto,
-            "pkt_byte_rate_ratio": pkt_byte_rate_ratio,
-            "flow_intensity": flow_intensity,
-            "bytes_per_duration": bytes_per_duration,
-            "flow_src_intensity": flow_src_intensity,
+            "flow_count_per_src": fs.get("flow_count_per_src", 0),
+            "tp_src": derived["tp_src"],
+            "tp_dst": derived["tp_dst"],
+            "ip_proto": float(fs.get("ip_proto", 0)),
+            "pkt_byte_rate_ratio": derived["pkt_byte_rate_ratio"],
+            "flow_intensity": derived["flow_intensity"],
+            "bytes_per_duration": derived["bytes_per_duration"],
+            "flow_src_intensity": derived["flow_src_intensity"],
         },
         "ml": {
-            "if_score":     cached.if_score,
-            "is_anomaly":   cached.is_anomaly,
+            "if_score": cached.if_score,
+            "is_anomaly": cached.is_anomaly,
             "attack_class": cached.attack_class,
-            "confidence":   round(cached.confidence * 100, 4),
+            "confidence": round(cached.confidence * 100, 4),
         },
         "state": {
-            "phase":            phase,
-            "phase_label":      state.phase_label() if state else "--",
-            "priority":         priority,
-            "action_taken":     action,
+            "phase": phase,
+            "phase_label": state.phase_label() if state else "--",
+            "priority": priority,
+            "action_taken": action,
 
-            "ban_level":        getattr(state, "ban_level", 0)     if state else 0,
+            "ban_level": getattr(state, "ban_level", 0) if state else 0,
             "reputation_score": behavioral.get_decay_score(src_ip),
-            "offence_count":    behavioral.get_offence_count(src_ip),
-            "first_seen":       state.first_seen if state else None,
-            "last_seen":        None,
+            "offence_count": behavioral.get_offence_count(src_ip),
+            "first_seen": state.first_seen if state else None,
+            "last_seen": None,
         },
         "thresholds": {
             "if_threshold": loader.if_threshold,
@@ -146,7 +161,7 @@ def _build_db_features(src_ip: str) -> dict | None:
     # Pull last-known features from database for released/historical IPs.
     # Returns None if no data exists at all.
 
-    # Most recent mitigation event -- IF score, action, phase
+    # Most recent mitigation event: IF score, action, phase
     ev_rows = query("""
         SELECT timestamp, predicted_class, attack_vector, confidence,
                if_score, phase, priority, action_taken
@@ -165,7 +180,7 @@ def _build_db_features(src_ip: str) -> dict | None:
     if not ev_rows:
         return None
 
-    ev       = ev_rows[0]
+    ev = ev_rows[0]
     if_score = ev.get("if_score") or 0.0
     conf_raw = ev.get("confidence") or 0.0
     conf_pct = round(conf_raw * 100, 1) if conf_raw <= 1.0 else round(conf_raw, 1)
@@ -181,24 +196,9 @@ def _build_db_features(src_ip: str) -> dict | None:
         ORDER BY timestamp DESC LIMIT 1
     """, (src_ip,))
     feat = feat_rows[0] if feat_rows else {}
+    derived = _calc_derived_features(feat)
 
-    pkt_count = max(int(feat.get("packet_count", 0) or 0), 1)
-    byte_rate = float(feat.get("byte_count_per_second", 0) or 0)
-
-    # ICMP signal: average packet size (use stored value, fallback to calc)
-    bytes_per_packet = feat.get("bytes_per_packet")
-    if bytes_per_packet is None:
-        bytes_per_packet = round((feat.get("byte_count", 0) or 0) / pkt_count, 1)
-
-    # SYN signal: packet size uniformity (matches IF model feature)
-    pkt_size_uniformity = round(math.log1p(max(bytes_per_packet / (byte_rate + 1), 0)), 4)
-
-    # UDP signal: source port spread vs dest port
-    tp_src       = float(feat.get("tp_src", 0) or 0)
-    tp_dst       = float(feat.get("tp_dst", 0) or 0)
-    port_entropy = round(tp_src / (tp_dst + 1), 4)
-
-    # ip_attack_history -- offence/ban/phase metadata
+    # ip_attack_history: offence/ban/phase metadata
     hist = query("""
         SELECT ban_level, phase_reached, first_seen, priority, offence_count, reputation_score
         FROM ip_attack_history
@@ -207,7 +207,7 @@ def _build_db_features(src_ip: str) -> dict | None:
     """, (src_ip,))
     h = hist[0] if hist else {}
 
-    # Phase history -- all distinct phase transitions
+    # Phase history: all distinct phase transitions
     phase_rows = query("""
         SELECT timestamp, phase, action_taken, attack_vector, event_type, reason
         FROM mitigation_events WHERE src_ip = ?
@@ -220,20 +220,20 @@ def _build_db_features(src_ip: str) -> dict | None:
             ORDER BY timestamp ASC
         """, (src_ip,))
 
-    # Deduplicate phase transitions -- keep first per (phase, action) pair
-    seen   = set()
+    # Deduplicate phase transitions: keep first per (phase, action) pair
+    seen = set()
     phases = []
     for pr in phase_rows:
         key = (pr.get("phase"), pr.get("action_taken"))
         if key not in seen:
             seen.add(key)
             phases.append({
-                "timestamp":     pr.get("timestamp"),
-                "phase":         pr.get("phase") or 0,
-                "action_taken":  pr.get("action_taken") or "--",
+                "timestamp": pr.get("timestamp"),
+                "phase": pr.get("phase") or 0,
+                "action_taken": pr.get("action_taken") or "--",
                 "attack_vector": pr.get("attack_vector") or "--",
-                "event_type":    pr.get("event_type"),
-                "reason":        pr.get("reason"),
+                "event_type": pr.get("event_type"),
+                "reason": pr.get("reason"),
             })
 
     # TEA per-IP profile
@@ -243,26 +243,26 @@ def _build_db_features(src_ip: str) -> dict | None:
     db_phase = _PHASE_TO_ID.get(ev.get("phase") or h.get("phase_reached"), 0)
 
     return {
-        "src_ip":   src_ip,
-        "is_live":  _is_active(src_ip),
+        "src_ip": src_ip,
+        "is_live": _is_active(src_ip),
         "features": {
-            "pkt_count":     feat.get("packet_count", 0) or 0,
-            "byte_count":    feat.get("byte_count", 0) or 0,
-            "pps":           feat.get("packet_count_per_second", 0) or 0,
-            "byte_rate":     feat.get("byte_count_per_second", 0) or 0,
-            "bytes_per_packet":    bytes_per_packet,
-            "port_entropy":        port_entropy,
-            "pkt_size_uniformity": pkt_size_uniformity,
-            "duration_sec":  feat.get("flow_duration_sec", 0) or 0,
+            "pkt_count": feat.get("packet_count", 0) or 0,
+            "byte_count": feat.get("byte_count", 0) or 0,
+            "pps": feat.get("packet_count_per_second", 0) or 0,
+            "byte_rate": feat.get("byte_count_per_second", 0) or 0,
+            "bytes_per_packet": derived["bytes_per_packet"],
+            "port_entropy": derived["port_entropy"],
+            "pkt_size_uniformity": derived["pkt_size_uniformity"],
+            "duration_sec": feat.get("flow_duration_sec", 0) or 0,
             # Expert trace fields
             "flow_count_per_src": feat.get("flow_count_per_src", 0) or 0,
-            "tp_src":        tp_src,
-            "tp_dst":        tp_dst,
-            "ip_proto":      feat.get("ip_proto", 0) or 0,
-            "pkt_byte_rate_ratio": round(feat.get("packet_count_per_second", 0) / (feat.get("byte_count_per_second", 1) or 1), 4) if feat.get("packet_count_per_second") is not None else 0.0,
-            "flow_intensity": round(math.log1p(max((feat.get("packet_count", 0) or 0) * (feat.get("byte_count_per_second", 0) or 0), 0)), 4),
-            "bytes_per_duration": round((feat.get("byte_count", 0) or 0) / max(feat.get("flow_duration_sec", 1) or 1, 1), 4),
-            "flow_src_intensity": round(math.log1p(max((feat.get("packet_count", 0) or 0) * (feat.get("packet_count_per_second", 0) or 0), 0)), 4),
+            "tp_src": derived["tp_src"],
+            "tp_dst": derived["tp_dst"],
+            "ip_proto": feat.get("ip_proto", 0) or 0,
+            "pkt_byte_rate_ratio": derived["pkt_byte_rate_ratio"],
+            "flow_intensity": derived["flow_intensity"],
+            "bytes_per_duration": derived["bytes_per_duration"],
+            "flow_src_intensity": derived["flow_src_intensity"],
         },
         "ml": {
             "if_score":     if_score,
@@ -295,11 +295,11 @@ def _build_db_features(src_ip: str) -> dict | None:
     }
 
 
-# -- Endpoints ------------------------------------------------------------------
+# Endpoints
 
 @bp.get("/api/ip_detail/<path:src_ip>/live")
 def ip_detail_live(src_ip: str):
-    # Real-time endpoint -- only works for currently active IPs.
+    # Real-time endpoint: only works for currently active IPs.
     # Called by ip-drawer.js every 2s when drawer is open and IP is active.
     # Returns 404 if IP is no longer in state machine so drawer stops polling.
     src_ip = src_ip.strip()
@@ -315,11 +315,11 @@ def ip_detail_live(src_ip: str):
 
 @bp.get("/api/ip_detail/<path:src_ip>")
 def ip_detail(src_ip: str):
-    # Full detail endpoint -- live if active, DB fallback if not.
+    # Full detail endpoint: live if active, DB fallback if not.
     # is_live flag in response tells drawer whether to start polling.
     src_ip = src_ip.strip()
 
-    # Try live first regardless of state machine -- tracker may have fresh data
+    # Try live first regardless of state machine: tracker may have fresh data
     if _is_active(src_ip):
         data = _build_live_features(src_ip)
         if data:

@@ -1,3 +1,5 @@
+# Asynchronous pipeline worker for feature extraction, model inference, and event dispatch.
+# Manages priority queues, batch aggregation, and telemetry callbacks.
 import queue
 import threading
 import time
@@ -115,7 +117,7 @@ _FEEDBACK_FLUSH_INTERVAL_S = 0.1  # 100ms
 _FEEDBACK_MAX_BATCH = 50
 
 
-# --- Service-time EMA (S7) ---
+# Service-time EMA (S7)
 # Per-origin EMA over full-inference samples only; skip/cached/low-rate
 # branches never update it, so it tracks real occupancy for deadline admission.
 _svc_ema_lock = threading.Lock()
@@ -376,19 +378,19 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     if not ML_ENABLED:
         return
 
-    # --- Skip invalid/whitelisted IPs ---
+    # Skip invalid or whitelisted IPs
     if not src_ip or src_ip in ("0.0.0.0", ""):
         return
     if src_ip in WHITELIST_IPS:  # {"10.0.0.26", "10.0.0.27"}
         return
 
-    # --- Skip empty flows ---
+    # Skip empty flows
     pkt_count = int(flow_stats.get("packet_count", 0)) if flow_stats else 0
     pps       = float(flow_stats.get("packet_count_per_second", 0.0)) if flow_stats else 0.0
     if pkt_count == 0:
         return
 
-    # --- Flood prefilter check -- was this IP flagged by burst/limit detection ---
+    # Flood prefilter check: was this IP flagged by burst or limit detection
     # IF handles per-host anomaly on its own; only the flood_filter flag matters.
     is_flagged = flood_filter.is_flagged_any(src_ip)
 
@@ -398,11 +400,11 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
     if time.monotonic() - enqueued_at > WORKER_ITEM_TIMEOUT_S:
         if is_flagged:
             if retry_count < _MAX_PRIORITY_RETRIES:
-                log.warning("Worker timeout for %s (flagged) -- priority retry %d", src_ip, retry_count + 1)
+                log.warning("Worker timeout for %s (flagged): priority retry %d", src_ip, retry_count + 1)
                 _requeue_priority(src_ip, flow_stats, switch_stats, retry_count + 1)
             else:
                 _inc_drop("retries_exhausted")
-                log.warning("Worker timeout for %s (flagged) -- retries exhausted, fallback block", src_ip)
+                log.warning("Worker timeout for %s (flagged): retries exhausted, fallback block", src_ip)
                 if _result_callback:
                     try:
                         _result_callback(src_ip, None, None, None, None, timed_out=True)
@@ -410,10 +412,10 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                         log.exception("Worker error in timeout-fallback callback for %s", src_ip)
         else:
             _inc_drop("stale_dropped")
-            log.debug("Worker timeout for %s (not flagged) -- dropped silently", src_ip)
+            log.debug("Worker timeout for %s (not flagged): dropped silently", src_ip)
         return
 
-    # --- Skip young flows -- pps unreliable until flow matures ---
+    # Skip young flows: pps unreliable until flow matures
     # Exemption: flood-prefilter-flagged IPs need immediate action
     flow_dur = float(flow_stats.get("flow_duration_sec", 0)) if flow_stats else 0.0
     if not is_flagged:
@@ -431,7 +433,7 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         except Exception:
             _dynamic_min = 0.05
         if pps < _dynamic_min:
-            # Too slow to be an attack -- count as normal without IF scoring.
+            # Too slow to be an attack: count as normal without IF scoring.
             # Feed the IF streak too, so quiet post-attack traffic doesn't
             # starve the unlock hysteresis.
             _emit_feedback(False, flow_stats)
@@ -445,10 +447,10 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
                     log.exception("Worker error in low-rate callback for %s", src_ip)
             return
 
-    # --- Update Flow Tracker ---
+    # Update Flow Tracker
     tracker.update_flow(src_ip, flow_stats)
 
-    # --- Check inference cache -- reuse fresh result if available ---
+    # Check inference cache: reuse fresh result if available
     cached = tracker.get_cached(src_ip)
     _prior_class = None
     _prior_conf  = 0.0
@@ -458,12 +460,12 @@ def _process_item(priority: int, seq: int, src_ip: str, flow_stats: dict,
         ip_state       = state_machine.get_state(src_ip)
         already_banned = ip_state is not None and ip_state.phase >= 2
 
-        # Re-check banned IPs every 10s -- avoids permanent wrong-class lock
+        # Re-check banned IPs every 10s: avoids permanent wrong-class lock
         _recheck_due = (
             already_banned and ip_state.time_in_phase_sec() % 10 < 1
         )
 
-        # Lock: banned/high-confidence -- skip unless recheck window hit
+        # Lock: banned or high-confidence, skip unless recheck window hit
         is_locked = (
             not _recheck_due and (
                 already_banned or

@@ -1,4 +1,5 @@
-# Dedicated subprocess for IF + RF inference, bypassing the GIL.
+# Dedicated subprocess for isolation forest and random forest inference bypassing the GIL.
+# Runs model loading and batched evaluation in a child process with IPC queues.
 import multiprocessing
 import threading
 import time

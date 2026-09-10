@@ -1,3 +1,5 @@
+# Proactive resource exhaustion protection and adaptive SDN throttling.
+# Monitors controller CPU and memory load, escalating mitigation tiers under severe pressure.
 import time
 import threading
 import logging
@@ -42,6 +44,7 @@ class ResourceGuard:
         self._escalation_tier = 0
         self._installed_ips = []
         self._installed_protos = set()
+        self._min_dwell_polls = MIN_DWELL_POLLS
 
     @property
     def throttle_delay(self) -> float:
@@ -68,7 +71,7 @@ class ResourceGuard:
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="resource-guard", daemon=True)
         self._thread.start()
-        log.info("ResourceGuard started -- poll=%.0fs CPU warn/high/crit/emerg=%.0f/%.0f/%.0f/%.0f%%",
+        log.info("ResourceGuard started: poll=%.0fs CPU warn/high/crit/emerg=%.0f/%.0f/%.0f/%.0f%%",
                  GUARD_POLL_INTERVAL, CPU_WARN, CPU_HIGH, CPU_CRIT, CPU_EMERG)
 
     def stop(self) -> None:
@@ -198,7 +201,7 @@ class ResourceGuard:
             ctrl_mem_pct = min((ctrl_mem_mb / 150.0) * 100.0, 100.0)
             return ctrl_cpu, ctrl_mem_pct
         except Exception as exc:
-            log.warning("ResourceGuard: sample error -- %s", exc)
+            log.warning("ResourceGuard: sample error: %s", exc)
             return 0.0, 0.0
 
 

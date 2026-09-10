@@ -1,3 +1,7 @@
+# Feature engineering utilities for network flow traffic vectors.
+# Computes mathematical ratios and density indicators consumed by machine learning pipelines.
+
+
 def compute_raw_features(
     byte_count: float,
     packet_count: float,
@@ -10,6 +14,8 @@ def compute_raw_features(
     tp_dst: float,
     eps: float = 1e-6,
 ) -> dict:
+    # Derives packet size uniformity, port entropy, and rate ratios from raw flow metrics.
+    # Returns standardized dictionary matching Isolation Forest and Random Forest input contracts.
     bytes_per_packet = byte_count / max(packet_count, 1)
     pkt_byte_rate_ratio = packet_count_per_second / (byte_count_per_second + eps)
     flow_intensity = packet_count * byte_count_per_second

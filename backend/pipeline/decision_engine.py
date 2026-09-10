@@ -1,3 +1,5 @@
+# Real-time traffic analysis, classification routing, and mitigation coordination.
+# Translates inference and TEA entropy outcomes into state machine transitions and telemetry.
 import time
 import logging
 import threading
@@ -177,11 +179,11 @@ _sse_buffer: collections.deque = collections.deque(maxlen=500)
 _sse_dedup: dict = {}
 _SSE_DEDUP_TTL = 5.0
 
-# -- Pending restores - IPs awaiting baseline traffic restart after manual release
+# Pending restores: IPs awaiting baseline traffic restart after manual release
 _restore_lock     = threading.Lock()
 _pending_restores: set[str] = set()
 
-# -- Scan log - rolling buffer of last 200 flow evaluations for /api/debug/flows
+# Scan log: rolling buffer of last 200 flow evaluations for /api/debug/flows
 _scan_lock   = threading.Lock()
 _scan_buffer: collections.deque = collections.deque(maxlen=200)
 
@@ -210,7 +212,7 @@ def get_scan_log() -> list[dict]:
     with _scan_lock:
         return list(_scan_buffer)
 
-# -- Pipeline debug log - rolling buffer of last 200 inference results
+# Pipeline debug log: rolling buffer of last 200 inference results
 # Each entry: {src_ip, pps, if_score, threshold, is_anomaly,
 #              attack_class, confidence, action, ts}
 # Exposed via GET /api/debug so operators can see what the ML pipeline is doing.
@@ -239,10 +241,10 @@ def get_stats() -> dict:
         s = _stats.copy()
     samples = max(s["latency_samples"], 1)
 
-    # real_dropped -- OVS physical drops preferred; fall back to ML-event count
+    # real_dropped: OVS physical drops preferred; fall back to ML-event count
     real_dropped = s["actual_pkts_dropped"] if s["actual_pkts_dropped"] > 0 else s["malicious_dropped"]
 
-    # normal -- dedicated forwarded counter, incremented per normal flow result
+    # normal: dedicated forwarded counter, incremented per normal flow result
     normal = s["normal_forwarded"]
 
     # total = malicious + normal only; raw OVS counts are excluded since they
@@ -259,7 +261,7 @@ def get_stats() -> dict:
     }
 
 
-# -- False-positive handling ----------------------------------------------------
+# False-positive handling
 
 # Manual release of a blocked host (FP); buffers to traffic_summary and queues for restore.
 def record_false_positive(src_ip: str) -> None:
@@ -321,7 +323,7 @@ def _assign_priority(if_score: float, confidence: float,
     )
 
 
-# -- Detection ledger gate: one 'detected' row per phase entry ------------
+# Detection ledger gate: one 'detected' row per phase entry
 # Keyed on IpState.phase_entered (monotonic); repeats within one entry are
 # suppressed, and stale entries are pruned to bound memory under IP churn.
 _DETECTION_LOGGED_MAX = 128
@@ -399,7 +401,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
     with _lock:
         _stats["ml_processed"] += 1
 
-    # -- Debug log: record every inference result ------------------------------
+    # Debug log: record every inference result
     _pps = float((flow_stats or {}).get("packet_count_per_second", 0.0))
 
     # update sinkhole PPS so observation window can escalate/release correctly

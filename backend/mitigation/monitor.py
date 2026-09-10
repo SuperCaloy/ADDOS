@@ -1,3 +1,5 @@
+# Periodic system and SDN controller resource monitoring thread.
+# Samples host and Ryu controller CPU, memory, and packet rates for metrics logging.
 import threading
 import time
 import logging
@@ -17,10 +19,10 @@ _ctrl_procs: list = []
 _ctrl_procs_lock = threading.Lock()
 
 
+# Finds ryu-manager process and all children, returning (cpu_percent, mem_mb).
+# Reuses cached process objects so cpu_percent(interval=None) is accurate.
+# Returns (0.0, 0.0) if not found.
 def _get_ctrl_metrics() -> tuple:
-    """Find ryu-manager process + all children, return (cpu%, mem_mb).
-    Reuses cached process objects so cpu_percent(interval=None) is accurate.
-    Returns (0,0) if not found."""
     global _ctrl_procs
 
     with _ctrl_procs_lock:
@@ -32,7 +34,7 @@ def _get_ctrl_metrics() -> tuple:
                     if 'ryu-manager' in (proc.info['name'] or '') or \
                        any('ryu-manager' in c for c in (proc.info['cmdline'] or [])):
                         _ctrl_procs = [proc] + proc.children(recursive=True)
-                        # Prime cpu_percent on first discovery -- first call returns 0.0
+                        # Prime cpu_percent on first discovery: first call returns 0.0
                         for p in _ctrl_procs:
                             try:
                                 p.cpu_percent(interval=None)
@@ -46,7 +48,7 @@ def _get_ctrl_metrics() -> tuple:
             return (0.0, 0.0)
 
         try:
-            # interval=None uses time elapsed since last call -- accurate when
+            # interval=None uses time elapsed since last call, accurate when
             # called on the same cached objects every ~1s from the monitor loop.
             total_cpu = min(sum(
                 p.cpu_percent(interval=None)
@@ -71,7 +73,7 @@ def start() -> None:
         global _pps_counter
         proc = psutil.Process()
 
-        # --- Prime cpu_percent: first call always returns 0.0 ---
+        # Prime cpu_percent: first call always returns 0.0
         psutil.cpu_percent(interval=None)
         proc.cpu_percent(interval=None)
         _get_ctrl_metrics()
@@ -101,7 +103,7 @@ def start() -> None:
                     pps = _pps_counter / 1.0
                     _pps_counter = 0
 
-                # --- Tag as attack or baseline using live ground truth ---
+                # Tag as attack or baseline using live ground truth
                 try:
                     hping3_running = attack_seen_in_window
 

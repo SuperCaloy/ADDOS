@@ -1,3 +1,5 @@
+# Multi-phase mitigation state machine tracking IP quarantine, rate limiting, and ban transitions.
+# Coordinates with ZmqCommander to push OpenFlow rules to the SDN controller.
 import time
 import datetime
 import threading
@@ -85,7 +87,7 @@ def _build_sse_event(
         "session_id": session_id,
     }
 
-# -- Phase 1 observation durations -----------------------------------------
+# Phase 1 observation durations
 # Strategy 2: Shorter quarantine, longer sinkhole (same for simulation & production)
 PHASE1_DURATION_LOW      = 10.0
 PHASE1_DURATION_MEDIUM   = 10.0
@@ -182,7 +184,7 @@ class StateMachine:
     def set_deception(self, deception_module) -> None:
         self._deception = deception_module
 
-    # -- Startup restore -----------------------------------------------
+    # Startup restore
 
     def restore_from_db(self) -> None:
         rows = writer.load_quarantine_states()
@@ -260,7 +262,7 @@ class StateMachine:
         log.info("Restore complete - %d restored  %d purged  %d TTL-expired",
                  restored, purged, expired)
 
-    # -- Detection entry point -----------------------------------------
+    # Detection entry point
 
     def on_prefilter_trip(self, src_ip: str, correlated: bool) -> str:
         # Fast trigger before IF/RF scoring: correlated (2+ protocols) goes to sinkhole, single to quarantine.
@@ -450,7 +452,7 @@ class StateMachine:
             if state is not None:
                 return state.action_taken
 
-        # -- Post-lock: re-offence routing -----------------------------
+        # Post-lock: re-offence routing
         if _prior_ban > 0:
             self.on_reoffence(
                 src_ip             = src_ip,
@@ -467,7 +469,7 @@ class StateMachine:
 
         return "Unknown"
 
-    # -- Tick: automatic phase progression ---------------------------
+    # Tick: automatic phase progression
 
     def tick(self) -> None:
         now = time.monotonic()
@@ -781,7 +783,7 @@ class StateMachine:
             ), force=True)
         log.info("Cleared: %s  reason=%s", src_ip, reason)
 
-    # -- Re-offence ----------------------------------------------------
+    # Re-offence routing
 
     def on_reoffence(self, src_ip: str, if_score: float,
                      attack_class: str, confidence: float,
@@ -862,7 +864,7 @@ class StateMachine:
                     phase=f"Phase 1 - Re-offence #{state.offence_count}",
                 ))
 
-    # -- Manual operator actions ---------------------------------------
+    # Manual operator actions
 
     def manual_release(self, src_ip: str) -> bool:
         with self._lock:
@@ -1031,7 +1033,7 @@ class StateMachine:
         with self._lock:
             return dict(self._hold_stats)
 
-    # -- API helpers ---------------------------------------------------
+    # API helpers
 
     def get_active_list(self) -> list[dict]:
         with self._lock:
@@ -1043,7 +1045,7 @@ class StateMachine:
         with self._lock:
             return src_ip in self._states
 
-    # -- Locked state accessors ---------------------------------------
+    # Locked state accessors
     # All cross-module reads of _states go through these, returning shallow copies so reads are atomic and live state is never mutated.
 
     def get_state(self, src_ip: str) -> Optional[IpState]:
@@ -1066,7 +1068,7 @@ class StateMachine:
         with self._lock:
             return {ip: replace(s) for ip, s in self._states.items()}
 
-    # -- Internal -----------------------------------------------------
+    # Internal helpers
 
     def _persist(self, state: IpState, block_expires_at: Optional[str] = None) -> None:
         writer.save_quarantine_state(

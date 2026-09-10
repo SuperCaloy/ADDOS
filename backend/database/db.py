@@ -1,3 +1,5 @@
+# SQLite database connection management, schema initialization, and query execution.
+# Provides thread-safe connection pooling, WAL mode configuration, and schema migrations.
 import sqlite3
 import os
 import threading
@@ -183,7 +185,7 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_df_attack_class
             ON detection_features (attack_class);
 
-        -- quarantine_state -- block_expires_at TEXT added for TTL persistence.
+        -- quarantine_state: block_expires_at TEXT added for TTL persistence.
         -- NULL = permanent (manual block). ISO timestamp = auto-block expiry.
         CREATE TABLE IF NOT EXISTS quarantine_state (
             src_ip           TEXT PRIMARY KEY,
@@ -390,9 +392,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             pass
 
 
-# ---------------------------------------------------------------------------
-# C3 fix: atomic transaction context manager
-# ---------------------------------------------------------------------------
+# Atomic transaction context manager
 
 # Context manager for multi-statement atomic transactions.
 @contextmanager

@@ -1,3 +1,5 @@
+# Isolation forest feature extraction, running median tracking, and anomaly inference.
+# Transforms raw flow statistics into 16-feature scaled vectors matching feature contract.
 import math
 import warnings
 import numpy as np
@@ -20,7 +22,7 @@ def _init_median_tracker(n: int) -> None:
 
 
 def _get_local_buffer(n: int):
-    # Per-thread accumulator -- avoids locking on every single flow
+    # Per-thread accumulator: avoids locking on every single flow
     if not hasattr(_thread_local, "sums"):
         _thread_local.sums   = np.zeros(n, dtype=np.float64)
         _thread_local.counts = np.zeros(n, dtype=np.int64)
@@ -53,8 +55,8 @@ def _get_medians() -> np.ndarray:
         return _feature_medians.copy()
 
 
+# Builds shape-(1,16) feature matrix matching feature_contract.json order.
 def extract_if_features(flow_stats: dict) -> np.ndarray:
-    """Build shape-(1,16) feature matrix matching feature_contract.json order."""
     loader.require_loaded()
 
     n = len(loader.if_features)
@@ -64,7 +66,7 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     s   = flow_stats
     eps = 1e-9
 
-    # --- Raw fields ---
+    # Raw fields
     fds  = float(s.get("flow_duration_sec",        0))
     fdns = float(s.get("flow_duration_nsec",       0))
     pkt  = float(s.get("packet_count",             0))
@@ -76,17 +78,17 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
     tpd  = float(s.get("tp_dst",                   0))
     ipr  = float(s.get("ip_proto",                 0))
 
-    # --- Engineered features ---
+    # Engineered features
     pkt_byte_rate_ratio = math.log1p(max(pps / (bps + eps), 0))
     avg_bytes_per_pkt   = byt / (pkt + eps)
     flow_intensity      = math.log1p(max(pkt * bps, 0))          # uses bps, not pps
     port_entropy        = math.log1p(max(tps / (tpd + 1), 0))
     bytes_per_duration  = math.log1p(max(byt / (fds + eps), 0))
-    # eps here, not +1 -- matches training denominator exactly
+    # eps here, not +1: matches training denominator exactly
     pkt_size_uniformity = math.log1p(max(avg_bytes_per_pkt / (bps + eps), 0))
     flow_src_intensity  = math.log1p(max(fcps * pps, 0))
 
-    # --- Build vector in contract order ---
+    # Build vector in contract order
     vec = np.array([
         math.log1p(max(fds,  0)),   # flow_duration_sec
         math.log1p(max(pkt,  0)),   # packet_count
@@ -126,8 +128,8 @@ def extract_if_features(flow_stats: dict) -> np.ndarray:
         return loader.if_quantiler.transform(X_rob)   # shape (1, 16)
 
 
+# Runs batched anomaly scoring over stacked rows, preserving input order.
 def run_if_inference_batch(vecs_scaled: list) -> list[tuple[float, bool]]:
-    """Batch (-score_samples) over stacked rows; preserves input order."""
     loader.require_loaded()
     if not vecs_scaled:
         return []
@@ -137,8 +139,8 @@ def run_if_inference_batch(vecs_scaled: list) -> list[tuple[float, bool]]:
     return [(float(s), bool(s >= loader.if_threshold)) for s in scores]
 
 
+# Evaluates a single scaled feature vector, returning (if_score, is_anomaly).
 def run_if_inference(vec_scaled: np.ndarray) -> tuple[float, bool]:
-    """Return (if_score, is_anomaly)."""
     loader.require_loaded()
     if_score   = float(-loader.if_model.score_samples(vec_scaled)[0])
     is_anomaly = if_score >= loader.if_threshold

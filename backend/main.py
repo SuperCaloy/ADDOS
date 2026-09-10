@@ -1,3 +1,6 @@
+# Flask application factory and service dependency injection coordinator.
+# Boots database connections, loads ML models, wires controllers, and registers API routes.
+
 import logging
 
 from flask import Flask
@@ -11,21 +14,23 @@ log = logging.getLogger(__name__)
 
 
 def create_app() -> Flask:
+    # Initializes and wires all backend components into a cohesive Flask application.
+    # Configures CORS, loads ML contracts, boots telemetry workers, and registers blueprints.
     app = Flask(__name__)
     CORS(app)
 
-    # --- Load all model files and JSON contracts once ---
+    # Load all model files and JSON contracts once
     from backend.models import loader
     loader.load_all()
     log.info("Models loaded. IF threshold=%.6f  RF conf_gate=%.2f",
              loader.if_threshold, loader.rf_conf_gate)
 
-    # --- Initialise database (creates tables if missing) ---
+    # Initialise database connection and schema tables
     from backend.database.db import get_connection
     get_connection()
     log.info("Database ready")
 
-    # --- Wire commander into state machine ---
+    # Wire commander into state machine and deception subsystems
     from backend.mitigation.zmq_commander import commander
     from backend.mitigation.state_machine import state_machine, start_tick_thread
     from backend.mitigation.deception import deception
@@ -33,12 +38,10 @@ def create_app() -> Flask:
 
     state_machine.set_commander(commander)
 
-    # Restore persisted permanent states (BFA-P2): re-issues block/rate_limit
-    # commands for entries that survived a backend restart. Must run after
-    # the commander is wired and before the tick thread starts.
+    # Restore persisted permanent states across backend restarts
     state_machine.restore_from_db()
 
-    # Wire deception module -- must happen before start_tick_thread
+    # Wire deception module callbacks before starting tick thread
     deception.set_commander(commander)
     deception.set_callbacks(
         escalate_fn = lambda src_ip, if_score, attack_vector, confidence: (
@@ -51,32 +54,32 @@ def create_app() -> Flask:
     start_tick_thread()
     log.info("State machine started")
 
-    # Wire resource_guard -- monitors CPU/memory, clears entries under strain
+    # Wire resource guard to monitor memory pressure and throttle queues
     resource_guard.start()
     log.info("Resource guard started")
 
-    # --- Start system monitor (CPU/mem/pps every 5s) ---
+    # Start system monitor polling CPU, memory, and PPS metrics
     from backend.mitigation import monitor
     monitor.start()
 
-    # --- Start pipeline worker + decision engine ---
+    # Start pipeline worker and decision engine
     from backend.pipeline import decision_engine
     decision_engine.start()
 
-    # --- Start observability reporter (percentiles + queue/drop gauges) ---
+    # Start observability reporter for latency percentiles and queues
     from backend.pipeline import observability
     observability.start()
 
-    # --- Start ZMQ telemetry receiver (resilient -- ok if Ryu is offline) ---
+    # Start ZMQ telemetry receiver from Ryu controller
     from backend.transport import zmq_receiver
     zmq_receiver.start()
 
-    # --- Start database summary flush thread ---
+    # Start database summary flush thread
     from backend.database.writer import start_flush_thread, register_exit_flush
     start_flush_thread()
     register_exit_flush()
 
-    # --- Start database archiver (hot -> archive rotation every hour) ---
+    # Start database archiver for hourly history rotation
     from backend.database import archiver
     archiver.start()
 

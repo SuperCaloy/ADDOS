@@ -1,3 +1,6 @@
+# Model loader initializing scikit-learn Isolation Forest and Random Forest pipelines.
+# Deserializes model weights, standard scalers, and feature contracts into memory.
+
 import json
 import threading
 import joblib
@@ -9,7 +12,7 @@ from backend.config import (
 _lock = threading.Lock()
 _loaded = False
 
-# Singletons -- populated once at startup
+# Singletons populated once at application factory startup
 if_model     = None
 if_scaler    = None
 if_quantiler = None
@@ -26,6 +29,8 @@ rf_conf_gate: float    = 0.55
 
 
 def load_all() -> None:
+    # Loads trained machine learning artifacts and JSON feature contracts from disk.
+    # Thread-safe initialization executed once during service factory creation.
     global _loaded
     global if_model, if_scaler, if_quantiler, rf_model, rf_scaler, rf_encoder
     global if_features, if_threshold
@@ -57,5 +62,7 @@ def load_all() -> None:
 
 
 def require_loaded() -> None:
+    # Verifies that models are loaded before inference processing begins.
+    # Raises RuntimeError if accessed prior to calling load_all.
     if not _loaded:
-        raise RuntimeError("Models not loaded -- call loader.load_all() at startup.")
+        raise RuntimeError("Models not loaded: call loader.load_all() at startup.")

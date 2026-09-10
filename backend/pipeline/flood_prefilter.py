@@ -1,3 +1,6 @@
+# Flood pre-filtering subsystem providing real-time sliding window packet arrival tracking.
+# Detects SYN, ICMP, and UDP packet floods before full 1-second flow telemetry polling.
+
 import time
 import threading
 from collections import defaultdict
@@ -11,8 +14,8 @@ import logging
 log = logging.getLogger(__name__)
 
 
-# EWMA-based dynamic threshold for DDoS detection.
 class DynamicThreshold:
+    # EWMA-based dynamic threshold adaptively scaling detection boundaries with baseline traffic.
 
     def __init__(self, alpha: float = 0.1, multiplier: float = 3.0,
                  initial: float = 50.0, floor: float = 25.0):

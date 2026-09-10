@@ -20,12 +20,12 @@ _ALL_VARIANTS = {
     17: ("SYN", "-S -p 443 --flood", 0, 0),
     18: ("SYN", "-S -p 5432 --flood", 0, 0),
     19: ("SYN", "-S -p 8080 --flood", 0, 0),
-    20: ("UDP", "--udp -p 53 --flood --data 1400", 0, 0),
-    21: ("UDP", "--udp -p 123 --flood --data 1400", 0, 0),
-    22: ("UDP", "--udp -p 1900 --flood --data 1400", 0, 0),
-    23: ("ICMP", "--icmp --flood --data 512", 0, 0),
-    24: ("ICMP", "--icmp --flood --data 512", 0, 0),
-    25: ("ICMP", "--icmp --flood --data 512", 0, 0),
+    20: ("UDP", "--udp -p 53 --flood --data 4096", 0, 0),
+    21: ("UDP", "--udp -p 123 --flood --data 2048", 0, 0),
+    22: ("UDP", "--udp -p 1900 --flood --data 1024", 0, 0),
+    23: ("ICMP", "--icmp --flood --data 4096", 0, 0),
+    24: ("ICMP", "--icmp --flood --data 2048", 0, 0),
+    25: ("ICMP", "--icmp --flood --data 1024", 0, 0),
 }
 _ATTACKER_VARIANTS = {n: v for n, v in _ALL_VARIANTS.items() if n in _ATTACKER_NUMS}
 
@@ -44,8 +44,8 @@ _ATTACKER_START_DELAYS = {
 
 _ATTACK_TYPE_FLAGS = {
     "SYN": "-S -p {port} --flood",
-    "UDP": "--udp -p {port} --flood --data 1400",
-    "ICMP": "--icmp --flood --data 512",
+    "UDP": "--udp -p {port} --flood --data 4096",
+    "ICMP": "--icmp --flood --data 2048",
 }
 _ATTACK_TYPE_PORTS = {
     "SYN": [80, 443, 8080, 5432, 3389, 25, 1900],

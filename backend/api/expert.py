@@ -1,3 +1,5 @@
+# Expert telemetry and deep diagnostics API blueprint.
+# Gathers internal pipeline metrics, model inference histograms, TEA baselines, and mitigation states.
 from flask import Blueprint, jsonify
 from backend.pipeline import decision_engine
 from backend.pipeline.entropy_analyzer import entropy_analyzer

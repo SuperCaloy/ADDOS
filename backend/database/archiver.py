@@ -1,3 +1,6 @@
+# Database maintenance daemon archiving historical security events and pruning telemetry tables.
+# Maintains SQLite table performance by migrating aging rows to archive stores.
+
 import time
 import threading
 import logging
@@ -9,8 +12,9 @@ ARCHIVE_AFTER_HOURS = 24
 ARCHIVE_INTERVAL_S  = 3600   # once per hour
 
 
-# Move events older than ARCHIVE_AFTER_HOURS from hot table to archive atomically.
 def _archive_old_events() -> int:
+    # Moves events older than threshold from active mitigation table to archive table.
+    # Executes atomically within a transaction and deletes expired detection features.
     cutoff = time.strftime(
         "%Y-%m-%d %H:%M:%S",
         time.localtime(time.time() - ARCHIVE_AFTER_HOURS * 3600)
@@ -45,7 +49,7 @@ def _archive_old_events() -> int:
             log.info("Archived %d mitigation events (older than %s)",
                      deleted_events, cutoff)
     except Exception:
-        log.exception("Archiver failed -- rolled back")
+        log.exception("Archiver failed: rolled back")
 
     try:
         cur = execute(
@@ -63,6 +67,7 @@ def _archive_old_events() -> int:
 
 
 def _archiver_loop() -> None:
+    # Hourly background loop running database archive routines.
     while True:
         time.sleep(ARCHIVE_INTERVAL_S)
         try:
@@ -72,6 +77,7 @@ def _archiver_loop() -> None:
 
 
 def start() -> None:
+    # Starts the background database archiver daemon thread.
     t = threading.Thread(target=_archiver_loop, name="db-archiver", daemon=True)
     t.start()
     log.info("DB archiver started (interval=%ds, cutoff=%dh)",

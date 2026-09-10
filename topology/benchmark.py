@@ -24,15 +24,16 @@ def _fetch_backend_json(url: str, timeout: float = 2.0) -> dict:
 
 # Absolute 5-minute evaluated timetable (seconds from T_eval_start).
 # One session: 2:00 benign, 0:30 SYN, 0:30 UDP, 0:30 ICMP, 0:30 quiet,
-# 1:00 mixed. Five sessions per command = 25:00 evaluated total.
+# 0:30 flash crowd, 0:30 mixed. Five sessions per command = 25:00 evaluated total.
 _SESSION_S = 300
 _PHASES_300 = [  # (start_s, kind, action, duration_s)
-    (0,   "benign", None,    120),  # T+0:00-2:00 legit hosts only
-    (120, "wave",   "syn",    30),  # T+2:00-2:30 SYN h16-h19
-    (150, "wave",   "udp",    30),  # T+2:30-3:00 UDP h20-h22
-    (180, "wave",   "icmp",   30),  # T+3:00-3:30 ICMP h23-h25
-    (210, "quiet",  None,     30),  # T+3:30-4:00 all attacks stopped
-    (240, "wave",   "mixed",  60),  # T+4:00-5:00 mixed campaign
+    (0,   "benign",      None,    120),  # T+0:00-2:00 legit hosts only
+    (120, "wave",        "syn",    30),  # T+2:00-2:30 SYN h16-h19
+    (150, "wave",        "udp",    30),  # T+2:30-3:00 UDP h20-h22
+    (180, "wave",        "icmp",   30),  # T+3:00-3:30 ICMP h23-h25
+    (210, "quiet",       None,     30),  # T+3:30-4:00 all attacks stopped
+    (240, "flash_crowd", None,     30),  # T+4:00-4:30 benign/flashcrowd phase
+    (270, "wave",        "mixed",  30),  # T+4:30-5:00 mixed campaign
 ]
 _WAVES = {"syn": "start_syn_flood_campaign",
           "udp": "start_udp_flood_campaign",
@@ -41,12 +42,13 @@ _WAVES = {"syn": "start_syn_flood_campaign",
 
 # Human-readable per-step labels shown in the operator progress output.
 _PHASE_LABELS = {
-    ("benign",  None):      "benign baseline (legit-only, FPR reference)",
-    ("wave",    "syn"):     "SYN wave (4 SYN attackers)",
-    ("wave",    "udp"):     "UDP wave (3 UDP attackers)",
-    ("wave",    "icmp"):    "ICMP wave (3 ICMP attackers)",
-    ("quiet",   None):      "quiet window (attacks stopped, settle)",
-    ("wave",    "mixed"):   "mixed wave (all 10, staged SYN/UDP/ICMP)",
+    ("benign",      None):      "benign baseline (legit-only, FPR reference)",
+    ("wave",        "syn"):     "SYN wave (4 SYN attackers)",
+    ("wave",        "udp"):     "UDP wave (3 UDP attackers)",
+    ("wave",        "icmp"):    "ICMP wave (3 ICMP attackers)",
+    ("quiet",       None):      "quiet window (attacks stopped, settle)",
+    ("flash_crowd", None):      "flash crowd (benign spike, 15 legit hosts)",
+    ("wave",        "mixed"):   "mixed wave (all 10, staged SYN/UDP/ICMP)",
 }
 
 # session summary, printed at the end of every run
@@ -317,6 +319,8 @@ def _fire_phase(topo, kind: str, action):
     elif kind == "quiet":
         # calm window stops any lingering attacks (idempotent)
         topo.stop_all_attacks()
+    elif kind == "flash_crowd":
+        topo.flash_crowd(duration=30)
     # benign: nothing to start (baseline already running)
 
 
