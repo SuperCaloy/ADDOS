@@ -35,6 +35,7 @@ def _is_duplicate(src_ip: str, if_score: float, action_taken: str,
 # Batch buffer for traffic_summary writes: flushed every 5 seconds
 _summary_lock   = threading.Lock()
 _summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
+                   "pkt_total": 0, "pkt_dropped": 0, "pkt_normal": 0,
                    "tp": 0, "tn": 0, "fn": 0,
                    "if_tp": 0, "if_fp": 0, "if_tn": 0, "if_fn": 0,
                    "rf_tp": 0, "rf_fp": 0, "rf_tn": 0, "rf_fn": 0,
@@ -324,6 +325,44 @@ def load_quarantine_states() -> list[dict]:
         return []
 
 
+# Release-moment snapshot: the full live drawer payload at release time.
+# One row per IP (upsert). Served verbatim as the historical view.
+def save_release_snapshot(src_ip: str, reason: str, payload: dict) -> None:
+    try:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute("""
+            INSERT INTO ip_release_snapshot (src_ip, released_at, reason, payload)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(src_ip) DO UPDATE SET
+                released_at = excluded.released_at,
+                reason      = excluded.reason,
+                payload     = excluded.payload
+        """, (src_ip, ts, reason, json.dumps(payload)))
+    except Exception:
+        log.exception("Failed to save release snapshot for %s", src_ip)
+
+
+def get_release_snapshot(src_ip: str) -> dict | None:
+    try:
+        from backend.database.db import query
+        rows = query("""
+            SELECT released_at, reason, payload
+            FROM ip_release_snapshot
+            WHERE src_ip = ?
+        """, (src_ip,))
+        if not rows:
+            return None
+        row = rows[0]
+        return {
+            "released_at": row.get("released_at"),
+            "reason": row.get("reason"),
+            "payload": json.loads(row.get("payload") or "{}"),
+        }
+    except Exception:
+        log.exception("Failed to load release snapshot for %s", src_ip)
+        return None
+
+
 # Traffic summary buffering and flusher
 
 def _accumulate_summary(metrics: dict) -> None:
@@ -349,6 +388,7 @@ def _drain_summary_buffer() -> dict | None:
 
 def log_traffic_summary(total: int, threats: int,
                         true_neg: int, fp: int,
+                        pkt_total: int = 0, pkt_dropped: int = 0, pkt_normal: int = 0,
                         tp: int = 0, tn: int = 0, fn: int = 0,
                         if_tp: int = 0, if_fp: int = 0, if_tn: int = 0, if_fn: int = 0,
                         rf_tp: int = 0, rf_fp: int = 0, rf_tn: int = 0, rf_fn: int = 0,
@@ -366,6 +406,7 @@ def log_traffic_summary(total: int, threats: int,
         return
     _accumulate_summary({
         "total": total, "threats": threats, "true_neg": true_neg, "fp": fp,
+        "pkt_total": pkt_total, "pkt_dropped": pkt_dropped, "pkt_normal": pkt_normal,
         "tp": tp, "tn": tn, "fn": fn,
         "if_tp": if_tp, "if_fp": if_fp, "if_tn": if_tn, "if_fn": if_fn,
         "rf_tp": rf_tp, "rf_fp": rf_fp, "rf_tn": rf_tn, "rf_fn": rf_fn,
@@ -390,7 +431,8 @@ def flush_summary() -> None:
     try:
         execute("""
             INSERT INTO traffic_summary
-                (timestamp, total_flows_observed, threats_mitigated,
+                (timestamp, total_packets, malicious_dropped, normal_packets,
+                 total_flows_observed, threats_mitigated,
                  true_negatives_passed, false_positives,
                  tp, tn, fn,
                  if_tp, if_fp, if_tn, if_fn,
@@ -402,8 +444,9 @@ def flush_summary() -> None:
                  rf_icmp_as_syn, rf_icmp_as_udp,
                  rf_udp_as_syn,  rf_udp_as_icmp,
                  held, rescored, expired_unscored)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (ts, snapshot["total"], snapshot["threats"],
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (ts, snapshot["pkt_total"], snapshot["pkt_dropped"], snapshot["pkt_normal"],
+              snapshot["total"], snapshot["threats"],
               snapshot["true_neg"], snapshot["fp"],
               snapshot["tp"], snapshot["tn"], snapshot["fn"],
               snapshot["if_tp"], snapshot["if_fp"], snapshot["if_tn"], snapshot["if_fn"],

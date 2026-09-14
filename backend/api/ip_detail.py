@@ -1,12 +1,13 @@
 # IP detailed forensics and feature inspection API blueprint.
 # Assembles real-time and historical flow metrics, TEA profiles, and mitigation phases for an IP.
 import math
-from flask import Blueprint, jsonify
+from flask import Blueprint, jsonify, request
 from backend.pipeline.flow_tracker import tracker
 from backend.mitigation.state_machine import state_machine, PHASE_LABELS
 from backend.pipeline.entropy_analyzer import entropy_analyzer
 from backend.database.db import query
 from backend.models import loader
+from backend.models import baselines as signal_baselines
 from backend.mitigation import behavioral
 
 bp = Blueprint("ip_detail", __name__)
@@ -82,19 +83,90 @@ def _calc_derived_features(stats: dict) -> dict:
     }
 
 
-def _build_live_features(src_ip: str) -> dict | None:
-    # Pull real-time features from flow tracker + inference cache.
-    # Returns None if either is missing (stale = treat as inactive).
+def _signal_blocks(stats: dict) -> dict:
+    # Training derived normal references plus per-flow deviations for
+    # Threat Analysis signal cards. Additive only; never breaks the drawer.
+    refs = signal_baselines.references_from_artifacts()
+    quantities = signal_baselines.signal_quantities(stats)
+    deviations = signal_baselines.deviations_for(quantities, refs)
+    return {
+        'baselines': {
+            key: {'median': round(ref['median'], 4), 'iqr': round(ref['iqr'], 4)}
+            for key, ref in refs.items()
+        },
+        'deviations': {key: round(dev, 3) for key, dev in deviations.items()},
+    }
+
+
+def _build_live_features(src_ip: str, state=None) -> dict | None:
+    # Pull real-time features from flow tracker with degrading verdict.
+    # Requires a fresh flow only. ML prefers the valid inference cache and
+    # falls back to the last remembered verdict marked stale, so telemetry
+    # survives cache gaps instead of 404ing. Returns None when the flow is
+    # missing, stale, or never scored.
+    import time as _time
+    from backend.config import FLOW_STALE_S
     flow = tracker.get_flow(src_ip)
-    cached = tracker.get_cached(src_ip)
-    if not flow or not cached:
+    if not flow:
         return None
+    flow_age_s = _time.monotonic() - flow.last_seen
+    if flow_age_s > FLOW_STALE_S:
+        return None
+
+    cached = tracker.get_cached(src_ip)
+    if cached is not None:
+        raw_if = cached.if_score
+        raw_conf = cached.confidence
+        raw_class = cached.attack_class
+        raw_anom = cached.is_anomaly
+        is_stale = False
+        age_s = 0.0
+    else:
+        verdict = tracker.last_verdict(src_ip)
+        if verdict is None:
+            return None
+        raw_if = verdict["if_score"]
+        raw_conf = verdict["confidence"]
+        raw_class = verdict["attack_class"]
+        raw_anom = verdict["is_anomaly"]
+        is_stale = True
+        age_s = round(verdict["age_s"], 1)
+
+    # Resolve peak scores: prefer the highest observed across FlowTracker and IpState
+    peak = tracker.get_peak(src_ip) or {}
+    peak_if = float(peak.get("if_score", 0.0) or 0.0)
+    peak_conf = float(peak.get("confidence", 0.0) or 0.0)
+    peak_class = peak.get("attack_class") or raw_class
+
+    if state is None:
+        state = state_machine.get_state(src_ip)
+    if state is not None:
+        if getattr(state, "peak_if_score", 0.0) > peak_if:
+            peak_if = float(state.peak_if_score)
+        if getattr(state, "peak_confidence", 0.0) > peak_conf:
+            peak_conf = float(state.peak_confidence)
+            if state.attack_vector and state.attack_vector != "Uncertain":
+                peak_class = state.attack_vector
+
+    eff_if = max(raw_if, peak_if)
+    eff_conf = max(raw_conf, peak_conf)
+    eff_class = peak_class if eff_conf == peak_conf else raw_class
+
+    ml = {
+        "if_score":     eff_if,
+        "is_anomaly":   raw_anom,
+        "attack_class": eff_class,
+        "confidence":   round(eff_conf * 100, 4),
+        "stale":        is_stale,
+        "age_s":        age_s,
+    }
 
     fs = flow.flow_stats or {}
     derived = _calc_derived_features(fs)
 
-    # Pull live phase/priority from state machine (locked accessor, copy)
-    state = state_machine.get_state(src_ip)
+    # Pull live phase/priority from state machine (locked accessor, copy) if not provided
+    if state is None:
+        state = state_machine.get_state(src_ip)
     phase = state.phase if state else 0
     priority = state.priority if state else "--"
     action = state.action_taken if state else "--"
@@ -105,6 +177,7 @@ def _build_live_features(src_ip: str) -> dict | None:
     return {
         "src_ip": src_ip,
         "is_live": True,
+        "flow_age_s": round(flow_age_s, 1),
         "features": {
             "pkt_count": fs.get("packet_count", 0),
             "byte_count": fs.get("byte_count", 0),
@@ -125,12 +198,7 @@ def _build_live_features(src_ip: str) -> dict | None:
             "bytes_per_duration": derived["bytes_per_duration"],
             "flow_src_intensity": derived["flow_src_intensity"],
         },
-        "ml": {
-            "if_score": cached.if_score,
-            "is_anomaly": cached.is_anomaly,
-            "attack_class": cached.attack_class,
-            "confidence": round(cached.confidence * 100, 4),
-        },
+        "ml": ml,
         "state": {
             "phase": phase,
             "phase_label": state.phase_label() if state else "--",
@@ -147,6 +215,7 @@ def _build_live_features(src_ip: str) -> dict | None:
             "if_threshold": loader.if_threshold,
             "rf_conf_gate": loader.rf_conf_gate,
         },
+        **_signal_blocks(fs),
         "phase_history": [],
         "tea_ip_profile": {
             "verdict": tea_verdict,
@@ -159,9 +228,20 @@ def _build_live_features(src_ip: str) -> dict | None:
 
 def _build_db_features(src_ip: str) -> dict | None:
     # Pull last-known features from database for released/historical IPs.
+    # Prefers the release-moment snapshot (the final live frame verbatim).
+    # Falls back to latest-row reconstruction for rows predating snapshots.
     # Returns None if no data exists at all.
 
-    # Most recent mitigation event: IF score, action, phase
+    from backend.database.writer import get_release_snapshot
+    snapshot = get_release_snapshot(src_ip)
+    if snapshot and snapshot.get("payload"):
+        data = dict(snapshot["payload"])
+        data["is_live"] = False
+        data["snapshot_at"] = snapshot.get("released_at")
+        data["release_reason"] = snapshot.get("reason")
+        return data
+
+    archive_table = "mitigation_events"
     ev_rows = query("""
         SELECT timestamp, predicted_class, attack_vector, confidence,
                if_score, phase, priority, action_taken
@@ -170,6 +250,7 @@ def _build_db_features(src_ip: str) -> dict | None:
         ORDER BY timestamp DESC LIMIT 1
     """, (src_ip,))
     if not ev_rows:
+        archive_table = "mitigation_events_archive"
         ev_rows = query("""
             SELECT timestamp, predicted_class, attack_vector, confidence,
                    if_score, phase, priority, action_taken
@@ -181,8 +262,31 @@ def _build_db_features(src_ip: str) -> dict | None:
         return None
 
     ev = ev_rows[0]
-    if_score = ev.get("if_score") or 0.0
-    conf_raw = ev.get("confidence") or 0.0
+    if_score = float(ev.get("if_score") or 0.0)
+    conf_raw = float(ev.get("confidence") or 0.0)
+    attack_class = ev.get("attack_vector") or "--"
+
+    # Query peak scores observed across this IP history
+    peak_ev = query(f"""
+        SELECT MAX(if_score) AS max_if, MAX(confidence) AS max_conf
+        FROM {archive_table}
+        WHERE src_ip = ?
+    """, (src_ip,))
+    if peak_ev and peak_ev[0]:
+        max_if = peak_ev[0].get("max_if")
+        max_conf = peak_ev[0].get("max_conf")
+        if max_if is not None and float(max_if) > if_score:
+            if_score = float(max_if)
+        if max_conf is not None and float(max_conf) > conf_raw:
+            conf_raw = float(max_conf)
+            class_row = query(f"""
+                SELECT attack_vector FROM {archive_table}
+                WHERE src_ip = ? AND confidence = ?
+                ORDER BY timestamp DESC LIMIT 1
+            """, (src_ip, max_conf))
+            if class_row and class_row[0].get("attack_vector"):
+                attack_class = class_row[0]["attack_vector"]
+
     conf_pct = round(conf_raw * 100, 1) if conf_raw <= 1.0 else round(conf_raw, 1)
 
     # Real feature values from detection_features table
@@ -267,7 +371,7 @@ def _build_db_features(src_ip: str) -> dict | None:
         "ml": {
             "if_score":     if_score,
             "is_anomaly":   True,
-            "attack_class": ev.get("attack_vector") or "--",
+            "attack_class": attack_class,
             "confidence":   conf_pct,
         },
         "state": {
@@ -286,6 +390,7 @@ def _build_db_features(src_ip: str) -> dict | None:
             "if_threshold": loader.if_threshold,
             "rf_conf_gate": loader.rf_conf_gate,
         },
+        **_signal_blocks(feat),
         "tea_ip_profile": {
             "verdict": tea_verdict,
             "samples": tea_samples,
@@ -316,16 +421,18 @@ def ip_detail_live(src_ip: str):
 @bp.get("/api/ip_detail/<path:src_ip>")
 def ip_detail(src_ip: str):
     # Full detail endpoint: live if active, DB fallback if not.
+    # Accepts ?historical=1 or ?snapshot=1 to explicitly request release snapshot even if active.
     # is_live flag in response tells drawer whether to start polling.
     src_ip = src_ip.strip()
+    force_historical = request.args.get("historical") in ("1", "true") or request.args.get("snapshot") in ("1", "true")
 
-    # Try live first regardless of state machine: tracker may have fresh data
-    if _is_active(src_ip):
+    # Try live first unless historical snapshot is explicitly requested
+    if not force_historical and _is_active(src_ip):
         data = _build_live_features(src_ip)
         if data:
             return jsonify(data)
 
-    # Fall back to DB
+    # Fall back to DB (prefers release snapshot, falls back to legacy rows)
     data = _build_db_features(src_ip)
     if data:
         return jsonify(data)

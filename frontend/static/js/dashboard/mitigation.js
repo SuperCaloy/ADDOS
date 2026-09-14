@@ -41,13 +41,40 @@ async function fetchQuarantine() {
 
     const activeIps = new Set(data.map(e => e.src_ip));
     for (const [ip, tr] of _qRows) {
-      if (!activeIps.has(ip)) { tr.remove(); _qRows.delete(ip); }
+      if (!activeIps.has(ip)) {
+        tr.remove();
+        _qRows.delete(ip);
+        if (window._watchlistPeaks) window._watchlistPeaks.delete(ip);
+      }
     }
 
+    window._activeBanDurations = window._activeBanDurations || new Map();
+    window._watchlistPeaks = window._watchlistPeaks || new Map();
     data.forEach(e => {
-      const sc   = e.if_score || 0;
+      if (e.src_ip && /time\s*ban/i.test(e.phase_label || e.phase || '')) {
+        const ttl = e.ttl_remaining_sec != null ? e.ttl_remaining_sec : 0;
+        const tip = e.time_in_phase_sec != null ? e.time_in_phase_sec : 0;
+        const total = ttl + tip;
+        if (total > 0) {
+          const mins = Math.max(1, Math.round(total / 60));
+          window._activeBanDurations.set(e.src_ip, `${mins}m`);
+        }
+      }
+
+      const rawSc   = Number(e.if_score) || 0;
+      const rawConf = e.confidence != null ? Number(e.confidence) : null;
+      let sc = rawSc;
+      let confNum = rawConf;
+
+      if (e.src_ip) {
+        const prior = window._watchlistPeaks.get(e.src_ip) || { sc: 0, conf: 0 };
+        sc = Math.max(prior.sc, rawSc);
+        confNum = rawConf != null ? Math.max(prior.conf, rawConf) : prior.conf;
+        window._watchlistPeaks.set(e.src_ip, { sc, conf: confNum });
+      }
+
       const ts   = e.time_in_phase_sec || 0;
-      const conf = e.confidence != null ? Number(e.confidence).toFixed(4) : '--';
+      const conf = confNum != null ? confNum.toFixed(4) : '--';
       const time = ts < 60 ? `${ts}s` : `${Math.floor(ts / 60)}m ${ts % 60}s`;
 
       const currentThr = window.Store ? window.Store.getIfThreshold() : ifThr;

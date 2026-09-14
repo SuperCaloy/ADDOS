@@ -6,8 +6,8 @@ const _FEAT_TOOLTIPS = {
   "Flow Rate (pps)": "Packet rate for this flow, measured in packets per second (pps). Significantly elevated rates relative to normal baselines are indicative of flood-based attacks.",
   "Byte Rate":       "Data throughput for this flow, measured in bytes per second. Sharp increases may indicate volumetric attacks targeting bandwidth exhaustion.",
   "Bytes / Packet":  "Average packet size (byte count divided by packet count). Different attack types produce characteristic packet size signatures, aiding classification.",
-  "Port Entropy":    "Quantifies the distribution of traffic across source and destination ports. UDP flood attacks typically spray packets across many destination ports, producing a markedly higher entropy value than legitimate single-session traffic.",
-  "Pkt Size Uniformity": "Measures the consistency of packet sizes within this flow. Lower values indicate highly uniform packets, as expected from SYN flood traffic where packets carry no payload and are constructed with near-identical sizes.",
+  "Port Entropy":    "Quantifies the distribution of traffic across source and destination ports. High entropy means traffic sprays across many ports rather than a single session, which fits flood behavior.",
+  "Pkt Size Uniformity": "Measures the consistency of packet sizes within this flow. Lower values indicate highly uniform packets, as expected from scripted flood generators that reuse near-identical packets.",
   "Packet Count":    "Total number of packets observed in this flow. Rapid accumulation within a short observation window is a strong indicator of flooding behavior.",
   "Byte Count":      "Total data volume observed in this flow, measured in bytes.",
 };

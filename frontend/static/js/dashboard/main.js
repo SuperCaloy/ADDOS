@@ -34,7 +34,8 @@ document.addEventListener('visibilitychange', () => {
       const tr = e.target.closest('tr[data-ip]');
       if (!tr) return;
       const ip = tr.dataset.ip;
-      if (ip && ip !== '--') window.openIpDrawer(ip);
+      const isRelease = tr.dataset.isRelease === 'true';
+      if (ip && ip !== '--') window.openIpDrawer(ip, { historical: isRelease });
     });
 
     // Enables keyboard activation using Enter or Space on focused table rows.
@@ -45,7 +46,8 @@ document.addEventListener('visibilitychange', () => {
       if (!tr) return;
       e.preventDefault();
       const ip = tr.dataset.ip;
-      if (ip && ip !== '--') window.openIpDrawer(ip);
+      const isRelease = tr.dataset.isRelease === 'true';
+      if (ip && ip !== '--') window.openIpDrawer(ip, { historical: isRelease });
     });
 
     // Observes dynamic DOM insertions in table bodies to ensure newly rendered rows receive keyboard focus attributes.

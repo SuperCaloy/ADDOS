@@ -7,7 +7,6 @@ from backend.config import ML_ENABLED
 from backend.mitigation.ml_scorer import get_top_attacker_ips
 from backend.mitigation.mitigation_actions import (
     install_per_ip_meters, remove_per_ip_meters,
-    install_proto_block,
 )
 
 log = logging.getLogger(__name__)
@@ -29,6 +28,12 @@ CRIT_CONSECUTIVE_THRESHOLD = 4
 EMERG_CONSECUTIVE_THRESHOLD = 6
 
 MIN_DWELL_POLLS = 3
+
+# Graduated per-IP meter rates by escalation tier. All tiers act on ALL
+# known attacker IPs. Tier 3 is tight meters, never a blanket proto drop.
+TIER_METER_RATE = {1: 50, 2: 25, 3: 10}
+MAX_GUARD_IPS = 50
+SCORER_FETCH_N = 100
 
 
 class ResourceGuard:
@@ -64,6 +69,39 @@ class ResourceGuard:
         if proto is not None:
             with self._lock:
                 self._installed_protos.add(proto)
+
+    def _known_attacker_ips(self) -> list[str]:
+        # Dynamic candidate set: ALL known attackers, union of ML scorer
+        # and state machine, minus whitelist, safety capped.
+        from backend.config import WHITELIST_IPS
+        seen = []
+        try:
+            top = get_top_attacker_ips(n=SCORER_FETCH_N) or []
+        except Exception:
+            top = []
+        try:
+            from backend.mitigation.state_machine import state_machine
+            active = state_machine.get_state_ips() or []
+        except Exception:
+            active = []
+        for ip in list(top) + list(active):
+            if ip in WHITELIST_IPS:
+                continue
+            if ip not in seen:
+                seen.append(ip)
+            if len(seen) >= MAX_GUARD_IPS:
+                break
+        return seen
+
+    def _reconcile_meters(self, rate_pps: int) -> None:
+        # Refresh installed set when membership changes. No churn when unchanged.
+        fresh = self._known_attacker_ips()
+        if set(fresh) == set(self._installed_ips):
+            return
+        remove_per_ip_meters()
+        if fresh:
+            install_per_ip_meters(fresh, rate_pps=rate_pps)
+        self._installed_ips = fresh
 
     def start(self) -> None:
         if self._running:
@@ -109,26 +147,21 @@ class ResourceGuard:
         self._crit_poll_count = 0
 
         if not self._crit_rules_active and self._consecutive_high >= 2:
-            top_ips = get_top_attacker_ips(n=20)
-            if top_ips:
-                success = install_per_ip_meters(top_ips, rate_pps=50)
-                if success:
-                    self._crit_rules_active = True
-                    self._installed_ips = top_ips
-                    self._escalation_tier = 2
-                else:
-                    install_proto_block(self._installed_protos)
-                    self._crit_rules_active = True
-                    self._escalation_tier = 3
-            else:
-                install_proto_block(self._installed_protos)
+            ips = self._known_attacker_ips()
+            if ips and install_per_ip_meters(ips, rate_pps=TIER_METER_RATE[3]):
                 self._crit_rules_active = True
+                self._installed_ips = ips
                 self._escalation_tier = 3
         elif self._escalation_tier == 2 and self._consecutive_high >= EMERG_CONSECUTIVE_THRESHOLD:
-            log.critical("ResourceGuard: escalating to tier 3 (blanket proto_block)")
+            log.critical("ResourceGuard: escalating to tier 3 (tight per-IP meters)")
             remove_per_ip_meters()
-            install_proto_block(self._installed_protos)
+            ips = self._known_attacker_ips()
+            if ips:
+                install_per_ip_meters(ips, rate_pps=TIER_METER_RATE[3])
+                self._installed_ips = ips
             self._escalation_tier = 3
+        elif self._crit_rules_active:
+            self._reconcile_meters(TIER_METER_RATE[3])
 
     def _handle_crit(self) -> None:
         self._consecutive_high += 1
@@ -136,23 +169,21 @@ class ResourceGuard:
         self._throttle_delay = 0.05
 
         if not self._crit_rules_active and self._consecutive_high >= CRIT_CONSECUTIVE_THRESHOLD:
-            top_ips = get_top_attacker_ips(n=15)
-            if top_ips:
-                success = install_per_ip_meters(top_ips, rate_pps=75)
-                if success:
-                    self._crit_rules_active = True
-                    self._installed_ips = top_ips
-                    self._escalation_tier = 2
+            ips = self._known_attacker_ips()
+            if ips and install_per_ip_meters(ips, rate_pps=TIER_METER_RATE[2]):
+                self._crit_rules_active = True
+                self._installed_ips = ips
+                self._escalation_tier = 2
         elif self._escalation_tier == 1 and self._consecutive_high >= CRIT_CONSECUTIVE_THRESHOLD:
             log.warning("ResourceGuard: escalating to tier 2 (tighter meters)")
             remove_per_ip_meters()
-            top_ips = get_top_attacker_ips(n=15)
-            if top_ips:
-                success = install_per_ip_meters(top_ips, rate_pps=75)
-                if success:
-                    self._crit_rules_active = True
-                    self._installed_ips = top_ips
-                    self._escalation_tier = 2
+            ips = self._known_attacker_ips()
+            if ips and install_per_ip_meters(ips, rate_pps=TIER_METER_RATE[2]):
+                self._crit_rules_active = True
+                self._installed_ips = ips
+                self._escalation_tier = 2
+        elif self._crit_rules_active:
+            self._reconcile_meters(TIER_METER_RATE[2])
 
     def _handle_high(self) -> None:
         self._consecutive_high += 1
@@ -160,13 +191,13 @@ class ResourceGuard:
         self._throttle_delay = 0.02
 
         if not self._crit_rules_active and self._consecutive_high >= HIGH_CONSECUTIVE_THRESHOLD:
-            top_ips = get_top_attacker_ips(n=10)
-            if top_ips:
-                success = install_per_ip_meters(top_ips, rate_pps=100)
-                if success:
-                    self._crit_rules_active = True
-                    self._installed_ips = top_ips
-                    self._escalation_tier = 1
+            ips = self._known_attacker_ips()
+            if ips and install_per_ip_meters(ips, rate_pps=TIER_METER_RATE[1]):
+                self._crit_rules_active = True
+                self._installed_ips = ips
+                self._escalation_tier = 1
+        elif self._crit_rules_active:
+            self._reconcile_meters(TIER_METER_RATE[1])
 
     def _handle_normal(self) -> None:
         if self._crit_rules_active:

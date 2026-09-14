@@ -25,6 +25,17 @@ function renderVector(v) {
 
 // Formats active mitigation enforcement actions into distinct visual badges.
 function renderAction(v) {
+  if (!v || v === '-') return `<span style="color:var(--sub2)">-</span>`;
+  if (/^time\s*ban/i.test(v)) {
+    let label = v;
+    if (/^time\s*ban$/i.test(v.trim())) {
+      label = 'Time Ban (1m)';
+    }
+    return mkTag('t-ban', label);
+  }
+  if (/^quarantin/i.test(v)) return mkTag('t-q', v);
+  if (/^rate\s*limit/i.test(v)) return mkTag('t-rl', v);
+  if (/^blackhole|^blocked/i.test(v)) return mkTag('t-blocked', v);
   const map = { 'Quarantined': 't-q', 'Rate Limited': 't-rl', 'Time Ban': 't-ban', 'Blackhole': 't-blocked', 'Blocked': 't-blocked' };
   return map[v] ? mkTag(map[v], v) : `<span style="color:var(--sub2)">${v}</span>`;
 }

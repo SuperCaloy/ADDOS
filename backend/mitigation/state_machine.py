@@ -131,6 +131,15 @@ class IpState:
     # Last transition reason, for audit and visualization.
     transition_reason:  str   = ""
     session_id:         str   = field(default_factory=lambda: uuid.uuid4().hex[:12])
+    # Peak scores observed during this mitigation session.
+    peak_if_score:      float = 0.0
+    peak_confidence:    float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.peak_if_score == 0.0 and self.if_score > 0.0:
+            self.peak_if_score = float(self.if_score)
+        if self.peak_confidence == 0.0 and self.confidence > 0.0:
+            self.peak_confidence = float(self.confidence)
 
     def phase_label(self) -> str:
         return PHASE_LABELS.get(self.phase, "Unknown")
@@ -148,13 +157,15 @@ class IpState:
         return PHASE1_DURATION_LOW
 
     def to_api_dict(self) -> dict:
+        eff_if   = max(self.if_score, self.peak_if_score)
+        eff_conf = max(self.confidence, self.peak_confidence)
         d = {
             "src_ip":            self.src_ip,
             "phase":             self.phase,
             "phase_label":       self.phase_label(),
             "attack_vector":     self.attack_vector,
-            "if_score":          round(self.if_score, 4),
-            "confidence":        round(self.confidence * 100, 4),
+            "if_score":          round(eff_if, 4),
+            "confidence":        round(eff_conf * 100, 4),
             "time_in_phase_sec": int(self.time_in_phase_sec()),
             "priority":          self.priority,
             "offence_count":     self.offence_count,
@@ -168,7 +179,7 @@ class IpState:
 class StateMachine:
 
     def __init__(self):
-        self._lock      = threading.Lock()
+        self._lock      = threading.RLock()
         self._states: dict[str, IpState] = {}
         self._commander = None
         # Injected by main.py after deception module starts
@@ -316,12 +327,16 @@ class StateMachine:
             if state is None or state.phase not in (1, 2, 3):
                 return
             state.if_score = max(if_score, state.if_score * IF_SCORE_DECAY)
+            if if_score > state.peak_if_score:
+                state.peak_if_score = float(if_score)
             state.recent_pps = recent_pps
 
             if state.phase == 1:
                 if confidence > state.confidence:
                     state.attack_vector = attack_class
                     state.confidence    = confidence
+            if confidence > state.peak_confidence:
+                state.peak_confidence = float(confidence)
             state.priority = behavioral.assign_priority(
                 state.if_score, state.confidence, src_ip,
                 attack_class=state.attack_vector,
@@ -439,11 +454,13 @@ class StateMachine:
                 # Update vector only when new confidence beats prior; best evidence wins.
                 _better_evidence = confidence > state.confidence
                 state.if_score = max(if_score, state.if_score * IF_SCORE_DECAY)
+                if if_score > state.peak_if_score:
+                    state.peak_if_score = float(if_score)
                 if _better_evidence:
                     state.attack_vector = attack_class
                     state.confidence     = confidence
-                else:
-                    state.confidence = confidence
+                if confidence > state.peak_confidence:
+                    state.peak_confidence = float(confidence)
 
                 if behavioral.should_blackhole(src_ip, state.ban_level):
                     self._advance_to_blackhole(state)
@@ -674,6 +691,7 @@ class StateMachine:
             session_id=state.session_id,
         ), force=True)
 
+        self._snapshot_release(src_ip, reason="Time Ban Expired")
         self._push_command(src_ip, resolve_release_action())
         self._states.pop(src_ip, None)
         writer.delete_quarantine_state(src_ip)
@@ -740,7 +758,23 @@ class StateMachine:
             session_id=state.session_id,
         ), force=True)
 
+    def _snapshot_release(self, src_ip: str, reason: str) -> None:
+        # Captures the final live drawer payload for the historical view.
+        # Best effort: snapshot failure must never break the release itself.
+        try:
+            from backend.api.ip_detail import _build_live_features, _build_db_features
+            state = self._states.get(src_ip)
+            data = _build_live_features(src_ip, state=state)
+            if not data:
+                data = _build_db_features(src_ip)
+            if not data:
+                return
+            writer.save_release_snapshot(src_ip, reason, data)
+        except Exception:
+            log.exception("Release snapshot failed for %s", src_ip)
+
     def _clear(self, src_ip: str, reason: str = "Released") -> None:
+        self._snapshot_release(src_ip, reason)
         state = self._states.pop(src_ip, None)
         self._push_command(src_ip, resolve_release_action())
         writer.delete_quarantine_state(src_ip)
@@ -870,6 +904,7 @@ class StateMachine:
         with self._lock:
             if src_ip not in self._states:
                 return False
+            self._snapshot_release(src_ip, reason="Manual Release")
             state = self._states.pop(src_ip)
         self._push_command(src_ip, "clear")
         writer.delete_quarantine_state(src_ip)

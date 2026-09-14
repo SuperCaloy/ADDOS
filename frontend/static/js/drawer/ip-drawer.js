@@ -7,8 +7,35 @@
 let _drawerCurrentIp = null;
 let _drawerLiveTimer = null;
 let _drawerIsLive = false;
+let _drawerMisses = 0;
+let _drawerTickMs = 2000;
+// Slow watch timer for released IPs: refetches for re-offense resume.
+let _drawerWatchTimer = null;
 // Last full render args, reused to refresh the expert section without refetching.
 let _drawerLastRender = null;
+// Tracks peak ML evaluation scores per IP across live inspection sessions.
+const _drawerPeaks = new Map();
+
+function _applyPeakMl(ip, ml) {
+  if (!ip || !ml) return ml;
+  const currentIf = Number(ml.if_score) || 0;
+  const currentConf = Number(ml.confidence) || 0;
+  const currentClass = ml.attack_class || '--';
+
+  const prior = _drawerPeaks.get(ip) || { ifScore: 0, rfConf: 0, attackClass: currentClass };
+  const peakIf = Math.max(prior.ifScore, currentIf);
+  const peakConf = Math.max(prior.rfConf, currentConf);
+  const peakClass = currentConf >= prior.rfConf ? currentClass : prior.attackClass;
+
+  _drawerPeaks.set(ip, { ifScore: peakIf, rfConf: peakConf, attackClass: peakClass });
+
+  ml.if_score = peakIf;
+  ml.confidence = peakConf;
+  if (peakClass && peakClass !== '--') {
+    ml.attack_class = peakClass;
+  }
+  return ml;
+}
 
 // Binds the left-edge drag handle. The panel is non-modal, so Tab focus is
 // intentionally free to leave the panel for the dashboard beside it.
@@ -18,8 +45,11 @@ if (window.SidePanel) SidePanel.initResize('ip-drawer', 'idd-resize-handle', 'ip
  * Opens the threat detail side panel for an IP address and displays its telemetry.
  * Updates headers and starts data fetching. Shell behavior lives in SidePanel.
  */
-function openIpDrawer(ip) {
+function openIpDrawer(ip, opts) {
   if (!ip || ip === '--') return;
+  if (opts && opts.historical) {
+    _drawerPeaks.delete(ip);
+  }
   _drawerCurrentIp = ip;
   const ipEl = document.getElementById('idd-ip');
   const badgeEl = document.getElementById('idd-status-badge');
@@ -29,7 +59,7 @@ function openIpDrawer(ip) {
 
   if (window.SidePanel) SidePanel.open('ip-drawer', { storageKey: 'ip-drawer-width', focusSel: '#idd-close-btn' });
 
-  _fetchIpDetail(ip);
+  _fetchIpDetail(ip, opts);
 }
 
 /**
@@ -38,6 +68,7 @@ function openIpDrawer(ip) {
  */
 function closeIpDrawer() {
   _stopLivePolling();
+  _stopWatch();
   _drawerCurrentIp = null;
   if (window.SidePanel) SidePanel.close('ip-drawer');
   const tip = document.getElementById('idd-tooltip');
@@ -60,32 +91,91 @@ if (window.Store) window.Store.subscribe('expertActive', () => {
 window.openIpDrawer = openIpDrawer;
 window.closeIpDrawer = closeIpDrawer;
 
+// Poll pacing: fast 2s polling, slow 30s after repeated misses, stop
+// only on explicit inactive. Pure function, no DOM.
+function _livePollPlan(misses, inactive) {
+  if (inactive) return { stop: 'historical' };
+  return { intervalMs: misses < 3 ? 2000 : 30000 };
+}
+
+// Current clock time for freshness stamps.
+function _nowTime() {
+  try {
+    return new Date().toTimeString().slice(0, 8);
+  } catch (_) { return ''; }
+}
+
+// Extracts HH:MM:SS time from a snapshot timestamp string.
+function _releaseTime(ts) {
+  if (!ts || typeof ts !== 'string') return '';
+  const clean = ts.trim();
+  if (clean.includes('T')) {
+    const timePart = clean.split('T')[1];
+    return timePart ? timePart.split(/[Z+-]/)[0].slice(0, 8) : clean.slice(0, 8);
+  }
+  const parts = clean.split(/\s+/);
+  return parts.length > 1 ? parts[1].slice(0, 8) : parts[0].slice(0, 8);
+}
+
 /**
  * Starts periodic polling for live telemetry on active flows.
- * Queries the live endpoint every two seconds and stops if the IP selection changes or flow terminates.
+ * Transient misses back off to a slow retry instead of giving up.
+ * Only an explicit inactive response ends live mode.
  */
 function _startLivePolling(ip) {
   _stopLivePolling();
+  _stopWatch();
   _drawerIsLive = true;
-  _drawerLiveTimer = setInterval(async () => {
+  _drawerMisses = 0;
+  const tick = async () => {
     if (_drawerCurrentIp !== ip) { _stopLivePolling(); return; }
     try {
       const apiUrl = window.API_URL || '';
       const r = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}/live`);
-      if (r.status === 404) {
-        _stopLivePolling();
-        _setBadge(false);
-        if (typeof showToast === 'function') showToast(`${ip} released`);
-        const full = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}`);
-        if (full.ok) _renderIpDetail(await full.json());
+      if (!r.ok) {
+        let inactive = false;
+        if (r.status === 404) {
+          try {
+            const body = await r.clone().json();
+            inactive = body && body.error === 'IP not active';
+          } catch (_) { inactive = false; }
+        }
+        const plan = _livePollPlan(_drawerMisses, inactive);
+        if (plan.stop) {
+          _stopLivePolling();
+          _setBadge(false);
+          if (typeof showToast === 'function') showToast(`${ip} released`);
+          const full = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}`);
+          if (full.ok && _drawerCurrentIp === ip) {
+            _renderIpDetail(await full.json());
+            _startWatch(ip);
+          }
+          return;
+        }
+        _drawerMisses += 1;
+        _scheduleLiveTick(ip, tick, _livePollPlan(_drawerMisses, false).intervalMs);
         return;
       }
-      if (!r.ok) return;
       const data = await r.json();
       if (_drawerCurrentIp !== ip) return;
+      _drawerMisses = 0;
+      _scheduleLiveTick(ip, tick, 2000);
       _updateLiveSection(data);
-    } catch (_) {}
-  }, 2000);
+      _setBadge(true, { updated: _nowTime(), stale: !!(data.ml && data.ml.stale) });
+    } catch (_) {
+      _drawerMisses += 1;
+      _scheduleLiveTick(ip, tick, _livePollPlan(_drawerMisses, false).intervalMs);
+    }
+  };
+  _drawerLiveTimer = setInterval(tick, 2000);
+}
+
+// Retimes the live poll loop. No-op when the loop already runs at ms.
+function _scheduleLiveTick(ip, tick, ms) {
+  if (_drawerTickMs === ms && _drawerLiveTimer) return;
+  _drawerTickMs = ms;
+  if (_drawerLiveTimer) clearInterval(_drawerLiveTimer);
+  _drawerLiveTimer = setInterval(tick, ms);
 }
 
 /**
@@ -95,21 +185,57 @@ function _startLivePolling(ip) {
 function _stopLivePolling() {
   if (_drawerLiveTimer) { clearInterval(_drawerLiveTimer); _drawerLiveTimer = null; }
   _drawerIsLive = false;
+  _drawerMisses = 0;
+  _drawerTickMs = 2000;
 }
+
+// Clears the released-IP watch timer.
+function _stopWatch() {
+  if (_drawerWatchTimer) { clearInterval(_drawerWatchTimer); _drawerWatchTimer = null; }
+}
+
+// Watches a released IP for re-offense: slow full refetch, resumes fast
+// live mode the moment the backend reports active again.
+function _startWatch(ip) {
+  _stopWatch();
+  _drawerWatchTimer = setInterval(async () => {
+    if (_drawerCurrentIp !== ip) { _stopWatch(); return; }
+    try {
+      const apiUrl = window.API_URL || '';
+      const r = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}`);
+      if (!r.ok || _drawerCurrentIp !== ip) return;
+      const data = await r.json();
+      if (data.is_live) {
+        _renderIpDetail(data);
+        if (data.is_live) _startLivePolling(ip);
+      }
+    } catch (_) {}
+  }, 15000);
+}
+
+// Resyncs once when the tab returns: background tabs throttle setInterval.
+document.addEventListener('visibilitychange', () => {
+  const doc = typeof document !== 'undefined' ? document : null;
+  if (!doc || doc.hidden || !_drawerCurrentIp || !_drawerIsLive) return;
+  _fetchIpDetail(_drawerCurrentIp);
+});
 
 /**
  * Retrieves comprehensive threat telemetry and ML diagnostics for a target IP.
  * Populates drawer sections upon success or falls back to quarantine table cache on failure.
  */
-async function _fetchIpDetail(ip) {
+async function _fetchIpDetail(ip, opts) {
   try {
     const apiUrl = window.API_URL || '';
-    const r = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}`);
+    const isHist = !!(opts && opts.historical);
+    const query = isHist ? '?historical=1' : '';
+    const r = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}${query}`);
     if (!r.ok) throw r;
     const data = await r.json();
     if (_drawerCurrentIp !== ip) return;
     _renderIpDetail(data);
-    if (data.is_live) _startLivePolling(ip);
+    if (data.is_live && !isHist) _startLivePolling(ip);
+    else _startWatch(ip);
   } catch (err) {
     if (_drawerCurrentIp !== ip) return;
 
@@ -154,10 +280,33 @@ async function _fetchIpDetail(ip) {
 /**
  * Updates the drawer status badge to indicate whether traffic is live or historical.
  * Injects animated pulse badges for live connections or subdued tags for historical entries.
+ * extra.updated stamps the last successful poll, extra.stale marks a degraded verdict.
  */
-function _setBadge(isLive) {
+function _setBadge(isLive, extra) {
   const el = document.getElementById('idd-status-badge');
   if (!el) return;
+  if (el.style && !el.style.display) {
+    el.style.display = 'inline-flex';
+    el.style.alignItems = 'center';
+    el.style.gap = '6px';
+  }
+  const stamp = extra && extra.updated
+    ? `<span style="display:inline-flex;align-items:center;gap:5px;
+         background:rgba(148,153,183,.1);border:1px solid rgba(148,153,183,.25);
+         border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;
+         font-family:var(--mono,monospace);color:var(--text,#e2e8f0);letter-spacing:.06em">
+         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--sub,#9499b7);flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+         <span>updated ${extra.updated}</span>
+       </span>`
+    : '';
+  const stalePill = extra && extra.stale
+    ? `<span style="display:inline-flex;align-items:center;
+         background:rgba(255,176,46,.1);border:1px solid rgba(255,176,46,.3);
+         border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;
+         font-family:var(--mono,monospace);color:var(--amber,#ffb02e);letter-spacing:.08em">
+         STALE
+       </span>`
+    : '';
   if (isLive) {
     el.innerHTML = `
       <span style="display:inline-flex;align-items:center;gap:5px;
@@ -167,15 +316,24 @@ function _setBadge(isLive) {
         <span style="width:5px;height:5px;border-radius:50%;background:var(--green,#00d68f);
              animation:idd-pulse 1.4s ease-in-out infinite;display:inline-block"></span>
         LIVE
-      </span>`;
+      </span>${stalePill}${stamp}`;
   } else {
+    const released = extra && extra.releasedAt
+      ? `<span style="display:inline-flex;align-items:center;gap:5px;
+           background:rgba(148,153,183,.1);border:1px solid rgba(148,153,183,.25);
+           border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;
+           font-family:var(--mono,monospace);color:var(--text,#e2e8f0);letter-spacing:.06em">
+           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--sub,#9499b7);flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+           <span>as released at ${extra.releasedAt}</span>
+         </span>`
+      : '';
     el.innerHTML = `
       <span style="display:inline-flex;align-items:center;
            background:rgba(148,153,183,.08);border:1px solid rgba(148,153,183,.22);
            border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;
            font-family:var(--mono,monospace);color:var(--sub,#9499b7);letter-spacing:.08em">
         HISTORICAL
-      </span>`;
+      </span>${released}`;
   }
 }
 
@@ -187,7 +345,9 @@ function _updateLiveSection(data) {
   const f = data.features || {};
   const ml = data.ml || {};
   const st = data.state || {};
-  _renderFeatureSignals(f, ml.attack_class);
+  const ip = data.src_ip || _drawerCurrentIp;
+  if (ip) _applyPeakMl(ip, ml);
+  _renderFeatureSignals(f, ml.attack_class, data.deviations);
   _renderMlBars(ml, data.thresholds || {});
   _renderHistoryPills(st);
   _renderPipeline(data, ml, st, ml.is_anomaly);
@@ -202,9 +362,15 @@ function _renderIpDetail(d) {
   const ml = d.ml || {};
   const st = d.state || {};
   const th = d.thresholds || {};
+  const ip = d.src_ip || _drawerCurrentIp;
+  if (ip) _applyPeakMl(ip, ml);
   _drawerLastRender = { d, ml, st, f, th };
 
-  _setBadge(!!d.is_live);
+  _setBadge(!!d.is_live, {
+    updated: _nowTime(),
+    stale: !!(ml && ml.stale),
+    releasedAt: _releaseTime(d.snapshot_at),
+  });
 
   /* Verdict banner */
   const isAnomaly = ml.is_anomaly;
@@ -235,7 +401,7 @@ function _renderIpDetail(d) {
     descEl.style.display = descText ? 'block' : 'none';
   }
 
-  _renderFeatureSignals(f, ml.attack_class);
+  _renderFeatureSignals(f, ml.attack_class, d.deviations);
   _renderMlBars(ml, th);
   _renderPipeline(d, ml, st, isAnomaly);
   _renderHistoryPills(st);
@@ -248,7 +414,7 @@ function _renderIpDetail(d) {
  * Generates feature signal comparison cards for Isolation Forest and Random Forest inputs.
  * Maps raw flow statistics against configured thresholds for the identified attack class.
  */
-function _renderFeatureSignals(f, attackClass) {
+function _renderFeatureSignals(f, attackClass, devs) {
   const pktCount = f.pkt_count || 0;
   const bytCount = f.byte_count || 0;
   const bpp = pktCount > 0 ? bytCount / pktCount : 0;
@@ -262,11 +428,14 @@ function _renderFeatureSignals(f, attackClass) {
     bpp: bpp,
     port_entropy: f.port_entropy || 0,
     pkt_size_uniformity: f.pkt_size_uniformity || 0,
+    flow_intensity: f.flow_intensity || 0,
+    bytes_per_duration: f.bytes_per_duration || 0,
   };
 
   const signalConfigs = window._SIGNAL_CONFIG || (typeof _SIGNAL_CONFIG !== 'undefined' ? _SIGNAL_CONFIG : {});
   const cfg = signalConfigs[attackClass] || signalConfigs['Uncertain'] || { if: [], rf: [] };
   const cardMaker = window._mkSignalCard || (typeof _mkSignalCard === 'function' ? _mkSignalCard : null);
+  const pickTop = window._pickTopSignal || (typeof _pickTopSignal === 'function' ? _pickTopSignal : null);
 
   const subtitle = attackClass && attackClass !== '--' ? `Key features for ${attackClass}` : 'Key features';
   const ifSub = document.getElementById('idd-if-subtitle');
@@ -277,9 +446,32 @@ function _renderFeatureSignals(f, attackClass) {
   const ifEl = document.getElementById('idd-if-features');
   const rfEl = document.getElementById('idd-rf-features');
   if (cardMaker) {
-    if (ifEl) ifEl.innerHTML = cfg.if.map(feat => cardMaker(feat, vals[feat.key], true)).join('');
-    if (rfEl) rfEl.innerHTML = cfg.rf.map(feat => cardMaker(feat, vals[feat.key], false)).join('');
+    if (ifEl) ifEl.innerHTML = _renderSignalGrid(cfg.if, vals, cardMaker, pickTop, true, devs);
+    if (rfEl) rfEl.innerHTML = _renderSignalGrid(cfg.rf, vals, cardMaker, pickTop, false, devs);
   }
+}
+
+/**
+ * Renders one model signal grid: cards plus a short Top signal or closest
+ * to baseline note naming the leader. Served deviations drive red state
+ * and ranking when present, legacy cutoffs otherwise. No baseline numbers.
+ * Pure card HTML, DOM write stays with the caller.
+ */
+function _renderSignalGrid(feats, vals, cardMaker, pickTop, isIF, devs) {
+  const top = pickTop ? pickTop(feats, vals, devs) : null;
+  const devOf = feat => (devs != null && devs[feat.key] != null ? devs[feat.key] : null);
+  const alertedOf = feat => {
+    const dev = devOf(feat);
+    return dev != null ? dev >= _DEVIATION_ALERT : null;
+  };
+  const cards = feats.map(feat => cardMaker(feat, vals[feat.key], isIF,
+    { top: !!(top && top.key === feat.key), alerted: alertedOf(feat) })).join('');
+  if (!top) return cards;
+  const prefix = top.flagged ? 'Top signal' : 'Closest to display baseline';
+  return cards + `
+    <div style="grid-column:1 / -1;font-size:12px;
+         color:${top.flagged ? 'var(--red,#ff3d5a)' : 'var(--sub,#9499b7)'};
+         font-family:var(--mono,'Space Mono',monospace)">${prefix}: ${top.feat.label}</div>`;
 }
 
 /**
@@ -478,7 +670,7 @@ function _renderHistoryPills(st) {
   pills.push(['Reputation', rep.toFixed(2), 'var(--purple,#a855f7)']);
 
   if (st.action_taken && st.action_taken !== '--') {
-    pills.push(['Action', st.action_taken, 'var(--sub2,#6b7190)']);
+    pills.push(['Action', st.action_taken, _actionColor(st.action_taken)]);
   }
 
   const tsFirst = fmtTs(st.first_seen);

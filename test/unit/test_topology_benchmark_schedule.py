@@ -40,7 +40,8 @@ def _run_one(b, topo, tmp_path, monkeypatch):
     try:
         b.run(topo, net=mock.MagicMock(), hosts=[], duration_s=300,
               sessions=1, calibration_gate=noop_gate, reset_fn=noop_reset,
-              db_gate=lambda t, cap_s: None)
+              db_gate=lambda t, cap_s: None,
+              artifacts_fn=lambda *a, **k: None)
     except SystemExit:
         pass
 
@@ -128,3 +129,29 @@ def test_run_rejects_non_300s_duration_without_doubles():
     except SystemExit:
         pass
     raise AssertionError("expected ValueError for duration_s != 300")
+
+
+def test_single_vector_timetable_totals_300s():
+    import topology.benchmark as b
+    total = sum(d for _, _, _, d in b._PHASES_300_SINGLE)
+    assert total == 300
+    kinds = [(k, d) for _, k, _, d in b._PHASES_300_SINGLE]
+    assert kinds[0] == ("benign", 90)
+    assert kinds[1] == ("flash_crowd", 30)
+    assert kinds[2] == ("wave", 120)
+    assert kinds[3] == ("quiet", 30)
+    assert kinds[4] == ("wave", 30)
+
+
+def test_per_attack_mode_fires_only_matching_vector():
+    import topology.benchmark as b
+    import pytest
+    topo = _mock_topo([])
+    for _, kind, action, _ in b._phases_for_mode("syn"):
+        b._fire_phase(topo, kind, action)
+    topo.start_syn_flood_campaign.assert_called()
+    topo.start_udp_flood_campaign.assert_not_called()
+    topo.start_icmp_flood_campaign.assert_not_called()
+    topo.start_mixed_campaign.assert_not_called()
+    with pytest.raises(ValueError):
+        b._phases_for_mode("bogus")

@@ -54,7 +54,6 @@ _ATTACK_TYPE_PORTS = {
 }
 
 def flood_spawn_count(atype: str) -> int:
-    # One flood process per host for every type. VM runs cannot afford more.
     # atype is kept so existing callers do not change.
     return 1
 

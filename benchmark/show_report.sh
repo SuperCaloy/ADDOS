@@ -1,16 +1,25 @@
 #!/usr/bin/env bash
-# show_report.sh: point the backend at the benchmark DB for report viewing.
+# show_report.sh: point the backend at a benchmark type DB for report viewing.
 # Writes benchmark/DB_TARGET (the backend reads it at boot), then restores
 # normal mode on exit so everyday runs go back to logs/ddos.db.
 #
 # Usage:
-#   ./benchmark/show_report.sh                 # instructions, you restart the backend
-#   SHOW_REPORT_BACKEND_CMD="python3 backend/main.py" ./benchmark/show_report.sh
+#   ./benchmark/show_report.sh [mixed|syn|udp|icmp]   # default: mixed
+#   SHOW_REPORT_BACKEND_CMD="python3 backend/main.py" ./benchmark/show_report.sh syn
 set -u
+
+TYPE="${1:-mixed}"
+case "$TYPE" in
+    mixed) DIR="Mixed_Benchmark" ;;
+    syn)   DIR="SYN_Benchmark" ;;
+    udp)   DIR="UDP_Benchmark" ;;
+    icmp)  DIR="ICMP_Benchmark" ;;
+    *) echo "SHOW-REPORT: unknown type '$TYPE' (use mixed|syn|udp|icmp)."; exit 2 ;;
+esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MARKER="$ROOT/benchmark/DB_TARGET"
-DB_FILE="$ROOT/benchmark/benchmark.db"
+DB_FILE="$ROOT/benchmark/$DIR/benchmark.db"
 BACKEND_CMD="${SHOW_REPORT_BACKEND_CMD:-}"
 
 if [ ! -f "$DB_FILE" ]; then
@@ -27,7 +36,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "$DB_FILE" > "$MARKER"
-echo "SHOW-REPORT: marker written; a backend started now boots onto benchmark/benchmark.db."
+echo "SHOW-REPORT: marker written; a backend started now boots onto $DB_FILE."
 echo "SHOW-REPORT: open the dashboard REPORT page, pick the benchmark session date, and"
 echo "SHOW-REPORT: download the PDF. The report reads ONLY benchmark data while the marker exists."
 

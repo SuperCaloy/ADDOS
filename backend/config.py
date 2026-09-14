@@ -52,6 +52,7 @@ ZMQ_COMMAND_ADDR   = "tcp://127.0.0.1:5556"
 # -- Pipeline tuning --------------------------------------------------------
 FLOW_TRACKER_CAP        = 500
 INFERENCE_CACHE_TTL_S   = 1.0
+FLOW_STALE_S            = 30.0
 WORKER_QUEUE_MAXSIZE    = 500
 WORKER_ITEM_TIMEOUT_S   = 3.0
 EXTRACTION_TRIGGER_PKTS = 1

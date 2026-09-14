@@ -1,8 +1,13 @@
 """Benchmark DB separation: DDOS_DB_PATH env override.
 
-Pins: backend.config honors the env var; the benchmark reset targets the
-same env DB (fallback: logs/ddos.db); run() warns when the override is not
-set so survey data cannot silently land in the default DB.
+Pins: backend.config honors the env var; session artifact saving resolves
+the live DB through the same env override; run() warns when the override
+is not set so survey data cannot silently land in the default DB.
+
+History note (2026-09-11): the session reset no longer touches the DB at
+all (offence history is preserved in every mode), so the old tests pinning
+ledger deletes and missing-DB creation at reset time were rewritten (env
+preservation) and deleted (missing-DB creation) respectively.
 """
 import importlib
 import os
@@ -47,35 +52,32 @@ def _mk_topo():
     return topo
 
 
-def test_reset_targets_env_db_when_set(tmp_path, monkeypatch):
+def test_reset_preserves_env_db_history(tmp_path, monkeypatch):
     from unittest import mock
     import topology.benchmark as b
     env_db = tmp_path / "bench.db"
     _mk_db(env_db)
     monkeypatch.setenv("DDOS_DB_PATH", str(env_db))
     with mock.patch("topology.benchmark._post_json"):
-        b._reset_reputation_keep_offences(_mk_topo())
+        b._reset_preserve_history(_mk_topo())
     conn = sqlite3.connect(str(env_db))
     conn.row_factory = sqlite3.Row
     left = conn.execute(
         "SELECT COUNT(*) n FROM ip_attack_history WHERE src_ip='10.0.0.10'"
     ).fetchone()["n"]
-    quar = conn.execute("SELECT COUNT(*) n FROM quarantine_state").fetchone()["n"]
-    ledger = conn.execute(
-        "SELECT total_offences FROM offence_totals WHERE src_ip='10.0.0.10'"
-    ).fetchone()
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
-    assert left == 0
-    assert quar == 0
-    assert ledger["total_offences"] == 1
+    assert left == 1
+    assert "offence_totals" not in tables
 
 
 def test_reset_falls_back_to_benchmark_db(monkeypatch):
     from pathlib import Path
     monkeypatch.delenv("DDOS_DB_PATH", raising=False)
-    resolved = Path(__import__("topology.benchmark", fromlist=["x"])._resolve_db_path())
-    expected = Path(resolved.__class__(__import__("topology.benchmark", fromlist=["x"]).__file__)
-                    .resolve().parents[1] / "benchmark" / "benchmark.db")
+    import topology.benchmark as b
+    resolved = Path(b._resolve_db_path())
+    expected = Path(b.__file__).resolve().parents[1] / "benchmark" / "Mixed_Benchmark" / "benchmark.db"
     assert str(resolved) == str(expected)
 
 
@@ -95,6 +97,9 @@ def _run_with_doubles(b, topo, capture=None, marker=None, monkeypatch=None):
     # marker: hermetic marker path so tests never touch the real repo file
     if marker is not None:
         mock.patch.object(b, "_marker_path", lambda: marker).start()
+    if monkeypatch is not None and marker is not None:
+        # hermetic project root so type DB creation stays inside tmp_path
+        monkeypatch.setattr(b, "_project_root", lambda: marker.parent)
     if monkeypatch is not None:
         _fast_clock(monkeypatch)
         mock.patch.object(b, "_clean_poll_gate",
@@ -105,7 +110,8 @@ def _run_with_doubles(b, topo, capture=None, marker=None, monkeypatch=None):
               calibration_gate=lambda t, cap_s: None,
               reset_fn=lambda t: None,
               db_gate=lambda t, cap_s: capture is not None and capture.append(
-                  os.path.exists(b._marker_path())))
+                  os.path.exists(b._marker_path())),
+              artifacts_fn=lambda *a, **k: None)
     except SystemExit:
         pass
 
@@ -130,7 +136,7 @@ def test_run_prints_restart_instruction(capsys, monkeypatch, tmp_path):
                       monkeypatch=monkeypatch)
     out = capsys.readouterr().out
     assert "Restart the backend" in out
-    assert "benchmark/benchmark.db" in out
+    assert "Mixed_Benchmark/benchmark.db" in out
 
 
 def test_cleanup_stale_marker_removes_and_reports(tmp_path, monkeypatch):
@@ -200,22 +206,4 @@ def tmp_path_fixture():
     return d
 
 
-def test_reset_creates_missing_db_and_folder_like_backend(tmp_path, monkeypatch):
-    from unittest import mock
-    import topology.benchmark as b
-    env_db = tmp_path / "nested" / "bench" / "bench.db"
-    monkeypatch.setenv("DDOS_DB_PATH", str(env_db))
-    assert not env_db.exists()
-    with mock.patch("topology.benchmark._post_json"):
-        b._reset_reputation_keep_offences(_mk_topo())
-    assert env_db.exists()                      # file created
-    assert env_db.parent.is_dir()               # folder chain created
-    conn = sqlite3.connect(str(env_db))
-    tables = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(ip_attack_history)")}
-    conn.close()
-    # same schema the backend creates on first boot, not a lookalike
-    assert {"ip_attack_history", "quarantine_state", "offence_totals",
-            "mitigation_events"} <= tables
-    assert {"src_ip", "ban_level", "offence_count"} <= cols
+

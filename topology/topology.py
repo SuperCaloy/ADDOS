@@ -1760,7 +1760,8 @@ def _print_banner(edge_switches: list) -> None:
     info("  py stop_all_attacks()                  # kill + flush + clear\n")
     info("  py stop_baseline()                     # stop baseline\n\n")
     info("  -- BENCHMARK -------------------------------------------------\n")
-    info("  py run_benchmark()                     # 5 sessions x 5-min, auto-stop + reset + exit\n\n")
+    info("  py run_benchmark()                     # 1-4 type menu, 5 sessions x 5-min, auto-stop + exit\n")
+    info("  py run_benchmark(attack=\"syn\")        # skip menu: full/syn/udp/icmp\n\n")
     info("  -- OTHER -----------------------------------------------------\n")
     info("  py flash_crowd()                       # 30s spike to server\n")
     info("  py flash_crowd(duration=60)            # custom duration\n")
@@ -1814,15 +1815,21 @@ if __name__ == "__main__":
         globals()[_h.name] = _h
 
     # Module-level function so `py run_benchmark()` evals it from the CLI.
-    def run_benchmark(minutes: int = 5, sessions: int = 5):
+    # Bare call prints the 1-4 type menu; explicit attack skips it.
+    def run_benchmark(minutes: int = 5, sessions: int = 5,
+                      attack: str | None = None):
+        if attack is None:
+            attack = benchmark._prompt_attack_choice()
+        elif attack not in ("full", "syn", "udp", "icmp"):
+            raise ValueError(f"unknown benchmark mode: {attack!r}")
         try:
             benchmark.run(sys.modules[__name__], net, hosts, minutes * 60,
-                          sessions=sessions)
+                          sessions=sessions, attack_mode=attack)
         except KeyboardInterrupt:
             info("*** Benchmark interrupted, stopping attacks...\n")
             try:
                 sys.modules[__name__].stop_all_attacks()
-                benchmark._reset_reputation_keep_offences(sys.modules[__name__])
+                benchmark._reset_preserve_history(sys.modules[__name__])
             except Exception:
                 pass
         raise SystemExit(0)
@@ -1847,6 +1854,9 @@ if __name__ == "__main__":
     _ap = argparse.ArgumentParser(add_help=False)
     _ap.add_argument("--benchmark", type=int, nargs="?", const=5, default=None,
                      help="run benchmark mode: N sessions x 5 minutes then auto-exit")
+    _ap.add_argument("--attack", choices=["full", "syn", "udp", "icmp"],
+                     default=None,
+                     help="benchmark type for --benchmark (default: full)")
     _args, _rest = _ap.parse_known_args()
 
     # Last-resort root-namespace survivor sweep: detached hping3/ping run in the shared root PID namespace with start_new_session=True, so if net.stop() fails they are reparented to PID 1 and keep flooding. An atexit hook and the finally block both run a global pkill backstop.
@@ -1862,7 +1872,8 @@ if __name__ == "__main__":
     try:
         if _args.benchmark is not None:
             benchmark.run(sys.modules[__name__], net, hosts, 300,
-                          sessions=_args.benchmark or 5)
+                          sessions=_args.benchmark or 5,
+                          attack_mode=_args.attack or "full")
         else:
             TopologyCLI(net)
     except SystemExit:

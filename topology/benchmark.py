@@ -5,10 +5,13 @@ passed in via the topology module object by topology.py.
 """
 import time
 import os
+import re
+import shutil
 import threading
 import sqlite3
 import json
 import statistics
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -40,6 +43,26 @@ _WAVES = {"syn": "start_syn_flood_campaign",
           "icmp": "start_icmp_flood_campaign",
           "mixed": "start_mixed_campaign"}
 
+# Single vector timetable: 1:30 benign, 0:30 flash crowd, 2:00 attack,
+# 0:30 quiet, 0:30 same vector finale. Totals 300 like the full table.
+_PHASES_300_SINGLE = [
+    (0,   "benign",      None,     90),
+    (90,  "flash_crowd", None,     30),
+    (120, "wave",        "<type>", 120),
+    (240, "quiet",       None,     30),
+    (270, "wave",        "<type>", 30),
+]
+
+
+def _phases_for_mode(mode: str) -> list:
+    # Bound 4-tuples (start_s, kind, action, duration_s) for one mode.
+    if mode == "full":
+        return list(_PHASES_300)
+    if mode in ("syn", "udp", "icmp"):
+        return [(s, k, (mode if a == "<type>" else a), d)
+                for s, k, a, d in _PHASES_300_SINGLE]
+    raise ValueError(f"unknown benchmark mode: {mode!r}")
+
 # Human-readable per-step labels shown in the operator progress output.
 _PHASE_LABELS = {
     ("benign",      None):      "benign baseline (legit-only, FPR reference)",
@@ -53,6 +76,30 @@ _PHASE_LABELS = {
 
 # session summary, printed at the end of every run
 _SUMMARY = {}
+
+_SESSION_DIR_RE = re.compile(r"^Session_(\d{3,})_\d{4}-\d{2}-\d{2}$")
+
+
+def _next_session_dir(base_dir: Path, date_str: str) -> Path:
+    # Next numbered session folder: max existing suffix + 1.
+    base_dir.mkdir(parents=True, exist_ok=True)
+    for _ in range(3):
+        best = 0
+        try:
+            names = [p.name for p in base_dir.iterdir() if p.is_dir()]
+        except OSError:
+            names = []
+        for name in names:
+            m = _SESSION_DIR_RE.match(name)
+            if m:
+                best = max(best, int(m.group(1)))
+        nxt = base_dir / f"Session_{best + 1:03d}_{date_str}"
+        try:
+            nxt.mkdir(parents=True, exist_ok=False)
+            return nxt
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"could not allocate session dir in {base_dir}")
 
 
 def _default_calibration_gate(topo, cap_s: float):
@@ -118,9 +165,6 @@ def _log_tier_snapshot(topo):
         pass
 
 
-LEDGER_TABLE = "offence_totals"  # src_ip, total_offences, last_ban_level, updated_at
-
-
 def _post_json(url, payload):
     try:
         req = urllib.request.Request(url, data=json.dumps(payload).encode(),
@@ -132,13 +176,13 @@ def _post_json(url, payload):
         pass
 
 
-def _resolve_db_path():
-    # Env override wins (matches backend.config), else the fixed benchmark
-    # DB: every session reuses it so the offence ledger persists across runs.
+def _resolve_db_path(mode: str = "full"):
+    # Env override wins (matches backend.config), else the live DB inside
+    # that benchmark type's own folder. One working DB per type.
     env = os.environ.get("DDOS_DB_PATH")
     if env:
         return Path(env)
-    return _project_root() / "benchmark" / "benchmark.db"
+    return _base_dir_for_mode(mode) / "benchmark.db"
 
 
 def _marker_path():
@@ -151,10 +195,10 @@ def _marker_path():
         return _project_root() / "benchmark" / "DB_TARGET"
 
 
-def _write_db_marker() -> None:
+def _write_db_marker(target=None) -> None:
     marker = _marker_path()
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(str(_resolve_db_path()))
+    marker.write_text(str(target if target is not None else _resolve_db_path()))
     # Under sudo the marker would be root-owned and unrewritable by the
     # normal user (tests, tools); give it back to the invoking user.
     sudo_user = os.environ.get("SUDO_USER")
@@ -181,11 +225,11 @@ def cleanup_stale_marker() -> bool:
     return False
 
 
-def _await_backend_db(topo, cap_s: float) -> None:
-# Poll until the backend reports it booted onto the benchmark DB, so the timeline never starts against the wrong database. On timeout it proceeds with a loud degraded warning.
+def _await_backend_db(topo, cap_s: float, expected_db=None) -> None:
+# Poll until the backend reports it booted onto the run's live type DB, so the timeline never starts against the wrong database. On timeout it proceeds with a loud degraded warning.
     import urllib.request
     deadline = time.monotonic() + cap_s
-    target = str(_resolve_db_path())
+    target = str(expected_db) if expected_db is not None else str(_resolve_db_path())
     while time.monotonic() < deadline:
         try:
             data = _fetch_backend_json(f"{topo.BACKEND_API}/api/db_path", timeout=2)
@@ -197,7 +241,7 @@ def _await_backend_db(topo, cap_s: float) -> None:
         time.sleep(2)
     print("BENCHMARK: WARNING - backend not confirmed on the benchmark DB "
           f"within {int(cap_s)}s; survey data may not be separated. "
-          "Restart the backend onto benchmark/benchmark.db.")
+          f"Restart the backend onto {target}.")
 
 
 def _init_benchmark_db(db_path: Path) -> None:
@@ -228,49 +272,14 @@ def _init_benchmark_db(db_path: Path) -> None:
             print(f"BENCHMARK: ownership fixup warning: {e}")
 
 
-def _reset_reputation_keep_offences(topo):
-    # Roster sets hold host NUMBERS (hN); the backend schema keys rows by
-    # src_ip strings, so convert via the topology's fixed 10.0.0.N mapping.
-    scoped = {f"10.0.0.{n}" for n in
-              (set(topo._ATTACKER_NUMS)
-               | set(getattr(topo, "_RETIRED_NUMS", ()))
-               | set(topo._LEGIT_NUMS))}
-# Absolute path anchored to project root: the backend resolves its DB the same way, and a relative "logs/ddos.db" silently no-ops if CWD differs.
-    db_path = _resolve_db_path()
-    if not db_path.exists():
-        print(f"BENCHMARK: no ddos.db at {db_path}; creating one with the "
-              "backend schema (same as system first boot).")
-        _init_benchmark_db(db_path)
-    conn = sqlite3.connect(str(db_path)); conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")   # fewer write-lock contentions
-    conn.execute("PRAGMA busy_timeout=5000")  # backend writer may hold the db
+def _reset_preserve_history(topo):
+    # Stop traffic and clear live mitigation state, never delete history.
     try:
-        conn.execute(f"""CREATE TABLE IF NOT EXISTS {LEDGER_TABLE} (
-            src_ip TEXT PRIMARY KEY, total_offences INTEGER DEFAULT 0,
-            last_ban_level INTEGER DEFAULT 0, updated_at TEXT)""")
-        rows = conn.execute(
-            "SELECT src_ip, COUNT(*) n, MAX(ban_level) mb FROM ip_attack_history "
-            "WHERE src_ip IN (%s) GROUP BY src_ip" % ",".join("?"*len(scoped)),
-            list(scoped)).fetchall()
-        for r in rows:
-            conn.execute(
-                f"INSERT INTO {LEDGER_TABLE}(src_ip,total_offences,last_ban_level,updated_at) "
-                "VALUES(?,?,?,datetime('now')) ON CONFLICT(src_ip) DO UPDATE SET "
-                "total_offences=total_offences+?, last_ban_level=MAX(last_ban_level,?), updated_at=datetime('now')",
-                (r["src_ip"], r["n"], r["mb"], r["n"], r["mb"]))
-        conn.commit()  # ledger committed BEFORE deletes
-        conn.execute("DELETE FROM ip_attack_history WHERE src_ip IN (%s)"
-                     % ",".join("?"*len(scoped)), list(scoped))
-        # scoped: only reset our session's IPs, don't wipe unrelated state
-        conn.execute("DELETE FROM quarantine_state WHERE src_ip IN (%s)"
-                     % ",".join("?"*len(scoped)), list(scoped))
-        conn.commit()  # incremental commit so a later failure keeps the ledger
-    finally:
-        conn.close()
-# /api/cache/invalidate only clears the flow inference cache, not the writer/state_machine/sinkhole in-memory structures. The real reset must hit a dedicated endpoint that clears those so the next session is ground truth without a backend restart.
+        topo.stop_all_attacks()
+    except Exception:
+        pass
     _post_json(f"{topo.BACKEND_API}/api/admin/reset_reputation", {})
-    print("BENCHMARK: reputation reset (DB rows + live backend caches); "
-          "offences persisted in 'offence_totals'.")
+    print("BENCHMARK: attacks stopped, offence history preserved.")
 
 
 def _clock_ticker(t0: float, duration_s: int, stop, interval_s: float = 5.0) -> None:
@@ -324,6 +333,148 @@ def _fire_phase(topo, kind: str, action):
     # benign: nothing to start (baseline already running)
 
 
+_BENCH_BASE_DIRS = {"full": "Mixed_Benchmark", "syn": "SYN_Benchmark",
+                    "udp": "UDP_Benchmark", "icmp": "ICMP_Benchmark"}
+
+
+def _base_dir_for_mode(mode: str) -> Path:
+    # Output root for one benchmark type. Raises on unknown mode.
+    try:
+        name = _BENCH_BASE_DIRS[mode]
+    except KeyError:
+        raise ValueError(f"unknown benchmark mode: {mode!r}")
+    return _project_root() / "benchmark" / name
+
+
+_ATTACK_CHOICES = {"1": "full", "2": "syn", "3": "udp", "4": "icmp"}
+
+
+def _resolve_attack_choice(raw: str):
+    # Pure mapping of one menu answer; None means invalid.
+    if raw is None or not raw.strip():
+        return "full"
+    return _ATTACK_CHOICES.get(raw.strip())
+
+
+def _prompt_attack_choice(input_fn=input) -> str:
+    # Interactive 1-4 menu; never raises, falls back to full.
+    print("BENCHMARK: choose benchmark type:")
+    print("BENCHMARK:   1) Full mixed (current behavior)")
+    print("BENCHMARK:   2) SYN only")
+    print("BENCHMARK:   3) UDP only")
+    print("BENCHMARK:   4) ICMP only")
+    for _ in range(3):
+        try:
+            choice = _resolve_attack_choice(
+                input_fn("Choice [1-4] (default 1): "))
+        except EOFError:
+            return "full"
+        except KeyboardInterrupt:
+            print()
+            return "full"
+        if choice is not None:
+            return choice
+        print("BENCHMARK: invalid choice, try 1-4.")
+    return "full"
+
+
+def _post_report_bytes(backend_api: str, start_date: str, end_date: str):
+    # POST the existing report endpoint, return (pdf bytes or None, status).
+    # Never raises: 404 means empty range, 400 is logged loudly (client bug).
+    payload = {"start_date": start_date, "end_date": end_date,
+               "client_today": end_date}
+    try:
+        req = urllib.request.Request(
+            f"{backend_api}/api/report", data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.read(), "saved"
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"BENCHMARK: report empty for {start_date}..{end_date}.")
+            return None, "empty"
+        print(f"BENCHMARK: report request rejected ({e.code}); "
+              f"start={start_date} end={end_date}.")
+        return None, "bad-request" if e.code == 400 else "error"
+    except Exception as e:
+        print(f"BENCHMARK: report unavailable ({e}).")
+        return None, "unreachable"
+
+
+def _copy_live_db(src: Path, dst: Path) -> None:
+    # Checkpoint WAL so the copy is self contained, then copy the file.
+    if not src.exists():
+        raise FileNotFoundError(f"live DB not found: {src}")
+    conn = sqlite3.connect(str(src), timeout=5)
+    try:
+        conn.execute("PRAGMA busy_timeout=5000")
+        for _ in range(2):
+            row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if not row[0]:
+                break
+            time.sleep(2)
+    finally:
+        conn.close()
+    shutil.copy2(str(src), str(dst))
+
+
+def _chown_to_invoking_user(path: Path) -> None:
+    # Under sudo new files are root-owned; give them back to the caller.
+    sudo_user = os.environ.get("SUDO_USER")
+    if not sudo_user:
+        return
+    try:
+        import pwd
+        rec = pwd.getpwnam(sudo_user)
+        targets = [path] + list(path.rglob("*")) if path.is_dir() else [path]
+        for target in targets:
+            os.chown(target, rec.pw_uid, rec.pw_gid)
+    except Exception as e:
+        print(f"BENCHMARK: ownership fixup warning: {e}")
+
+
+def _save_session_artifacts(base_dir, start_iso: str, end_iso: str,
+                            attack_mode: str, stats: dict, db_src,
+                            backend_api: str, calibration=None):
+    # Save one session folder: DB copy, report PDF, sidecar JSON.
+    # Never fatal: each step warns and continues.
+    date_str = (start_iso or "")[:10] or "unknown-date"
+    out = _next_session_dir(Path(base_dir), date_str)
+    try:
+        if calibration is None:
+            calibration = _SUMMARY.get("calibration_status", "unknown")
+        record = {
+            "bounds": {"start": start_iso, "end": end_iso},
+            "attack_mode": attack_mode,
+            "calibration_status": calibration,
+            "stats": stats,
+        }
+        try:
+            checked = _fetch_backend_json(f"{backend_api}/api/db_path",
+                                          timeout=2)
+            record["db_verified"] = (checked.get("db_path") == str(db_src))
+            record["db_path_checked"] = checked.get("db_path")
+        except Exception as e:
+            print(f"BENCHMARK: db identity check unavailable ({e}).")
+            record["db_verified"] = False
+        try:
+            _copy_live_db(Path(db_src), out / "benchmark.db")
+        except Exception as e:
+            print(f"BENCHMARK: session DB copy unavailable ({e}).")
+        data, status = _post_report_bytes(backend_api, start_iso[:10],
+                                          end_iso[:10])
+        record["report"] = "saved" if data is not None else status
+        if data is not None:
+            tmp_pdf = out / "report.pdf.tmp"
+            tmp_pdf.write_bytes(data)
+            os.replace(tmp_pdf, out / "report.pdf")
+        (out / "session.json").write_text(json.dumps(record, indent=2))
+        _chown_to_invoking_user(out)
+    except Exception as e:
+        print(f"BENCHMARK: session artifacts unavailable ({e}).")
+    return out
+
+
 def _session_stats(db_path: Path, start_iso: str, end_iso: str) -> dict:
     # Window-exact per-session counts from the live table. Read-only,
     # never fatal: any failure returns zeros and the run continues.
@@ -372,7 +523,8 @@ def _print_campaign_table(stats: list) -> None:
 
 
 def _run_single_session(topo, duration_s: int, calibration_gate,
-                        reset_fn, session_idx: int, sessions: int) -> dict:
+                        reset_fn, session_idx: int, sessions: int,
+                        attack_mode: str = "full") -> dict:
     # One 5:00 evaluated session with a hard stop at T+300. Returns the
     # wall-clock bounds for window-exact aggregation.
     tick_stop = threading.Event()
@@ -391,8 +543,10 @@ def _run_single_session(topo, duration_s: int, calibration_gate,
             while time.monotonic() < target:
                 time.sleep(0.25)
 
-        n = len(_PHASES_300)
-        for i, (start_s, kind, action, _) in enumerate(_PHASES_300):
+        phases = _phases_for_mode(attack_mode)
+        clean_limit = t0 + (270 if attack_mode != "full" else 240)
+        n = len(phases)
+        for i, (start_s, kind, action, dur_s) in enumerate(phases):
             if time.monotonic() >= deadline:
                 break  # hard stop: a slow phase never stretches the session
             wait_until(t0 + start_s)
@@ -400,19 +554,19 @@ def _run_single_session(topo, duration_s: int, calibration_gate,
             label = _PHASE_LABELS.get((kind, action), kind)
             _status_print(f"BENCHMARK: [session {session_idx}/{sessions}] "
                           f"[T+{emin:02d}:{esec:02d}/{total_min:02d}:{total_sec:02d}] "
-                          f"step {i + 1}/{n}: {label}")
+                          f"step {i + 1}/{n} [{dur_s}s]: {label}")
             try:
                 _fire_phase(topo, kind, action)
                 if kind == "quiet":
-                    # clean-poll window so the mixed wave is true first detection
-                    _clean_poll_gate(topo, t0 + 240)
+                    # clean-poll window so the next wave is true first detection
+                    _clean_poll_gate(topo, clean_limit)
             except Exception as e:
                 # one bad wave must not abort the whole run
                 _status_print(f"BENCHMARK: phase {kind}/{action} error ({e}); continuing")
             finally:
                 # Re-echo the current status after the phase (noisy actions
                 # bury it) so the newest line always shows the session state.
-                nxt = _PHASES_300[i + 1][0] if i + 1 < n else duration_s
+                nxt = phases[i + 1][0] if i + 1 < n else duration_s
                 nm, ns = divmod(int(nxt), 60)
                 _status_print(f"BENCHMARK: (still on) step {i + 1}/{n}: "
                               f"{label} - next step at T+{nm:02d}:{ns:02d}")
@@ -434,18 +588,29 @@ def _run_single_session(topo, duration_s: int, calibration_gate,
 
 
 def run(topo, net, hosts, duration_s: int = _SESSION_S, sessions: int = 5,
-        calibration_gate=None, reset_fn=None, db_gate=None) -> None:
+        calibration_gate=None, reset_fn=None, db_gate=None,
+        attack_mode: str = "full", artifacts_fn=None) -> None:
     # Timetable is fixed at 300 s per session; duration_s exists only so a
     # wrong value fails loudly instead of silently misscaling the clock.
     if duration_s != _SESSION_S and calibration_gate is None and reset_fn is None:
         raise ValueError("benchmark timetable is fixed at 300s per session")
+    if attack_mode not in ("full", "syn", "udp", "icmp"):
+        raise ValueError(f"unknown benchmark mode: {attack_mode!r}")
     calibration_gate = calibration_gate or _default_calibration_gate
-    reset_fn = reset_fn or _reset_reputation_keep_offences
-    db_gate = db_gate or _await_backend_db
-# DB switch: write the marker the backend reads at boot, then wait for the operator to restart the backend onto the benchmark DB before any counted traffic flows.
-    _write_db_marker()
+    reset_fn = reset_fn or _reset_preserve_history
+    artifacts_fn = artifacts_fn or _save_session_artifacts
+    live_db = _resolve_db_path(attack_mode)
+    if db_gate is None:
+        db_gate = lambda t, c: _await_backend_db(t, c, str(live_db))
+# DB switch: point the marker at this run's live type DB, create it on
+# first use, then wait for the operator to restart the backend onto it
+# before any counted traffic flows.
+    _write_db_marker(live_db)
+    if not live_db.exists():
+        _status_print(f"BENCHMARK: creating live DB at {live_db}.")
+        _init_benchmark_db(live_db)
     _status_print("BENCHMARK: Restart the backend now so it boots onto "
-                  "benchmark/benchmark.db; this run waits for confirmation.")
+                  f"{live_db}; this run waits for confirmation.")
     stats = []
     try:
         # DB GATE FIRST, exception-safe and time-bounded, so the backend is
@@ -456,10 +621,25 @@ def run(topo, net, hosts, duration_s: int = _SESSION_S, sessions: int = 5,
             _status_print(f"BENCHMARK: db gate error ({e}); proceeding")
         for s in range(1, sessions + 1):
             _status_print(f"BENCHMARK: starting session {s}/{sessions}")
-            bounds = _run_single_session(topo, _SESSION_S, calibration_gate,
-                                         reset_fn, s, sessions)
-            stats.append(_session_stats(_resolve_db_path(),
-                                        bounds["start"], bounds["end"]))
+            try:
+                bounds = _run_single_session(topo, _SESSION_S,
+                                             calibration_gate, reset_fn,
+                                             s, sessions, attack_mode)
+            except Exception as e:
+                _status_print(f"BENCHMARK: session {s} interrupted ({e}); "
+                              "recording skip.")
+                stats.append({"events": 0, "ips": 0, "det_ms": None,
+                              "mit_ms": None, "skipped": True})
+                continue
+            try:
+                stats.append(_session_stats(live_db,
+                                            bounds["start"], bounds["end"]))
+                artifacts_fn(_base_dir_for_mode(attack_mode),
+                             bounds["start"], bounds["end"], attack_mode,
+                             stats[-1], live_db, topo.BACKEND_API)
+            except Exception as e:
+                _status_print(f"BENCHMARK: session {s} artifacts "
+                              f"unavailable ({e}); continuing.")
             if s < sessions:
                 # verify the reset left a clean backend before next session
                 _clean_poll_gate(topo, time.monotonic() + 60)

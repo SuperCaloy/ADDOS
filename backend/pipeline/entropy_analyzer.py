@@ -352,8 +352,8 @@ class _ShadowState:
         log.info("TEA shadow discarded: %s", reason)
 
 
-IP_PROFILE_MIN_SAMPLES = 10
-IP_PROFILE_WINDOW      = 50
+IP_PROFILE_MIN_SAMPLES = 50
+IP_PROFILE_WINDOW      = 100
 
 class _IpEntropyProfile:
     def __init__(self):

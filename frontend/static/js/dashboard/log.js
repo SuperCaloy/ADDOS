@@ -3,21 +3,65 @@
 
 // Cached row map indexed by composite IP and event key, total count, sort direction, and scroll cursor.
 const _logRows = new Map();
+const _knownBanDurations = new Map();
 let logCt = 0;
 let logSortAsc = false;
 let logLoading = false;
 let logAllLoaded = false;
 let logOldestTimestamp = null;
 
+// Records known ban duration strings for an IP address.
+function _recordBanDuration(ip, actionStr, durationSec) {
+  if (!ip || ip === '-') return;
+  if (durationSec != null && Number(durationSec) > 0) {
+    const mins = Math.max(1, Math.round(Number(durationSec) / 60));
+    _knownBanDurations.set(ip, `${mins}m`);
+    return;
+  }
+  if (!actionStr) return;
+  const m = /time\s*ban\s*(?:\(([^)]+)\)|(\d+[smh]))/i.exec(actionStr);
+  if (m) {
+    _knownBanDurations.set(ip, m[1] || m[2]);
+  }
+}
+
+// Resolves a consistent action label for Time Ban events with time duration.
+function _resolveActionLabel(newAction, ip, ev) {
+  if (!newAction || newAction === '-') return '-';
+
+  if (!/time\s*ban/i.test(newAction)) {
+    return newAction;
+  }
+
+  if (ev && ev.ban_duration_sec) {
+    _recordBanDuration(ip, null, ev.ban_duration_sec);
+  } else {
+    _recordBanDuration(ip, newAction, null);
+  }
+
+  const m = /time\s*ban\s*(?:\(([^)]+)\)|(\d+[smh]))/i.exec(newAction);
+  if (m) {
+    const dur = m[1] || m[2];
+    return `Time Ban (${dur})`;
+  }
+
+  let dur = _knownBanDurations.get(ip);
+  if (!dur && window._activeBanDurations && window._activeBanDurations.get(ip)) {
+    dur = window._activeBanDurations.get(ip);
+  }
+  if (!dur) {
+    dur = '1m';
+  }
+
+  return `Time Ban (${dur})`;
+}
+
 // Constructs table column HTML, composite incident key, and formatted action labels from a raw event record.
 function _buildEventRowData(ev) {
   const ip        = ev.src_ip     || '-';
   const newAction = ev.action_taken || '-';
 
-  let actionLabel = newAction;
-  if (/time ban/i.test(newAction) && ev.ban_duration_sec) {
-    actionLabel = `Time Ban ${Math.round(ev.ban_duration_sec / 60)}m`;
-  }
+  const actionLabel = _resolveActionLabel(newAction, ip, ev);
 
   const html = `
     <td class="mono">${ev.timestamp      || '-'}</td>
@@ -54,6 +98,17 @@ function addLogRow(ev) {
     return;
   }
 
+  if (/time\s*ban/i.test(newAction)) {
+    const detectedKey = ip + '|detected';
+    if (_logRows.has(detectedKey) && key !== detectedKey) {
+      const dRow = _logRows.get(detectedKey);
+      const actionTd = dRow.tr.querySelector('td:last-child');
+      if (actionTd) {
+        actionTd.innerHTML = renderAction(_resolveActionLabel('Time Ban', ip, null));
+      }
+    }
+  }
+
   if (MAX_LOG > 0 && logCt >= MAX_LOG) {
     const oldest = tb.querySelector('tr:last-child');
     if (oldest) {
@@ -68,6 +123,7 @@ function addLogRow(ev) {
   tr.className  = 'row-in tr-clickable';
   tr.dataset.ip = ip;
   tr.dataset.eventType = ev.event_type || 'transition';
+  tr.dataset.isRelease = isRelease ? 'true' : 'false';
   tr.dataset.rowKey = key;
   tr.innerHTML  = html;
   
@@ -85,6 +141,12 @@ function prependOlderRows(events) {
   if (placeholder) placeholder.parentElement.remove();
 
   events.forEach(ev => {
+    if (ev && ev.src_ip && ev.action_taken) {
+      _recordBanDuration(ev.src_ip, ev.action_taken, ev.ban_duration_sec);
+    }
+  });
+
+  events.forEach(ev => {
     const { ip, newAction, html, key, isRelease } = _buildEventRowData(ev);
 
     if (_logRows.has(key)) return;
@@ -93,6 +155,7 @@ function prependOlderRows(events) {
     tr.className  = 'tr-clickable';
     tr.dataset.ip = ip;
     tr.dataset.eventType = ev.event_type || 'transition';
+    tr.dataset.isRelease = isRelease ? 'true' : 'false';
     tr.dataset.rowKey = key;
     tr.innerHTML  = html;
 
@@ -142,6 +205,11 @@ function toggleLogSort() {
 async function fetchRecentEvents() {
   try {
     const events = await apiFetch('/api/recent_events?limit=100');
+    events.forEach(ev => {
+      if (ev && ev.src_ip && ev.action_taken) {
+        _recordBanDuration(ev.src_ip, ev.action_taken, ev.ban_duration_sec);
+      }
+    });
     events.forEach(ev => addLogRow(ev));
     sortLogRows(false);
     if (events.length > 0) {

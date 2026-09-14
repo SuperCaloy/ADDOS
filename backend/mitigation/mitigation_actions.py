@@ -41,6 +41,11 @@ def remove_per_ip_meters() -> bool:
 
 
 def install_proto_block(protos: set) -> bool:
+    # Deprecated for automatic guard use: blanket protocol drops also drop
+    # benign traffic that shares the protocol (see
+    # notes/tasks/benign-traffic-blackout-proto-block-fix-plan.md).
+    # New automatic code must use install_per_ip_meters().
+    # remove_proto_block() stays for one-time cleanup of stale priority 50 rules only.
     # Installs blanket protocol drop rules on switches for attack protocols.
     # Drops targeted protocol traffic immediately at switch ingress ports.
     if not protos:

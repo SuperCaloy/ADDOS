@@ -44,6 +44,13 @@ class FlowTracker:
         self._lock   = threading.Lock()
         self._flows: OrderedDict[str, FlowEntry]    = OrderedDict()
         self._cache: dict[str, InferenceCacheEntry] = {}
+        # Last verdict per IP, written on every inference including normal
+        # verdicts. Separate from the fast-path cache: never invalidated
+        # except on flow removal, carries scored_at for age. Feeds the
+        # degrading /live endpoint so telemetry survives cache gaps.
+        self._verdicts: dict[str, dict] = {}
+        # Tracks the peak inference scores per IP across the flow session.
+        self._peaks: dict[str, dict] = {}
         self._cache_hits   = 0
         self._cache_lookups = 0
 
@@ -69,6 +76,8 @@ class FlowTracker:
     def remove_flow(self, src_ip: str) -> None:
         with self._lock:
             self._flows.pop(src_ip, None)
+            self._verdicts.pop(src_ip, None)
+            self._peaks.pop(src_ip, None)
 
     def active_count(self) -> int:
         with self._lock:
@@ -94,6 +103,7 @@ class FlowTracker:
             self._cache[src_ip] = InferenceCacheEntry(
                 if_score, is_anomaly, attack_class, confidence
             )
+            self._record_peak(src_ip, if_score, is_anomaly, attack_class, confidence)
 
     def invalidate_cache(self, src_ip: str) -> None:
         with self._lock:
@@ -105,6 +115,58 @@ class FlowTracker:
             expired = [ip for ip, e in self._cache.items() if now >= e.expires_at]
             for ip in expired:
                 del self._cache[ip]
+
+    # ------------------------------------------------------------------
+    # Last verdict & peak records: durable per-IP inference history
+    # ------------------------------------------------------------------
+
+    def _record_peak(self, src_ip: str, if_score: float, is_anomaly: bool,
+                     attack_class: str, confidence: float) -> None:
+        prior = self._peaks.get(src_ip)
+        if prior is None:
+            self._peaks[src_ip] = {
+                "if_score":     float(if_score),
+                "is_anomaly":   bool(is_anomaly),
+                "attack_class": str(attack_class),
+                "confidence":   float(confidence),
+            }
+            return
+
+        if float(if_score) > prior["if_score"]:
+            prior["if_score"] = float(if_score)
+
+        if float(confidence) >= prior["confidence"]:
+            prior["confidence"] = float(confidence)
+            prior["attack_class"] = str(attack_class)
+            prior["is_anomaly"] = bool(is_anomaly)
+
+    def get_peak(self, src_ip: str) -> dict | None:
+        with self._lock:
+            record = self._peaks.get(src_ip)
+            return dict(record) if record else None
+
+    def reset_peak(self, src_ip: str) -> None:
+        with self._lock:
+            self._peaks.pop(src_ip, None)
+
+    def remember_verdict(self, src_ip: str, if_score: float, is_anomaly: bool,
+                         attack_class: str, confidence: float) -> None:
+        with self._lock:
+            self._verdicts[src_ip] = {
+                "if_score":     if_score,
+                "is_anomaly":   is_anomaly,
+                "attack_class": attack_class,
+                "confidence":   confidence,
+                "scored_at":    time.monotonic(),
+            }
+            self._record_peak(src_ip, if_score, is_anomaly, attack_class, confidence)
+
+    def last_verdict(self, src_ip: str) -> dict | None:
+        with self._lock:
+            record = self._verdicts.get(src_ip)
+            if not record:
+                return None
+            return {**record, "age_s": time.monotonic() - record["scored_at"]}
 
 
 # Module-level singleton shared across pipeline components

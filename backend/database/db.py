@@ -117,6 +117,13 @@ def _init_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_summary_ts   ON traffic_summary(timestamp);
         CREATE INDEX IF NOT EXISTS idx_archive_ts   ON mitigation_events_archive(timestamp);
 
+        CREATE TABLE IF NOT EXISTS ip_release_snapshot (
+            src_ip      TEXT PRIMARY KEY,
+            released_at TEXT    NOT NULL,
+            reason      TEXT,
+            payload     TEXT    NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS detection_features (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp   TEXT    NOT NULL,

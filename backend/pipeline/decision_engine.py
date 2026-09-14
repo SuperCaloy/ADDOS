@@ -361,6 +361,14 @@ def on_result(src_ip: str, if_score, is_anomaly,
     with _lock:
         _stats["total_packets"] += 1
 
+    # Durable last verdict for the degrading /live endpoint. Every scored
+    # result refreshes it, including normal verdicts the fast cache drops.
+    if if_score is not None:
+        from backend.pipeline.flow_tracker import tracker as _flow_tracker
+        _flow_tracker.remember_verdict(
+            src_ip, float(if_score), bool(is_anomaly),
+            attack_class or "Normal", float(confidence or 0.0))
+
     # ML OFF - count packet as normal, skip all detection and mitigation.
     if not ML_ENABLED:
         _pkt_count = _estimate_pkt_count(flow_stats)
@@ -378,6 +386,9 @@ def on_result(src_ip: str, if_score, is_anomaly,
             threats=(1 if _is_attack else 0),
             true_neg=(0 if _is_attack else 1),
             fp=0,
+            pkt_total=_pkt_count,
+            pkt_dropped=0,
+            pkt_normal=(0 if _is_attack else _pkt_count),
         )
         return
 
@@ -442,6 +453,9 @@ def on_result(src_ip: str, if_score, is_anomaly,
             fn=(1 if _is_attacker else 0),
             if_tn=(0 if _is_attacker else 1),
             if_fn=(1 if _is_attacker else 0),
+            pkt_total=_pkt_count,
+            pkt_dropped=0,
+            pkt_normal=_pkt_count,
         )
         return
 
@@ -455,7 +469,9 @@ def on_result(src_ip: str, if_score, is_anomaly,
     if is_known_legit:
         with _lock:
             _stats["false_positives"] += 1
-        writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1)
+        _fp_pkts = _estimate_pkt_count(flow_stats)
+        writer.log_traffic_summary(total=0, threats=0, true_neg=0, fp=1,
+                                   pkt_total=_fp_pkts, pkt_dropped=0, pkt_normal=_fp_pkts)
         log.warning("FALSE POSITIVE detected: %s is a known legit host!", src_ip)
 
     with _conf_lock_mutex:
@@ -584,6 +600,7 @@ def on_result(src_ip: str, if_score, is_anomaly,
 
     writer.log_traffic_summary(
         total=1, threats=1, true_neg=0, fp=0,
+        pkt_total=_pkt_count, pkt_dropped=_pkt_count, pkt_normal=0,
         tp=(1 if _is_tp else 0),
         if_tp=_if_tp, if_fp=_if_fp,
         rf_tp=_rf["rf_tp"], rf_fp=_rf["rf_fp"], rf_tn=_rf["rf_tn"], rf_fn=_rf["rf_fn"],
