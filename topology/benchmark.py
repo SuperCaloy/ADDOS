@@ -272,14 +272,59 @@ def _init_benchmark_db(db_path: Path) -> None:
             print(f"BENCHMARK: ownership fixup warning: {e}")
 
 
-def _reset_preserve_history(topo):
-    # Stop traffic and clear live mitigation state, never delete history.
-    try:
-        topo.stop_all_attacks()
-    except Exception:
-        pass
+def _reset_session_keep_ledger(topo, db_path=None):
+    # Persist counts to the cumulative ledger, then clear episode state so
+    # the next session starts clean. Display history survives via the ledger.
+    # Never raises: failures warn and the run continues.
+    scoped = {f"10.0.0.{n}" for n in
+              (set(topo._ATTACKER_NUMS)
+               | set(getattr(topo, "_RETIRED_NUMS", ()))
+               | set(topo._LEGIT_NUMS))}
+    path = Path(db_path) if db_path is not None else _resolve_db_path()
+    if not path.exists():
+        print(f"BENCHMARK: no session DB at {path}; nothing to ledger.")
+    elif not scoped:
+        print("BENCHMARK: no scoped IPs; skipping ledger.")
+    else:
+        try:
+            conn = sqlite3.connect(str(path))
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA busy_timeout=5000")
+            try:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS offence_totals ("
+                    "src_ip TEXT PRIMARY KEY, "
+                    "total_offences INTEGER DEFAULT 0, "
+                    "last_ban_level INTEGER DEFAULT 0, updated_at TEXT)")
+                rows = conn.execute(
+                    "SELECT src_ip, COUNT(*) n, MAX(ban_level) mb "
+                    "FROM ip_attack_history WHERE src_ip IN (%s) "
+                    "GROUP BY src_ip" % ",".join("?" * len(scoped)),
+                    list(scoped)).fetchall()
+                for r in rows:
+                    conn.execute(
+                        "INSERT INTO offence_totals"
+                        "(src_ip,total_offences,last_ban_level,updated_at) "
+                        "VALUES(?,?,?,datetime('now')) "
+                        "ON CONFLICT(src_ip) DO UPDATE SET "
+                        "total_offences=total_offences+?, "
+                        "last_ban_level=MAX(last_ban_level,?), "
+                        "updated_at=datetime('now')",
+                        (r["src_ip"], r["n"], r["mb"], r["n"], r["mb"]))
+                conn.commit()  # ledger committed BEFORE deletes
+                conn.execute(
+                    "DELETE FROM ip_attack_history WHERE src_ip IN (%s)"
+                    % ",".join("?" * len(scoped)), list(scoped))
+                conn.execute(
+                    "DELETE FROM quarantine_state WHERE src_ip IN (%s)"
+                    % ",".join("?" * len(scoped)), list(scoped))
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            print(f"BENCHMARK: session ledger unavailable ({e}).")
     _post_json(f"{topo.BACKEND_API}/api/admin/reset_reputation", {})
-    print("BENCHMARK: attacks stopped, offence history preserved.")
+    print("BENCHMARK: session counts ledgered, episode state cleared.")
 
 
 def _clock_ticker(t0: float, duration_s: int, stop, interval_s: float = 5.0) -> None:
@@ -523,7 +568,7 @@ def _print_campaign_table(stats: list) -> None:
 
 
 def _run_single_session(topo, duration_s: int, calibration_gate,
-                        reset_fn, session_idx: int, sessions: int,
+                        session_idx: int, sessions: int,
                         attack_mode: str = "full") -> dict:
     # One 5:00 evaluated session with a hard stop at T+300. Returns the
     # wall-clock bounds for window-exact aggregation.
@@ -571,18 +616,14 @@ def _run_single_session(topo, duration_s: int, calibration_gate,
                 _status_print(f"BENCHMARK: (still on) step {i + 1}/{n}: "
                               f"{label} - next step at T+{nm:02d}:{ns:02d}")
     finally:
-        # UNCONDITIONAL stop + reset on EVERY exit path.
+        # UNCONDITIONAL stop on EVERY exit path. The ledger reset runs in
+        # the run loop AFTER artifacts are frozen (copy before reset).
         tick_stop.set()
-        _status_print("BENCHMARK: session done; stopping attacks, resetting "
-                      "reputation.")
+        _status_print("BENCHMARK: session done; stopping attacks.")
         try:
             topo.stop_all_attacks()
         except Exception:
             pass
-        try:
-            reset_fn(topo)
-        except Exception as e:
-            print(f"BENCHMARK: reset warning: {e}")
         bounds["end"] = _iso_now()
     return bounds
 
@@ -597,9 +638,11 @@ def run(topo, net, hosts, duration_s: int = _SESSION_S, sessions: int = 5,
     if attack_mode not in ("full", "syn", "udp", "icmp"):
         raise ValueError(f"unknown benchmark mode: {attack_mode!r}")
     calibration_gate = calibration_gate or _default_calibration_gate
-    reset_fn = reset_fn or _reset_preserve_history
     artifacts_fn = artifacts_fn or _save_session_artifacts
     live_db = _resolve_db_path(attack_mode)
+    if reset_fn is None:
+        def reset_fn(topo, _db=live_db):
+            _reset_session_keep_ledger(topo, _db)
     if db_gate is None:
         db_gate = lambda t, c: _await_backend_db(t, c, str(live_db))
 # DB switch: point the marker at this run's live type DB, create it on
@@ -623,11 +666,15 @@ def run(topo, net, hosts, duration_s: int = _SESSION_S, sessions: int = 5,
             _status_print(f"BENCHMARK: starting session {s}/{sessions}")
             try:
                 bounds = _run_single_session(topo, _SESSION_S,
-                                             calibration_gate, reset_fn,
+                                             calibration_gate,
                                              s, sessions, attack_mode)
             except Exception as e:
                 _status_print(f"BENCHMARK: session {s} interrupted ({e}); "
-                              "recording skip.")
+                              "resetting and recording skip.")
+                try:
+                    reset_fn(topo)
+                except Exception as re:
+                    _status_print(f"BENCHMARK: session {s} reset ({re}).")
                 stats.append({"events": 0, "ips": 0, "det_ms": None,
                               "mit_ms": None, "skipped": True})
                 continue
@@ -640,6 +687,10 @@ def run(topo, net, hosts, duration_s: int = _SESSION_S, sessions: int = 5,
             except Exception as e:
                 _status_print(f"BENCHMARK: session {s} artifacts "
                               f"unavailable ({e}); continuing.")
+            try:
+                reset_fn(topo)
+            except Exception as e:
+                _status_print(f"BENCHMARK: session {s} reset warning ({e}).")
             if s < sessions:
                 # verify the reset left a clean backend before next session
                 _clean_poll_gate(topo, time.monotonic() + 60)

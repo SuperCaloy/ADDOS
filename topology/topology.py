@@ -1829,7 +1829,8 @@ if __name__ == "__main__":
             info("*** Benchmark interrupted, stopping attacks...\n")
             try:
                 sys.modules[__name__].stop_all_attacks()
-                benchmark._reset_preserve_history(sys.modules[__name__])
+                benchmark._reset_session_keep_ledger(
+                    sys.modules[__name__], benchmark._resolve_db_path(attack))
             except Exception:
                 pass
         raise SystemExit(0)

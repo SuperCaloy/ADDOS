@@ -52,24 +52,25 @@ def _mk_topo():
     return topo
 
 
-def test_reset_preserves_env_db_history(tmp_path, monkeypatch):
+def test_reset_ledgers_env_db_history(tmp_path, monkeypatch):
     from unittest import mock
     import topology.benchmark as b
     env_db = tmp_path / "bench.db"
     _mk_db(env_db)
     monkeypatch.setenv("DDOS_DB_PATH", str(env_db))
     with mock.patch("topology.benchmark._post_json"):
-        b._reset_preserve_history(_mk_topo())
+        b._reset_session_keep_ledger(_mk_topo())
     conn = sqlite3.connect(str(env_db))
     conn.row_factory = sqlite3.Row
     left = conn.execute(
         "SELECT COUNT(*) n FROM ip_attack_history WHERE src_ip='10.0.0.10'"
     ).fetchone()["n"]
-    tables = {r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")}
+    ledger = conn.execute(
+        "SELECT total_offences t FROM offence_totals WHERE src_ip='10.0.0.10'"
+    ).fetchone()
     conn.close()
-    assert left == 1
-    assert "offence_totals" not in tables
+    assert left == 0
+    assert ledger["t"] == 1
 
 
 def test_reset_falls_back_to_benchmark_db(monkeypatch):
@@ -94,12 +95,13 @@ def _fast_clock(monkeypatch):
 
 
 def _run_with_doubles(b, topo, capture=None, marker=None, monkeypatch=None):
-    # marker: hermetic marker path so tests never touch the real repo file
-    if marker is not None:
-        mock.patch.object(b, "_marker_path", lambda: marker).start()
-    if monkeypatch is not None and marker is not None:
-        # hermetic project root so type DB creation stays inside tmp_path
-        monkeypatch.setattr(b, "_project_root", lambda: marker.parent)
+    # Hermetic paths so tests never touch the real repo tree. Uses
+    # monkeypatch (auto-reverted) instead of .start() (which would leak
+    # into other test files and let runs write real session folders).
+    assert monkeypatch is not None and marker is not None
+    monkeypatch.setattr(b, "_marker_path", lambda: marker)
+    # hermetic project root so type DB creation stays inside tmp_path
+    monkeypatch.setattr(b, "_project_root", lambda: marker.parent)
     if monkeypatch is not None:
         _fast_clock(monkeypatch)
         mock.patch.object(b, "_clean_poll_gate",
