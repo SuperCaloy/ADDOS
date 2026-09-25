@@ -33,6 +33,19 @@ def _is_duplicate(src_ip: str, if_score: float, action_taken: str,
 
 
 # Batch buffer for traffic_summary writes: flushed every 5 seconds
+# Legacy short buffer keys map to long traffic_summary schema columns.
+# The buffer keeps short names so existing snapshot readers
+# (tests/test_traffic_summary_packets.py) keep working; flush_summary
+# maps each alias to its schema column on INSERT.
+_SUMMARY_COLUMN_ALIASES = {
+    "total":     "total_flows_observed",
+    "threats":   "threats_mitigated",
+    "true_neg":  "true_negatives_passed",
+    "fp":        "false_positives",
+    "pkt_total":   "total_packets",
+    "pkt_dropped": "malicious_dropped",
+    "pkt_normal":  "normal_packets",
+}
 _summary_lock   = threading.Lock()
 _summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
                    "pkt_total": 0, "pkt_dropped": 0, "pkt_normal": 0,
@@ -45,6 +58,8 @@ _summary_buffer = {"total": 0, "threats": 0, "true_neg": 0, "fp": 0,
                    "rf_syn_as_icmp": 0, "rf_syn_as_udp": 0,
                    "rf_icmp_as_syn": 0, "rf_icmp_as_udp": 0,
                    "rf_udp_as_syn":  0, "rf_udp_as_icmp": 0,
+                   "rf_fn_uncertain": 0, "rf_err_misclass": 0,
+                   "mixed_excluded": 0,
                    "held": 0, "rescored": 0, "expired_unscored": 0}
 
 
@@ -372,6 +387,8 @@ def _accumulate_summary(metrics: dict) -> None:
         for key, val in metrics.items():
             if key in _summary_buffer and val:
                 _summary_buffer[key] += val
+            elif key not in _summary_buffer:
+                log.warning("writer: unknown summary key %s ignored", key)
 
 
 def _drain_summary_buffer() -> dict | None:
@@ -398,6 +415,8 @@ def log_traffic_summary(total: int, threats: int,
                         rf_syn_as_icmp: int = 0, rf_syn_as_udp: int = 0,
                         rf_icmp_as_syn: int = 0, rf_icmp_as_udp: int = 0,
                         rf_udp_as_syn:  int = 0, rf_udp_as_icmp: int = 0,
+                        rf_fn_uncertain: int = 0, rf_err_misclass: int = 0,
+                        mixed_excluded: int = 0,
                         held: int = 0, rescored: int = 0,
                         expired_unscored: int = 0) -> None:
     # Records flow and packet evaluation counts from detection and mitigation pipelines.
@@ -416,6 +435,8 @@ def log_traffic_summary(total: int, threats: int,
         "rf_syn_as_icmp": rf_syn_as_icmp, "rf_syn_as_udp": rf_syn_as_udp,
         "rf_icmp_as_syn": rf_icmp_as_syn, "rf_icmp_as_udp": rf_icmp_as_udp,
         "rf_udp_as_syn": rf_udp_as_syn, "rf_udp_as_icmp": rf_udp_as_icmp,
+        "rf_fn_uncertain": rf_fn_uncertain, "rf_err_misclass": rf_err_misclass,
+        "mixed_excluded": mixed_excluded,
         "held": held, "rescored": rescored, "expired_unscored": expired_unscored,
     })
 
@@ -440,11 +461,12 @@ def flush_summary() -> None:
                  rf_tp_syn, rf_fp_syn, rf_tn_syn, rf_fn_syn,
                  rf_tp_icmp, rf_fp_icmp, rf_tn_icmp, rf_fn_icmp,
                  rf_tp_udp, rf_fp_udp, rf_tn_udp, rf_fn_udp,
-                 rf_syn_as_icmp, rf_syn_as_udp,
-                 rf_icmp_as_syn, rf_icmp_as_udp,
-                 rf_udp_as_syn,  rf_udp_as_icmp,
-                 held, rescored, expired_unscored)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  rf_syn_as_icmp, rf_syn_as_udp,
+                  rf_icmp_as_syn, rf_icmp_as_udp,
+                  rf_udp_as_syn,  rf_udp_as_icmp,
+                  rf_fn_uncertain, rf_err_misclass, mixed_excluded,
+                  held, rescored, expired_unscored)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (ts, snapshot["pkt_total"], snapshot["pkt_dropped"], snapshot["pkt_normal"],
               snapshot["total"], snapshot["threats"],
               snapshot["true_neg"], snapshot["fp"],
@@ -457,6 +479,8 @@ def flush_summary() -> None:
               snapshot["rf_syn_as_icmp"], snapshot["rf_syn_as_udp"],
               snapshot["rf_icmp_as_syn"], snapshot["rf_icmp_as_udp"],
               snapshot["rf_udp_as_syn"],  snapshot["rf_udp_as_icmp"],
+              snapshot["rf_fn_uncertain"], snapshot["rf_err_misclass"],
+              snapshot["mixed_excluded"],
               snapshot["held"], snapshot["rescored"], snapshot["expired_unscored"]))
     except Exception:
         log.exception("Failed to flush traffic_summary")
@@ -786,12 +810,16 @@ def get_rf_metrics(start: str, end: str) -> dict:
             "udp_as_udp":   int(g("tp_udp")),
         }
 
-        # overall = micro-averaged directly from the matrix above
-        # (correct + total classified), not from the separate rf_tp/fp/tn/fn counters
-        overall = _calc_overall_from_confusion(cm)
+        # overall = aggregate over all presented flows via _calc_metrics on the
+        # separate rf_tp/fp/tn/fn counters, so Uncertain FN lowers recall.
+        # classified = micro average over classified flows only, from the 3x3
+        # matrix above. Both keys are kept so the report can label each one.
+        overall = _calc_metrics(g("tp"), g("fp"), g("tn"), g("fn"))
+        classified = _calc_overall_from_confusion(cm)
 
         return {
             "overall": overall,
+            "classified": classified,
             "syn":     _calc_metrics(g("tp_syn"),  g("fp_syn"),  g("tn_syn"),  g("fn_syn")),
             "icmp":    _calc_metrics(g("tp_icmp"), g("fp_icmp"), g("tn_icmp"), g("fn_icmp")),
             "udp":     _calc_metrics(g("tp_udp"),  g("fp_udp"),  g("tn_udp"),  g("fn_udp")),
@@ -799,6 +827,64 @@ def get_rf_metrics(start: str, end: str) -> dict:
         }
     except Exception:
         log.exception("Failed to compute RF metrics")
+        return {}
+
+
+# Cascaded Hybrid metrics: IF detection followed by RF classification.
+# Detection flavor: TP is if_tp minus rf_fn_uncertain clamped at zero,
+# FN is if_fn plus rf_fn_uncertain. Wrong type still counts as detected.
+# Exact flavor: also subtract rf_err_misclass from TP and add it to FN.
+# Hybrid FP always equals IF FP: RF TN on Uncertain never releases traffic,
+# so it cannot reduce the end to end false positive count.
+def get_cascaded_metrics(start: str, end: str) -> dict:
+    try:
+        rows = query("""
+            SELECT SUM(if_tp) as if_tp, SUM(if_fp) as if_fp,
+                   SUM(if_tn) as if_tn, SUM(if_fn) as if_fn,
+                   SUM(rf_fn) as rf_fn,
+                   SUM(rf_fn_uncertain) as rf_fn_uncertain,
+                   SUM(rf_err_misclass) as rf_err_misclass,
+                   SUM(rf_tn) as rf_tn, SUM(rf_fp) as rf_fp
+            FROM traffic_summary
+            WHERE timestamp >= ? AND timestamp <= ?
+        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        r = rows[0] if rows else {}
+        g = lambda k: int(float(r.get(k) or 0))
+        if_tp, if_fp, if_tn, if_fn = g("if_tp"), g("if_fp"), g("if_tn"), g("if_fn")
+        rf_fn, unc, mis = g("rf_fn"), g("rf_fn_uncertain"), g("rf_err_misclass")
+        rf_tn, rf_fp = g("rf_tn"), g("rf_fp")
+
+        hybrid_valid = not (rf_fn > if_tp)
+        if not hybrid_valid:
+            log.error("cascaded metrics invalid: rf_fn %d greater than if_tp %d",
+                      rf_fn, if_tp)
+
+        det_tp = max(if_tp - unc, 0)
+        det_fn = if_fn + unc
+        exact_tp = max(if_tp - unc - mis, 0)
+        exact_fn = if_fn + unc + mis
+        if not hybrid_valid:
+            det_tp = 0
+            exact_tp = 0
+
+        hybrid = _calc_metrics(det_tp, if_fp, if_tn, det_fn)
+        hybrid["hybrid_valid"] = hybrid_valid
+        hybrid["flavor"] = "detection"
+        hybrid_exact = _calc_metrics(exact_tp, if_fp, if_tn, exact_fn)
+        hybrid_exact["hybrid_valid"] = hybrid_valid
+        hybrid_exact["flavor"] = "exact"
+        return {
+            "if_tp": if_tp, "if_fp": if_fp, "if_tn": if_tn, "if_fn": if_fn,
+            "rf_fn": rf_fn, "rf_fn_uncertain": unc, "rf_err_misclass": mis,
+            "rf_tn": rf_tn, "rf_fp": rf_fp,
+            "hybrid_tp": det_tp, "hybrid_fp": if_fp,
+            "hybrid_tn": if_tn, "hybrid_fn": det_fn,
+            "hybrid_valid": hybrid_valid,
+            "hybrid": hybrid,
+            "hybrid_exact": hybrid_exact,
+        }
+    except Exception:
+        log.exception("Failed to compute cascaded metrics")
         return {}
 
 

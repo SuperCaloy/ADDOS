@@ -19,6 +19,12 @@ def _build_tea_result(flow_stats: dict) -> dict:
     }
 
 
+# MIXED_POLICY: MIXED ground truth is excluded from RF scoring. A MIXED flow
+# is not counted as FN and it does not get its own confusion row. This pins
+# the current exclude behavior explicitly instead of leaving it implicit.
+MIXED_POLICY = "exclude"
+
+
 def _compute_rf_confusion(expected_class: str, attack_class: str) -> dict:
     _class_map = {"SYN Flood": "SYN", "ICMP Flood": "ICMP", "UDP Flood": "UDP"}
     _predicted = _class_map.get(attack_class)
@@ -49,6 +55,21 @@ def _compute_rf_confusion(expected_class: str, attack_class: str) -> dict:
         else:
             res["rf_fp"] = 1
             res["rf_fn"] = 1
+            # Per class fix: a misclassification is also a per class FN for
+            # the expected type and a per class FP for the predicted type,
+            # so per class recall moves instead of staying perfect.
+            if expected_class == "SYN":
+                res["rf_fn_syn"] = 1
+            elif expected_class == "ICMP":
+                res["rf_fn_icmp"] = 1
+            elif expected_class == "UDP":
+                res["rf_fn_udp"] = 1
+            if _predicted == "SYN":
+                res["rf_fp_syn"] = 1
+            elif _predicted == "ICMP":
+                res["rf_fp_icmp"] = 1
+            elif _predicted == "UDP":
+                res["rf_fp_udp"] = 1
             mis = (expected_class, _predicted)
             if mis == ("SYN", "ICMP"):
                 res["rf_syn_as_icmp"] = 1
@@ -70,6 +91,31 @@ def _compute_rf_confusion(expected_class: str, attack_class: str) -> dict:
             res["rf_fn_icmp"] = 1
         elif expected_class == "UDP":
             res["rf_fn_udp"] = 1
+    return res
+
+
+def _score_rf_for_metrics(expected, predicted, is_legit) -> dict:
+    # Pure RF metrics scorer for the split counters. Metrics only, it never
+    # touches mitigation routing. expected and predicted use short labels
+    # ("SYN", "ICMP", "UDP") with None for no ground truth or no prediction
+    # (Uncertain). One flow sets at most one of the split error counters, so
+    # accuracy denominators count it once.
+    res = {"rf_fn_uncertain": 0, "rf_err_misclass": 0, "rf_tn": 0, "rf_fp": 0}
+    if is_legit:
+        # Legit negative branch: legit IF FP plus RF Uncertain counts RF TN.
+        # A named class on legit traffic counts RF FP. RF TN never reduces
+        # Hybrid FP until a release on Uncertain path exists.
+        if predicted is None:
+            res["rf_tn"] = 1
+        else:
+            res["rf_fp"] = 1
+        return res
+    if expected is None:
+        return res
+    if predicted is None:
+        res["rf_fn_uncertain"] = 1
+    elif predicted != expected:
+        res["rf_err_misclass"] = 1
     return res
 
 
@@ -597,13 +643,20 @@ def on_result(src_ip: str, if_score, is_anomaly,
     _class_map = {"SYN Flood": "SYN", "ICMP Flood": "ICMP", "UDP Flood": "UDP"}
     _predicted = _class_map.get(attack_class)
     _rf = _compute_rf_confusion(_expected_class, attack_class)
+    # Split counters only, never routing. MIXED was already excluded above.
+    _metrics = _score_rf_for_metrics(_expected_class, _predicted, _is_legit)
+    _was_mixed = (_gt.get(src_ip) == "MIXED")
 
     writer.log_traffic_summary(
         total=1, threats=1, true_neg=0, fp=0,
         pkt_total=_pkt_count, pkt_dropped=_pkt_count, pkt_normal=0,
         tp=(1 if _is_tp else 0),
         if_tp=_if_tp, if_fp=_if_fp,
-        rf_tp=_rf["rf_tp"], rf_fp=_rf["rf_fp"], rf_tn=_rf["rf_tn"], rf_fn=_rf["rf_fn"],
+        rf_tp=_rf["rf_tp"], rf_fp=_rf["rf_fp"] + _metrics["rf_fp"],
+        rf_tn=_rf["rf_tn"] + _metrics["rf_tn"], rf_fn=_rf["rf_fn"],
+        rf_fn_uncertain=_metrics["rf_fn_uncertain"],
+        rf_err_misclass=_metrics["rf_err_misclass"],
+        mixed_excluded=(1 if _was_mixed else 0),
         rf_tp_syn=_rf["rf_tp_syn"], rf_fp_syn=_rf["rf_fp_syn"],
         rf_tn_syn=_rf["rf_tn_syn"], rf_fn_syn=_rf["rf_fn_syn"],
         rf_tp_icmp=_rf["rf_tp_icmp"], rf_fp_icmp=_rf["rf_fp_icmp"],

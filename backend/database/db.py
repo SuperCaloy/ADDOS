@@ -106,6 +106,10 @@ def _init_schema(conn: sqlite3.Connection) -> None:
             rf_icmp_as_udp        INTEGER DEFAULT 0,
             rf_udp_as_syn         INTEGER DEFAULT 0,
             rf_udp_as_icmp        INTEGER DEFAULT 0,
+            -- RF split counters (uncertain vs misclass) and MIXED exclusion
+            rf_fn_uncertain       INTEGER DEFAULT 0,
+            rf_err_misclass       INTEGER DEFAULT 0,
+            mixed_excluded        INTEGER DEFAULT 0,
             -- hold_ip stats (unscored fallback mitigation)
             held                  INTEGER DEFAULT 0,
             rescored              INTEGER DEFAULT 0,
@@ -325,6 +329,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "rf_syn_as_icmp", "rf_syn_as_udp",
         "rf_icmp_as_syn", "rf_icmp_as_udp",
         "rf_udp_as_syn",  "rf_udp_as_icmp",
+        "rf_fn_uncertain", "rf_err_misclass", "mixed_excluded",
     ]
     for col in new_cols:
         try:

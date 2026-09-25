@@ -288,6 +288,7 @@ def _build_pdf_benchmarks(story: list, styles, start_str: str, end_str: str) -> 
     rf_m  = writer.get_rf_metrics(start_str, end_str)
     sys   = writer.get_system_metrics_attack_vs_baseline(start_str, end_str)
     lat_m = writer.get_latency_metrics(start_str, end_str)
+    casc_m = writer.get_cascaded_metrics(start_str, end_str)
 
     def _bench_table(data):
         desc_style = ParagraphStyle(
@@ -380,10 +381,14 @@ def _build_pdf_benchmarks(story: list, styles, start_str: str, end_str: str) -> 
 
     rf_data = [
         ["Metric", "Value", "Description"],
-        ["Precision",  f"{rf_o.get('precision',0):.2f}%", "Share of classified flows assigned the correct attack type"],
-        ["Recall",     f"{rf_o.get('recall',0):.2f}%",    "Share of attacks of each type that were correctly identified"],
+        ["Precision",  f"{rf_o.get('precision',0):.2f}%", "Share of flagged anomalies that were genuine attacks"],
+        ["Recall (TPR)",  f"{rf_o.get('recall',0):.2f}%", "Share of actual attacks successfully flagged"],
         ["F1-Score",   f"{rf_o.get('f1',0):.2f}%",        "Balanced measure combining Precision and Recall"],
-        ["Accuracy",   f"{rf_o.get('accuracy',0):.2f}%",  "Overall proportion of correct classifications"],
+        ["Accuracy",   f"{rf_o.get('accuracy',0):.2f}%",  "Overall proportion of correct anomaly decisions"],
+        ["False Positive Rate (FPR)", f"{rf_o.get('fpr',0):.2f}%", "Normal traffic incorrectly flagged as an attack"],
+        ["False Negative Rate (FNR)", f"{rf_o.get('fnr',0):.2f}%", "Actual attacks that went undetected"],
+        ["True Positive Rate (TPR)",  f"{rf_o.get('tpr',0):.2f}%", "Same measure as Recall, attacks correctly flagged"],
+        ["True Negative Rate (TNR)",  f"{rf_o.get('tnr',0):.2f}%", "Normal traffic correctly identified as safe"],
     ]
     rf_tbl = Table(rf_data, colWidths=[5.5*cm, 2.5*cm, 9.0*cm], repeatRows=1)
     rf_tbl.setStyle(TableStyle([
@@ -450,8 +455,74 @@ def _build_pdf_benchmarks(story: list, styles, start_str: str, end_str: str) -> 
     story.append(rf_cm_wrap)
     story.append(Spacer(1, 0.4*cm))
 
-    story.append(Paragraph("2c.  Response Latency",
+    story.append(Paragraph("2c.  Hybrid Cascaded",
         ParagraphStyle("sub3a", parent=styles["Normal"],
+                       fontSize=10, fontName="Helvetica-Bold",
+                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
+
+    hyb = (casc_m or {}).get("hybrid", {})
+    hyb_exact = (casc_m or {}).get("hybrid_exact", {})
+    hyb_valid = (casc_m or {}).get("hybrid_valid", True)
+    if not hyb_valid:
+        story.append(Paragraph(
+            "Unverified: rf_fn exceeds if_tp, so Hybrid TP is floored at 0. "
+            f"Raw counts: if_tp={(casc_m or {}).get('if_tp', 0)}, "
+            f"rf_fn={(casc_m or {}).get('rf_fn', 0)}, "
+            f"rf_fn_uncertain={(casc_m or {}).get('rf_fn_uncertain', 0)}, "
+            f"rf_err_misclass={(casc_m or {}).get('rf_err_misclass', 0)}. "
+            "Detection flavor counts a wrong attack type as detected; "
+            f"exact flavor TP={hyb_exact.get('tp', 0)} also subtracts misclassifications.",
+            ParagraphStyle("hybunv", parent=styles["Normal"],
+                           fontSize=8.5, textColor=C_RED, spaceBefore=2, spaceAfter=4)))
+
+    casc_data = [
+        ["Metric", "Value", "Description"],
+        ["Precision",  f"{hyb.get('precision',0):.2f}%", "Share of flagged anomalies that were genuine attacks"],
+        ["Recall (TPR)",  f"{hyb.get('recall',0):.2f}%", "Share of actual attacks successfully flagged"],
+        ["F1-Score",   f"{hyb.get('f1',0):.2f}%",        "Balanced measure combining Precision and Recall"],
+        ["Accuracy",   f"{hyb.get('accuracy',0):.2f}%",  "Overall proportion of correct anomaly decisions"],
+        ["False Positive Rate (FPR)", f"{hyb.get('fpr',0):.2f}%", "Normal traffic incorrectly flagged as an attack"],
+        ["False Negative Rate (FNR)", f"{hyb.get('fnr',0):.2f}%", "Actual attacks that went undetected"],
+        ["True Positive Rate (TPR)",  f"{hyb.get('tpr',0):.2f}%", "Same measure as Recall, attacks correctly flagged"],
+        ["True Negative Rate (TNR)",  f"{hyb.get('tnr',0):.2f}%", "Normal traffic correctly identified as safe"],
+    ]
+    story.append(_bench_table(casc_data))
+    story.append(Spacer(1, 0.3*cm))
+
+    _htp = hyb.get('tp', 0); _hfp = hyb.get('fp', 0)
+    _htn = hyb.get('tn', 0); _hfn = hyb.get('fn', 0)
+    _lbl_hyb = ParagraphStyle("cmh", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
+
+    def _hyb_cell(label, val, color):
+        return Paragraph(f"{label}\n{val}", ParagraphStyle("hybc", parent=styles["Normal"],
+            fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=color))
+
+    hyb_cm_data = [
+        ["", Paragraph("Predicted: Attack", _lbl_hyb), Paragraph("Predicted: Normal", _lbl_hyb)],
+        [Paragraph("Actual: Attack", _lbl_hyb), _hyb_cell("TP", _htp, C_GREEN), _hyb_cell("FN", _hfn, C_RED)],
+        [Paragraph("Actual: Normal", _lbl_hyb), _hyb_cell("FP", _hfp, C_RED),  _hyb_cell("TN", _htn, C_GREEN)],
+    ]
+    hyb_cm_tbl = Table(hyb_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm])
+    hyb_cm_tbl.setStyle(TableStyle([
+        ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
+        ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
+        ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
+        ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
+        ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
+        ("TOPPADDING",    (0,0),(-1,-1), 8),
+        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+        ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
+        ("ALIGN",   (0,0),(-1,-1), "CENTER"),
+    ]))
+    hyb_cm_wrap = Table([[hyb_cm_tbl]], colWidths=[17.0*cm])
+    hyb_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+    story.append(hyb_cm_wrap)
+    story.append(Spacer(1, 0.4*cm))
+
+    story.append(Paragraph("2d.  Response Latency",
+        ParagraphStyle("sub3b", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
 
@@ -475,7 +546,7 @@ def _build_pdf_benchmarks(story: list, styles, start_str: str, end_str: str) -> 
     story.append(_bench_table(lat_data))
     story.append(Spacer(1, 0.4*cm))
 
-    story.append(Paragraph("2d.  Controller Resource Overhead",
+    story.append(Paragraph("2e.  Controller Resource Overhead",
         ParagraphStyle("sub3", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
@@ -490,7 +561,21 @@ def _build_pdf_benchmarks(story: list, styles, start_str: str, end_str: str) -> 
          "Ryu controller CPU usage during simultaneous detection and mitigation"],
     ]
     story.append(_bench_table(res_data))
-    story.append(Spacer(1, 0.6*cm))
+    story.append(Spacer(1, 0.4*cm))
+
+
+
+def _metrics_schema_version() -> str:
+    # Detects the traffic_summary metrics schema: v2 when the split
+    # counters exist, v1 for the old aggregate rf_fn layout.
+    try:
+        rows = query("PRAGMA table_info(traffic_summary)")
+        cols = {r.get("name") for r in rows} if rows else set()
+        if "rf_fn_uncertain" in cols and "rf_err_misclass" in cols:
+            return "v2"
+    except Exception:
+        pass
+    return "v1"
 
 
 def _build_pdf_offences_summary(story: list, styles, normal_sm, start_str: str, end_str: str) -> None:

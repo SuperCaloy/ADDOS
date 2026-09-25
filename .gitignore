@@ -80,3 +80,4 @@ ENV/
 tmp/
 .claude
 session.json
+*.docx

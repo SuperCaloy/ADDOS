@@ -173,6 +173,10 @@ var ExpertStages = {
         '<div class="expert-io-col output"><span class="lbl">Hands off</span><div class="body">' + s.output + '</div></div>' +
       '</div>' +
       hiwHtml;
+
+    if (window.ExpertModals && typeof window.ExpertModals.syncWithSelection === 'function') {
+      window.ExpertModals.syncWithSelection(key);
+    }
   }
 };
 

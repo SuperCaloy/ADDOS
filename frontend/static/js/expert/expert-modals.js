@@ -6,21 +6,34 @@
 // Modal management controller tracking refresh intervals and view routing.
 var ExpertModals = {
   _pollTimer: null,
+  _currentStage: null,
 
   /**
-   * Opens the algorithm inspection modal for the specified pipeline stage and starts periodic refreshes.
-   * Configures header badges, injects initial body markup, and polls live data every two seconds.
+   * Returns true when the given stage has a "How It Works" detail view available.
+   * Mirrors the dispatch in _renderBody: only these stages have renderers.
    */
-  open: function(stageKey) {
-    var panel = document.getElementById('expert-side-panel');
-    var body = document.getElementById('expert-modal-body');
-    var head = document.querySelector('.expert-modal-head');
-    if (!panel || !body) return;
-    var s = (window.ExpertStages && window.ExpertStages.data) ? window.ExpertStages.data[stageKey] : null;
-    if (!s) return;
+  hasDetail: function(stageKey) {
+    return stageKey === 'flood' || stageKey === 'entropy' || stageKey === 'if_node' || stageKey === 'rf';
+  },
 
-    var badge = head ? head.querySelector('.expert-modal-badge') : null;
-    var title = head ? head.querySelector('.expert-modal-title') : null;
+  /**
+   * Returns true when the algorithm detail side panel is currently visible.
+   */
+  isOpen: function() {
+    if (window.SidePanel) return SidePanel.isOpen('expert-side-panel');
+    var panel = document.getElementById('expert-side-panel');
+    return !!(panel && panel.classList.contains('open'));
+  },
+
+  /**
+   * Re-renders the header badge/title for the given stage without touching the body.
+   */
+  _renderHead: function(stageKey) {
+    var head = document.querySelector('.expert-modal-head');
+    var s = (window.ExpertStages && window.ExpertStages.data) ? window.ExpertStages.data[stageKey] : null;
+    if (!head || !s) return;
+    var badge = head.querySelector('.expert-modal-badge');
+    var title = head.querySelector('.expert-modal-title');
     if (badge) {
       badge.style.background = s.color + '22';
       badge.style.borderColor = s.color + '55';
@@ -28,17 +41,16 @@ var ExpertModals = {
       badge.textContent = s.num;
     }
     if (title) title.textContent = s.title;
+  },
 
-    this._renderBody(stageKey, body);
-    if (window.SidePanel) SidePanel.open('expert-side-panel', { storageKey: 'expert-panel-width', focusSel: '.expert-modal-close' });
-
+  /**
+   * (Re)starts the 2s live refresh poll for the given stage, clearing any prior timer.
+   */
+  _startPoll: function(stageKey) {
     var self = this;
     if (this._pollTimer) clearInterval(this._pollTimer);
     this._pollTimer = setInterval(function() {
-      var isOpen = window.SidePanel
-        ? SidePanel.isOpen('expert-side-panel')
-        : document.getElementById('expert-side-panel').classList.contains('open');
-      if (!isOpen) {
+      if (!self.isOpen()) {
         clearInterval(self._pollTimer);
         self._pollTimer = null;
         return;
@@ -48,12 +60,51 @@ var ExpertModals = {
   },
 
   /**
+   * Syncs the open detail panel with a newly selected stage.
+   * Called on every stage selection change. No-op when the panel is closed,
+   * when the stage is already shown, or when the stage has no detail content
+   * (last valid content stays visible in that case).
+   */
+  syncWithSelection: function(stageKey) {
+    if (!stageKey || stageKey === this._currentStage) return;
+    if (!this.isOpen()) return;
+    if (!this.hasDetail(stageKey)) return;
+    var body = document.getElementById('expert-modal-body');
+    if (!body) return;
+    this._currentStage = stageKey;
+    this._renderHead(stageKey);
+    this._renderBody(stageKey, body);
+    this._startPoll(stageKey);
+  },
+
+  /**
+   * Opens the algorithm inspection modal for the specified pipeline stage and starts periodic refreshes.
+   * Configures header badges, injects initial body markup, and polls live data every two seconds.
+   */
+  open: function(stageKey) {
+    var panel = document.getElementById('expert-side-panel');
+    var body = document.getElementById('expert-modal-body');
+    if (!panel || !body) return;
+    if (!this.hasDetail(stageKey)) return;
+    var s = (window.ExpertStages && window.ExpertStages.data) ? window.ExpertStages.data[stageKey] : null;
+    if (!s) return;
+
+    this._currentStage = stageKey;
+    this._renderHead(stageKey);
+    this._renderBody(stageKey, body);
+    if (window.SidePanel) SidePanel.open('expert-side-panel', { storageKey: 'expert-panel-width', focusSel: '.expert-modal-close' });
+
+    this._startPoll(stageKey);
+  },
+
+  /**
    * Closes the active algorithm inspection side panel and terminates background refresh polling.
    * Clears the polling timer reference. Visibility is handled by SidePanel.
    */
   close: function() {
     if (window.SidePanel) SidePanel.close('expert-side-panel');
     if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
+    this._currentStage = null;
   },
 
   /**

@@ -1,8 +1,3 @@
-"""Topology-side 5-minute benchmark mode, 5 sessions per command.
-
-Imports no topology code (no __init__.py in topology/). All helpers are
-passed in via the topology module object by topology.py.
-"""
 import time
 import os
 import re
@@ -615,6 +610,11 @@ def _run_single_session(topo, duration_s: int, calibration_gate,
                 nm, ns = divmod(int(nxt), 60)
                 _status_print(f"BENCHMARK: (still on) step {i + 1}/{n}: "
                               f"{label} - next step at T+{nm:02d}:{ns:02d}")
+        # Honor the last wave's full duration: phase run time otherwise comes
+        # only from the NEXT phase's wait, and the final wave has no next
+        # phase, so without this the session tears down instantly after it
+        # fires (mixed/full symptom). Capped at the hard deadline.
+        wait_until(deadline)
     finally:
         # UNCONDITIONAL stop on EVERY exit path. The ledger reset runs in
         # the run loop AFTER artifacts are frozen (copy before reset).

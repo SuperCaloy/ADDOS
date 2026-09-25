@@ -907,13 +907,13 @@ function _renderExpertTrace(d, ml, st, f, th) {
   expertContent.innerHTML = `
     <div style="margin-bottom:20px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(61,108,255,.1);color:var(--blue);border:1px solid rgba(61,108,255,.25);font-family:var(--mono)">IF Features (16)</span>
+        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(61,108,255,.1);color:var(--blue);border:1px solid rgba(61,108,255,.25);font-family:var(--mono)">IF Features</span>
       </div>
       ${ifHtml}
     </div>
     <div style="margin-bottom:20px;">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
-        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(255,176,46,.1);color:var(--amber);border:1px solid rgba(255,176,46,.25);font-family:var(--mono)">RF Features (15)</span>
+        <span style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;padding:2px 8px;border-radius:4px;background:rgba(255,176,46,.1);color:var(--amber);border:1px solid rgba(255,176,46,.25);font-family:var(--mono)">RF Features</span>
       </div>
       ${rfHtml}
     </div>
