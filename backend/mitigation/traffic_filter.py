@@ -7,7 +7,8 @@ from backend.config import SIMULATION_MODE
 log = logging.getLogger(__name__)
 
 # Ban durations per level
-# state_machine calls get_ban_duration(ban_level) and never hardcodes durations.
+# state_machine resolves ban durations via get_ban_duration_for_score(score);
+# get_ban_duration(ban_level) remains for backward compatibility and audit paths.
 if SIMULATION_MODE:
     BAN_LEVELS = [30, 60, 120, 300, 600, 1200]       # 30s -> 20m
 else:
@@ -27,6 +28,18 @@ def get_ban_duration(ban_level: int) -> int:
     # Clamps to MAX_BAN_LEVEL if out of range.
     level = max(0, min(ban_level, MAX_BAN_LEVEL))
     return BAN_LEVELS[level]
+
+
+def get_ban_duration_for_score(score: float) -> int:
+    # Returns ban duration in seconds for the given reputation/decay score.
+    # Ladder is evenly spaced every 2 points; score >= 10 routes to
+    # blackhole before this lookup. Index 5 stays unused by this path.
+    try:
+        tier = int(float(score) // 2)
+    except (TypeError, ValueError):
+        tier = 0
+    tier = max(0, min(tier, 4))
+    return BAN_LEVELS[tier]
 
 
 def get_blackhole_ttl() -> int:

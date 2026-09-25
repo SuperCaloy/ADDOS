@@ -732,6 +732,9 @@ def _calc_metrics(tp, fp, tn, fn) -> dict:
     recall    = tp / max(tp + fn, 1)
     f1        = 2 * precision * recall / max(precision + recall, 1e-9)
     accuracy  = (tp + tn) / max(tp + fp + tn + fn, 1)
+    # Owner decision: empty benign denominator with zero FP reads as
+    # perfect refusal (FPR 0 with TNR 100), never degenerate TNR 0.
+    tnr = 100.0 if (fp == 0 and tn == 0) else (tn / max(tn + fp, 1)) * 100
     return {
         "tp": int(tp), "fp": int(fp), "tn": int(tn), "fn": int(fn),
         "precision": round(precision * 100, 2),
@@ -741,7 +744,7 @@ def _calc_metrics(tp, fp, tn, fn) -> dict:
         "fpr":       round((fp / max(fp + tn, 1)) * 100, 2),
         "fnr":       round((fn / max(fn + tp, 1)) * 100, 2),
         "tpr":       round(recall * 100, 2),
-        "tnr":       round((tn / max(tn + fp, 1)) * 100, 2),
+        "tnr":       round(tnr, 2),
     }
 
 

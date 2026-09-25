@@ -12,7 +12,7 @@ from backend.database import writer
 from backend.mitigation.traffic_filter import (
     BLACKHOLE_TTL_SECONDS, resolve_phase1_actions, resolve_ban_action, resolve_blackhole_action,
     resolve_release_action,
-    get_ban_duration, get_blackhole_ttl, MAX_BAN_LEVEL,
+    get_ban_duration, get_ban_duration_for_score, get_blackhole_ttl, MAX_BAN_LEVEL,
     SINKHOLE_CONFIDENCE_THRESHOLD,
 )
 from backend.mitigation import behavioral
@@ -392,8 +392,9 @@ class StateMachine:
                 else:
                     if _prio == "High":
                         # High priority: skip observation, apply immediate Time Ban.
+                        # Duration follows the reputation ladder; ban_lvl stays as audit counter.
                         ban_lvl  = min(1, MAX_BAN_LEVEL)
-                        ban_secs = get_ban_duration(ban_lvl)
+                        ban_secs = get_ban_duration_for_score(behavioral.get_decay_score(src_ip))
                         state = IpState(
                             src_ip        = src_ip,
                             phase         = 2,
@@ -567,9 +568,9 @@ class StateMachine:
         if not state.transition_reason:
             state.transition_reason = "Escalated to Time Ban"
 
-        # Increment ban_level before lookup so each ban is longer than the last.
+        # ban_level is an audit counter only; duration comes from the live decay score ladder.
         state.ban_level      = min(state.ban_level + 1, MAX_BAN_LEVEL)
-        ban_secs             = get_ban_duration(state.ban_level)
+        ban_secs             = get_ban_duration_for_score(behavioral.get_decay_score(state.src_ip))
         state.offence_count  = min(state.offence_count + 1, 5)  # offence on escalation
         state.phase          = 2
         state.phase_entered  = time.monotonic()
