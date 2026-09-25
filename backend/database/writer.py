@@ -745,6 +745,19 @@ def _calc_metrics(tp, fp, tn, fn) -> dict:
     }
 
 
+def _resolve_window_bounds(start: str, end: str) -> tuple[str, str]:
+    # Accept optional full timestamps YYYY-MM-DD HH:MM:SS, else whole day.
+    def _bound(value: str, is_start: bool) -> str:
+        text = (value or "").strip()
+        try:
+            datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            return text
+        except Exception:
+            suffix = "00:00:00" if is_start else "23:59:59"
+            return f"{text} {suffix}"
+    return _bound(start, True), _bound(end, False)
+
+
 # IF-level metrics based on if_tp/if_fp/if_tn/if_fn.
 def get_if_metrics(start: str, end: str) -> dict:
     try:
@@ -753,7 +766,7 @@ def get_if_metrics(start: str, end: str) -> dict:
                    SUM(if_tn) as tn, SUM(if_fn) as fn
             FROM traffic_summary
             WHERE timestamp >= ? AND timestamp <= ?
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        """, _resolve_window_bounds(start, end))
         r = rows[0] if rows else {}
         return _calc_metrics(float(r.get("tp") or 0), float(r.get("fp") or 0),
                              float(r.get("tn") or 0), float(r.get("fn") or 0))
@@ -793,7 +806,7 @@ def get_rf_metrics(start: str, end: str) -> dict:
                    SUM(rf_udp_as_syn)  as udp_as_syn,  SUM(rf_udp_as_icmp) as udp_as_icmp
             FROM traffic_summary
             WHERE timestamp >= ? AND timestamp <= ?
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        """, _resolve_window_bounds(start, end))
         r = rows[0] if rows else {}
         g = lambda k: float(r.get(k) or 0)
 
@@ -847,7 +860,7 @@ def get_cascaded_metrics(start: str, end: str) -> dict:
                    SUM(rf_tn) as rf_tn, SUM(rf_fp) as rf_fp
             FROM traffic_summary
             WHERE timestamp >= ? AND timestamp <= ?
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        """, _resolve_window_bounds(start, end))
         r = rows[0] if rows else {}
         g = lambda k: int(float(r.get(k) or 0))
         if_tp, if_fp, if_tn, if_fn = g("if_tp"), g("if_fp"), g("if_tn"), g("if_fn")
@@ -896,7 +909,7 @@ def get_latency_metrics(start: str, end: str) -> dict:
             FROM mitigation_events
             WHERE timestamp >= ? AND timestamp <= ?
               AND detection_ms IS NOT NULL AND mitigation_ms IS NOT NULL
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        """, _resolve_window_bounds(start, end))
         r = rows[0] if rows else {}
         return {
             "detection_ms":  round(float(r.get("avg_detect")   or 0), 2),
@@ -963,7 +976,7 @@ def get_system_metrics_attack_vs_baseline(start: str, end: str) -> dict:
                     AS mitigating_cpu
             FROM system_metrics
             WHERE timestamp >= ? AND timestamp <= ?
-        """, (f"{start} 00:00:00", f"{end} 23:59:59"))
+        """, _resolve_window_bounds(start, end))
 
         r = rows[0] if rows else {}
         return {

@@ -55,7 +55,7 @@ _ATTACK_TYPE_PORTS = {
 
 def flood_spawn_count(atype: str) -> int:
     # atype is kept so existing callers do not change.
-    return 1
+    return 2
 
 
 _flood_spawn_count = flood_spawn_count

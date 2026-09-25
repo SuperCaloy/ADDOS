@@ -421,8 +421,18 @@ def _prompt_attack_choice(input_fn=input) -> str:
 def _post_report_bytes(backend_api: str, start_date: str, end_date: str):
     # POST the existing report endpoint, return (pdf bytes or None, status).
     # Never raises: 404 means empty range, 400 is logged loudly (client bug).
-    payload = {"start_date": start_date, "end_date": end_date,
-               "client_today": end_date}
+    # Accepts day strings or exact session timestamps; exact bounds are sent
+    # as start_datetime and end_datetime with the day range kept for fallback.
+    def _has_time(value: str) -> bool:
+        text = (value or "").strip()
+        return " " in text or "T" in text
+    start_day = (start_date or "").strip()[:10]
+    end_day = (end_date or "").strip()[:10]
+    payload = {"start_date": start_day, "end_date": end_day,
+               "client_today": end_day}
+    if _has_time(start_date) and _has_time(end_date):
+        payload["start_datetime"] = (start_date or "").strip().replace("T", " ")
+        payload["end_datetime"] = (end_date or "").strip().replace("T", " ")
     try:
         req = urllib.request.Request(
             f"{backend_api}/api/report", data=json.dumps(payload).encode(),
@@ -501,8 +511,8 @@ def _save_session_artifacts(base_dir, start_iso: str, end_iso: str,
             _copy_live_db(Path(db_src), out / "benchmark.db")
         except Exception as e:
             print(f"BENCHMARK: session DB copy unavailable ({e}).")
-        data, status = _post_report_bytes(backend_api, start_iso[:10],
-                                          end_iso[:10])
+        data, status = _post_report_bytes(backend_api, start_iso,
+                                          end_iso)
         record["report"] = "saved" if data is not None else status
         if data is not None:
             tmp_pdf = out / "report.pdf.tmp"

@@ -38,14 +38,50 @@ def history_dates():
     return jsonify({"dates": dates})
 
 
+def _parse_exact_dt(value: str) -> datetime.datetime | None:
+    text = (value or "").strip().replace("T", " ")
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _is_exact_ts(value: str) -> bool:
+    text = (value or "").strip()
+    return " " in text or "T" in text
+
+
+def _to_sql_bounds(start_str: str, end_str: str) -> tuple[str, str]:
+    s = (start_str or "").strip().replace("T", " ")
+    e = (end_str or "").strip().replace("T", " ")
+    if " " not in s:
+        s = f"{s} 00:00:00"
+    if " " not in e:
+        e = f"{e} 23:59:59"
+    return s, e
+
+
 def _validate_dates(body: dict) -> tuple[str, str, str | None]:
     today     = datetime.date.today()
     client_today_str = body.get("client_today", "")
     if client_today_str:
         try:
-            today = datetime.date.fromisoformat(client_today_str)
+            today = datetime.date.fromisoformat(client_today_str[:10])
         except ValueError:
             pass
+    start_dt_raw = body.get("start_datetime", "")
+    end_dt_raw   = body.get("end_datetime", "")
+    if start_dt_raw and end_dt_raw:
+        start_dt = _parse_exact_dt(start_dt_raw)
+        end_dt = _parse_exact_dt(end_dt_raw)
+        if start_dt is None or end_dt is None:
+            return None, None, "Invalid datetime format. Use ISO format."
+        if end_dt < start_dt:
+            return None, None, "End datetime must be >= start datetime."
+        if end_dt.date() > today:
+            return None, None, "End datetime cannot be in the future."
+        return (start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                end_dt.strftime("%Y-%m-%d %H:%M:%S"), None)
     start_str = body.get("start_date", "")
     end_str   = body.get("end_date", "")
     try:
@@ -67,8 +103,7 @@ def generate_report():
     if err:
         return jsonify({"error": err}), 400
 
-    start_sql = f"{start_str} 00:00:00"
-    end_sql   = f"{end_str} 23:59:59"
+    start_sql, end_sql = _to_sql_bounds(start_str, end_str)
 
     rows = query("""
         SELECT timestamp, src_ip, predicted_class, attack_vector,
@@ -93,7 +128,9 @@ def generate_report():
     pdf_bytes = _build_pdf(start_str, end_str, rows)
     buf = io.BytesIO(pdf_bytes)
     buf.seek(0)
-    filename = f"ddos_report_{start_str}_to_{end_str}.pdf"
+    safe_start = start_str.replace(" ", "_").replace(":", "-")
+    safe_end = end_str.replace(" ", "_").replace(":", "-")
+    filename = f"ddos_report_{safe_start}_to_{safe_end}.pdf"
     return send_file(buf, mimetype="application/pdf",
                      as_attachment=True, download_name=filename)
 
@@ -104,6 +141,11 @@ def _fmt_period(start_str: str, end_str: str) -> str:
     # Human readable report range like "Sep 2, 2026 - Sep 9, 2026".
     # Falls back to the raw strings if parsing fails.
     try:
+        if _is_exact_ts(start_str) or _is_exact_ts(end_str):
+            s = datetime.datetime.fromisoformat(start_str.strip().replace("T", " "))
+            e = datetime.datetime.fromisoformat(end_str.strip().replace("T", " "))
+            return (f"{s.strftime('%b')} {s.day}, {s.year} {s.strftime('%H:%M')} - "
+                    f"{e.strftime('%b')} {e.day}, {e.year} {e.strftime('%H:%M')}")
         s = datetime.date.fromisoformat(start_str)
         e = datetime.date.fromisoformat(end_str)
         return f"{s.strftime('%b')} {s.day}, {s.year} - {e.strftime('%b')} {e.day}, {e.year}"
@@ -184,7 +226,7 @@ def _build_pdf_cover_and_summary(story: list, styles, start_str: str, end_str: s
                SUM(false_positives) AS fp
         FROM traffic_summary
         WHERE timestamp >= ? AND timestamp <= ?
-    """, (f"{start_str} 00:00:00", f"{end_str} 23:59:59"))
+    """, _to_sql_bounds(start_str, end_str))
     sr        = summary_rows[0] if summary_rows else {}
     tot_flows = sr.get("total_flows") or 0
     true_neg  = sr.get("true_neg")    or 0
@@ -583,20 +625,37 @@ def _build_pdf_offences_summary(story: list, styles, normal_sm, start_str: str, 
     # Lists attack session counts, max severity phases reached, and timeline bounds.
     story += _section_header("3.  Offences Summary", styles)
 
-    off_rows = query("""
-        SELECT src_ip,
-               COUNT(*)            AS sessions,
-               MAX(offence_count)  AS max_offences,
-               MAX(ban_level)      AS max_ban,
-               MAX(phase_reached)  AS max_phase,
-               MIN(first_seen)     AS first_seen,
-               MAX(unblocked_at)   AS last_seen,
-               attack_vector
-        FROM ip_attack_history
-        WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
-        GROUP BY src_ip
-        ORDER BY max_offences DESC, sessions DESC
-    """, (start_str, end_str))
+    if _is_exact_ts(start_str) or _is_exact_ts(end_str):
+        start_sql, end_sql = _to_sql_bounds(start_str, end_str)
+        off_rows = query("""
+            SELECT src_ip,
+                   COUNT(*)            AS sessions,
+                   MAX(offence_count)  AS max_offences,
+                   MAX(ban_level)      AS max_ban,
+                   MAX(phase_reached)  AS max_phase,
+                   MIN(first_seen)     AS first_seen,
+                   MAX(unblocked_at)   AS last_seen,
+                   attack_vector
+            FROM ip_attack_history
+            WHERE unblocked_at >= ? AND unblocked_at <= ?
+            GROUP BY src_ip
+            ORDER BY max_offences DESC, sessions DESC
+        """, (start_sql, end_sql))
+    else:
+        off_rows = query("""
+            SELECT src_ip,
+                   COUNT(*)            AS sessions,
+                   MAX(offence_count)  AS max_offences,
+                   MAX(ban_level)      AS max_ban,
+                   MAX(phase_reached)  AS max_phase,
+                   MIN(first_seen)     AS first_seen,
+                   MAX(unblocked_at)   AS last_seen,
+                   attack_vector
+            FROM ip_attack_history
+            WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
+            GROUP BY src_ip
+            ORDER BY max_offences DESC, sessions DESC
+        """, (start_str, end_str))
 
     if off_rows:
         off_headers = ["Source IP", "Sessions", "Max Offences", "First Seen", "Last Seen"]
@@ -672,14 +731,25 @@ def _build_pdf_mitigation_log(story: list, styles, deduped: list[dict]) -> None:
 def _build_pdf_history_and_signatures(story: list, styles, start_str: str, end_str: str) -> None:
     # Builds Section 5 for completed attack sessions and network admin verification block.
     # Provides administrator sign-off fields for report validation and auditing.
-    history_rows = query("""
-        SELECT src_ip, attack_vector, if_score, confidence, priority,
-               phase_reached, first_seen, unblocked_at, duration_sec,
-               unblock_reason, ban_level, offence_count
-        FROM ip_attack_history
-        WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
-        ORDER BY unblocked_at DESC
-    """, (start_str, end_str))
+    if _is_exact_ts(start_str) or _is_exact_ts(end_str):
+        hist_start, hist_end = _to_sql_bounds(start_str, end_str)
+        history_rows = query("""
+            SELECT src_ip, attack_vector, if_score, confidence, priority,
+                   phase_reached, first_seen, unblocked_at, duration_sec,
+                   unblock_reason, ban_level, offence_count
+            FROM ip_attack_history
+            WHERE unblocked_at >= ? AND unblocked_at <= ?
+            ORDER BY unblocked_at DESC
+        """, (hist_start, hist_end))
+    else:
+        history_rows = query("""
+            SELECT src_ip, attack_vector, if_score, confidence, priority,
+                   phase_reached, first_seen, unblocked_at, duration_sec,
+                   unblock_reason, ban_level, offence_count
+            FROM ip_attack_history
+            WHERE date(unblocked_at) >= ? AND date(unblocked_at) <= ?
+            ORDER BY unblocked_at DESC
+        """, (start_str, end_str))
 
     if history_rows:
         story += _section_header("5.  IP Attack History (Completed Sessions)", styles)
