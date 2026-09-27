@@ -44,14 +44,12 @@ var ExpertStages = {
       num: 4, color: '#F59E0B',
       title: 'Flood Prefilter',
       file: 'backend/pipeline/flood_prefilter.py',
-      desc: 'Rate-based prefilter employing exponentially weighted moving average (EWMA) thresholds. Monitors per-source, per-protocol packet arrival rates for SYN, ICMP, and UDP traffic against dynamically learned baselines. Flags sources that exceed adaptive thresholds or exhibit sub-second burst patterns. Correlates simultaneous protocol violations to identify coordinated multi-vector attacks.',
+      desc: 'Rate-based prefilter employing exponentially weighted moving average (EWMA) thresholds. Monitors per-source, per-protocol packet arrival rates for SYN, ICMP, and UDP traffic against dynamically learned baselines. Flags sources that exceed adaptive thresholds or exhibit sub-second burst patterns.',
       input: 'Per-packet protocol classification\nand source IP, on each flow arrival',
       output: 'Binary flag (exceeded or not)\nper source IP and protocol',
       formula: [
         { f: 'ewma = (1 - alpha) * ewma + alpha * current_pps', note: 'EWMA baseline learning with alpha = 0.1' },
-        { f: 'threshold = max(ewma * 3.0, floor = 25)', note: 'adaptive limit with minimum floor' },
-        { f: 'burst: count >= 40% of threshold in 0.1s or 0.5s', note: 'sub-second spike detection' },
-        { f: 'correlation: 2+ protocols tripped simultaneously', note: 'multi-vector attack identification' }
+        { f: 'threshold = max(ewma * 3.0, floor = 25)', note: 'adaptive limit with minimum floor' }
       ]
     },
     entropy: {

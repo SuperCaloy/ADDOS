@@ -127,7 +127,7 @@ var ExpertModals = {
 
   /**
    * Renders the Flood Prefilter inspection view with session summaries, protocol counters, and flagged sources.
-   * Outlines threshold criteria and highlights multi-protocol coordinated attack vectors.
+   * Outlines threshold criteria per source IP and protocol.
    */
   _renderPrefilter: function(d, el) {
     var pf = (d.pipeline && d.pipeline.flood_prefilter_breakdown) || {};
@@ -173,13 +173,12 @@ var ExpertModals = {
     } else {
       entries.forEach(function(e) {
         var ip = e[0], protos = e[1];
-        var multi = protos.length > 1 ? ' <span style="color:var(--red);font-weight:700">MULTI</span>' : '';
-        flaggedHtml += '<div class="expert-modal-signal-row"><span style="font-weight:700;min-width:130px;font-family:var(--mono)">' + ip + '</span><span style="min-width:80px">' + protos.join('+') + '</span>' + multi + '</div>';
+        flaggedHtml += '<div class="expert-modal-signal-row"><span style="font-weight:700;min-width:130px;font-family:var(--mono)">' + ip + '</span><span style="min-width:80px">' + protos.join('+') + '</span></div>';
       });
     }
 
     el.innerHTML =
-      '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">The first guard. It watches how many packets each source IP is sending, for each protocol (SYN, ICMP, UDP). It learns what is normal for each source over time using a moving average. If a source suddenly sends way more than usual, or if a huge burst arrives in a fraction of a second, that source gets flagged. If the same source is flagged on two or more protocols at the same time, it is likely a coordinated attack.</div></div>' +
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">The first guard. It watches how many packets each source IP is sending, for each protocol (SYN, ICMP, UDP). It learns what is normal for each source over time using a moving average. If a source suddenly sends way more than usual, or if a huge burst arrives in a fraction of a second, that source gets flagged.</div></div>' +
       '<div class="expert-demo-slot" id="expert-demo-slot"></div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Session Summary</div>' +
         '<div style="display:flex;gap:12px;flex-wrap:wrap">' +
@@ -188,7 +187,7 @@ var ExpertModals = {
       '</div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Detection by Protocol</div>' + protoHtml + '</div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Currently Active (' + entries.length + ')</div>' + flaggedHtml + '</div>' +
-      '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">A source is flagged when: (1) its packet rate goes above 3 times what the system learned as normal for that protocol, OR (2) it sends a big burst (40% of the limit) in less than 0.1 seconds. The baseline adjusts over time. If the same source is flagged on 2+ protocols at the same time, it is marked as a coordinated multi-protocol attack.</div></div>';
+      '<div class="expert-modal-section"><div class="expert-modal-section-title">How it decides</div><div class="expert-modal-logic">A source is flagged when: (1) its packet rate goes above 3 times what the system learned as normal for that protocol, OR (2) it sends a big burst (40% of the limit) in less than 0.1 seconds. The baseline adjusts over time.</div></div>';
   },
 
   /**

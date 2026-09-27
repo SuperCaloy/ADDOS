@@ -7,7 +7,7 @@
  * transform/opacity only, syncLive performs writes and never reads layout.
  */
 
-var DEMO_STEP_MS = 900;
+var DEMO_STEP_MS = 2500;
 var DEMO_VIEW_W = 300;
 var DEMO_VIEW_H = 200;
 
@@ -18,7 +18,7 @@ var DEMO_SUMMARY = {
   rf: 'See voting in action'
 };
 
-var DEMO_STEP_COUNT = { flood: 6, entropy: 6, if_node: 10, rf: 6 };
+var DEMO_STEP_COUNT = { flood: 6, entropy: 8, if_node: 12, rf: 7 };
 
 // Forest size, locked by fit test (harness renders of both candidates at
 // 360px dark: 20 trees lay out 2 per row over 10 rows with zero x-overflow
@@ -26,11 +26,11 @@ var DEMO_STEP_COUNT = { flood: 6, entropy: 6, if_node: 10, rf: 6 };
 var DEMO_RF_COUNT = 20;
 
 var DEMO_CLASSES = ['SYN Flood', 'ICMP Flood', 'UDP Flood'];
-var DEMO_CLASS_KEY = { 'SYN Flood': 'syn', 'ICMP Flood': 'icmp', 'UDP Flood': 'udp', 'Anomaly': 'anom' };
+var DEMO_CLASS_KEY = { 'SYN Flood': 'syn', 'ICMP Flood': 'icmp', 'UDP Flood': 'udp', 'Anomaly': 'anom', 'Normal': 'norm' };
 
-// Fixed IF scatter: dense normal cloud plus one separated anomaly.
+// Fixed IF scatter: dense normal cloud plus two separated anomalies.
 // Points are seeded so every render is identical.
-var DEMO_IF_ANOMALY = [255, 45];
+var DEMO_IF_ANOMALIES = [[255, 45], [45, 30]];
 
 function demoRng(seed) {
   var s = seed;
@@ -43,7 +43,7 @@ function demoRng(seed) {
 }
 
 /**
- * Dense normal cloud (40 points) with one separated anomaly.
+ * Dense normal cloud (40 points) with two separated anomalies.
  */
 function demoIfPoints() {
   var rng = demoRng(42);
@@ -54,7 +54,7 @@ function demoIfPoints() {
       Math.round(100 + rng() * 80)
     ]);
   }
-  return { normals: normals, anomaly: DEMO_IF_ANOMALY };
+  return { normals: normals, anomalies: DEMO_IF_ANOMALIES };
 }
 
 /**
@@ -74,9 +74,10 @@ function demoIfNormalTarget() {
 }
 
 /**
- * Ten granular IF steps: random split idea, outlier separation, crowded
- * narrowing, both boxes, path length meaning, trees pair, forest average,
- * score formula, why fast. Coordinates live in the 300x200 viewBox.
+ * Eleven granular IF steps: two anomalies tracked throughout, random split
+ * idea, outlier separation twice, crowded narrowing, both boxes, path
+ * length meaning, trees pair, forest average, score formula, why fast.
+ * Coordinates live in the 300x200 viewBox.
  */
 function demoIfSteps() {
   var norm = demoIfNormalTarget();
@@ -92,7 +93,12 @@ function demoIfSteps() {
     { x1: 40, y1: b.y + b.h, x2: 150, y2: b.y + b.h }
   ];
   var anomBox = { x: 225, y: 20, w: 60, h: 50 };
-  var plain = { cuts: [], boxAnom: null, boxNorm: null, depthNorm: 0, bars: false, trees: false, forest: false, score: false, isolated: false };
+  var anomBoxB = { x: 12, y: 6, w: 70, h: 52 };
+  var cutsB = [
+    { x1: 0, y1: 60, x2: 150, y2: 60 },
+    { x1: 85, y1: 0, x2: 85, y2: 100 }
+  ];
+  var plain = { cuts: [], boxAnom: null, boxAnomB: null, depthAnomB: 0, boxNorm: null, depthNorm: 0, bars: false, trees: false, forest: false, score: false, isolated: false };
   function step(patch) {
     var s = {};
     Object.keys(plain).forEach(function(k) { s[k] = plain[k]; });
@@ -100,57 +106,71 @@ function demoIfSteps() {
     return s;
   }
   return [
-    step({ caption: 'Forty normal flows cluster together. One suspicious flow sits apart.' }),
+    step({ caption: 'Two suspicious flows sit apart from a crowd of forty normal flows. Watch what random cuts do to each.' }),
     step({ caption: 'A random split: pick a feature, pick a random value, divide everything in two.', cuts: base.slice(0, 1) }),
     step({ caption: 'Each split divides whichever region still holds the point you follow.', cuts: base }),
-    step({ caption: 'The outlier separates after 3 splits: nothing else shares its corner.', cuts: base, boxAnom: anomBox, isolated: true }),
-    step({ caption: 'A normal point hides in the crowd: splits keep landing on groups, not on it.', cuts: base.concat(extra.slice(0, 2)), boxAnom: anomBox, isolated: true }),
-    step({ caption: 'Same tree, a normal point: 7 splits to box it.', cuts: base.concat(extra), boxAnom: anomBox, boxNorm: b, depthNorm: 7, isolated: true }),
-    step({ caption: 'Path length means splits counted from root to leaf: 3 against 7.', cuts: base.concat(extra), boxAnom: anomBox, boxNorm: b, depthNorm: 7, isolated: true }),
-    step({ caption: 'Two isolation paths side by side: the short red path and the long green path.', trees: true, depthNorm: 7, isolated: true }),
-    step({ caption: 'Eight trees isolate the same anomaly differently. Average path: 3.3 splits.', forest: true, depthNorm: 7, isolated: true }),
-    step({ caption: 's = 2^(-3.3/13.0) = 0.84. Above its threshold: ANOMALY. Averaging 150 shallow trees costs no distance math. That is why IF is fast.', score: true, depthNorm: 7, isolated: true })
+    step({ caption: 'The first outlier separates after 3 splits: nothing else shares its corner.', cuts: base, boxAnom: anomBox, isolated: true }),
+    step({ caption: 'A second outlier needs only 2 splits. Fast again, not a one-off.', cuts: base.concat(cutsB), boxAnom: anomBox, boxAnomB: anomBoxB, depthAnomB: 2, isolated: true }),
+    step({ caption: 'A normal point hides in the crowd: splits keep landing on groups, not on it.', cuts: base.concat(cutsB, extra.slice(0, 2)), boxAnom: anomBox, boxAnomB: anomBoxB, depthAnomB: 2, isolated: true }),
+    step({ caption: 'Same tree, a normal point: 7 splits to box it.', cuts: base.concat(cutsB, extra), boxAnom: anomBox, boxAnomB: anomBoxB, depthAnomB: 2, boxNorm: b, depthNorm: 7, isolated: true }),
+    step({ caption: 'Path length means splits counted from root to leaf: 2 to 3 against 7.', cuts: base.concat(cutsB, extra), boxAnom: anomBox, boxAnomB: anomBoxB, depthAnomB: 2, boxNorm: b, depthNorm: 7, isolated: true }),
+    step({ caption: 'Two isolation paths side by side: short red paths, one long green path.', trees: true, depthNorm: 7, isolated: true }),
+    step({ caption: 'Sixteen trees isolate the same anomaly differently. Average path: 3.5 splits.', forest: true, depthNorm: 7, isolated: true }),
+    step({ caption: 's = 2^(-3.5/13.0) = 0.83. Above its threshold: ANOMALY. Averaging 150 shallow trees costs no distance math. That is why IF is fast.', score: true, depthNorm: 7, isolated: true }),
+    step({ caption: 'Anomaly confirmed. Sending flow features to Random Forest.', handoff: true, depthNorm: 7, isolated: true })
   ];
 }
 
 /**
- * Eight isolation paths for the same anomaly point, depths 2,3,3,4,2,5,3,4.
- * Average is 3.25. Shapes reuse the forest tree vocabulary.
+ * Seeded isolation tree shape with a genuine branching structure: a taken
+ * root to leaf path of exactly `depth` edges plus one dead-end leaf per
+ * level on the opposite side. The lean varies per seed so each tree has
+ * its own silhouette. Fits the 120x110 box.
  */
-function demoIfForest() {
-  var vLeft = {
-    nodes: { root: [60, 10], L: [32, 40], R: [88, 40], LL: [16, 70], LR: [48, 70] },
-    edges: [['root', 'L'], ['root', 'R'], ['L', 'LL'], ['L', 'LR']],
-    taken: ['root', 'L', 'LL']
-  };
-  var vRight = {
-    nodes: { root: [60, 10], L: [32, 40], R: [88, 40], RL: [72, 70], RR: [104, 70] },
-    edges: [['root', 'L'], ['root', 'R'], ['R', 'RL'], ['R', 'RR']],
-    taken: ['root', 'R', 'RR']
-  };
-  var vDeep = {
-    nodes: { root: [60, 8], L: [32, 36], R: [88, 36], LL: [20, 64], LR: [44, 64], LLL: [20, 90] },
-    edges: [['root', 'L'], ['root', 'R'], ['L', 'LL'], ['L', 'LR'], ['LL', 'LLL']],
-    taken: ['root', 'L', 'LL', 'LLL']
-  };
-  var vDeepR = {
-    nodes: { root: [60, 8], L: [32, 36], R: [88, 36], RL: [72, 62], RR: [104, 62], RRR: [104, 88] },
-    edges: [['root', 'L'], ['root', 'R'], ['R', 'RL'], ['R', 'RR'], ['RR', 'RRR']],
-    taken: ['root', 'R', 'RR', 'RRR']
-  };
-  var vLong = {
-    nodes: { root: [60, 6], L: [36, 26], R: [84, 26], LL: [24, 46], LR: [48, 46], LLL: [24, 66], LLLL: [24, 86] },
-    edges: [['root', 'L'], ['root', 'R'], ['L', 'LL'], ['L', 'LR'], ['LL', 'LLL'], ['LLL', 'LLLL']],
-    taken: ['root', 'L', 'LL', 'LLL', 'LLLL']
-  };
-  var vChain = {
-    nodes: { root: [60, 6], a: [42, 24], b: [62, 42], c: [42, 60], d: [62, 78], leaf: [42, 96] },
-    edges: [['root', 'a'], ['a', 'b'], ['b', 'c'], ['c', 'd'], ['d', 'leaf']],
-    taken: ['root', 'a', 'b', 'c', 'd', 'leaf']
-  };
-  var picks = [vLeft, vDeep, vDeepR, vLong, vRight, vChain, vDeep, vLong];
-  var paths = picks.map(function(tree) {
-    return { depth: tree.taken.length - 1, tree: tree };
+function demoIfBranchTree(depth, seed) {
+  var rng = demoRng(seed);
+  var nodes = { root: [60, 4] };
+  var edges = [];
+  var taken = ['root'];
+  var px = 60;
+  var prev = 'root';
+  for (var i = 1; i <= depth; i++) {
+    var y = 4 + Math.round(i * (92 / depth));
+    var lean = rng() < 0.5 ? -1 : 1;
+    if (px < 30) lean = 1;
+    if (px > 90) lean = -1;
+    var dx = 14 + Math.round(rng() * 12);
+    var x = Math.max(12, Math.min(108, px + lean * dx));
+    if (i === depth) x = Math.max(20, Math.min(100, 60 + lean * 10));
+    var id = 'n' + i;
+    nodes[id] = [x, y];
+    edges.push([prev, id]);
+    var sx = Math.max(10, Math.min(110, px - lean * (18 + Math.round(rng() * 10))));
+    var sid = 's' + i;
+    nodes[sid] = [sx, y - 2];
+    edges.push([prev, sid]);
+    taken.push(id);
+    prev = id;
+    px = x;
+  }
+  return { nodes: nodes, edges: edges, taken: taken };
+}
+
+/**
+ * Sixteen seeded isolation paths per scenario from the generator.
+ * Scenario A mixes mostly shallow anomaly paths with one slower tree
+ * (average 3.5); scenario B mixes deep normal paths with one faster
+ * tree (average 9.5). Every tree gets its own silhouette.
+ */
+var DEMO_IF_DEPTHS_A = [6, 3, 3, 4, 2, 5, 3, 4, 2, 3, 3, 4, 2, 5, 3, 4];
+var DEMO_IF_DEPTHS_B = [10, 9, 10, 10, 7, 10, 9, 10, 10, 9, 10, 10, 9, 10, 10, 9];
+
+function demoIfForest(scenario) {
+  var isB = scenario === 'B';
+  var depths = isB ? DEMO_IF_DEPTHS_B : DEMO_IF_DEPTHS_A;
+  var base = isB ? 1000 : 0;
+  var paths = depths.map(function(depth, i) {
+    return { depth: depth, tree: demoIfBranchTree(depth, base + i * 17 + depth) };
   });
   var avg = paths.reduce(function(a, p) { return a + p.depth; }, 0) / paths.length;
   return { paths: paths, avg: avg };
@@ -271,25 +291,29 @@ function demoGateVerdict(pct, gate) {
 }
 
 /**
- * Six fixed TEA steps following the real pipeline: count the mix, compute
- * Shannon entropy, compare against the EWMA baseline, score the z distance
- * against adaptive sigma, stack surge signals into confidence, then latch.
+ * Eight plain TEA steps following the real pipeline: count the window,
+ * turn counts into shares, work the entropy arithmetic, compare high
+ * against low entropy, learn the baseline, score z against live sigma,
+ * stack live surges into confidence, then latch with dual streaks.
  */
 function demoTeaSteps() {
   return [
-    { kind: 'inputs', caption: 'Count one window: 200 packets across 4 talkers with shares 50, 25, 12.5, 12.5 percent.', diversity: 0.92, z: 0.2, locked: false },
-    { kind: 'entropy', caption: 'Shannon entropy H = -(0.5·log2 0.5 + 0.25·log2 0.25 + 2 × 0.125·log2 0.125) = 1.75 bits. Even shares mean high entropy; one dominant talker means low entropy.', diversity: 0.88, z: -0.4, locked: false },
-    { kind: 'baseline', caption: 'EWMA baselines over 15 intervals learn normal entropy and spread per switch. Live means shown beside the diagram.', diversity: 0.6, z: -1.2, locked: false },
-    { kind: 'zscore', caption: 'z = (current - baseline) / spread, checked against the adaptive attack sigma (live value shown). A flood drives z far negative.', diversity: 0.31, z: -2.6, locked: false },
-    { kind: 'confidence', caption: 'Surge signals stack: size, intensity, packet rate. Two or more sustained signals plus a mechanized cluster means HIGH confidence (live checklist shown).', diversity: 0.28, z: -2.7, locked: false },
-    { kind: 'latch', caption: 'Baseline frozen. Unlock needs both streaks: IF normal 5 and TEA normal 60.', diversity: 0.28, z: -2.7, locked: true }
+    { kind: 'inputs', caption: 'Count one window of traffic: who sent how much.', diversity: 0.92, z: 0.2, locked: false },
+    { kind: 'shares', caption: 'Turn counts into shares: half the packets came from one talker, the rest split up.', diversity: 0.9, z: 0.1, locked: false },
+    { kind: 'entropy', caption: 'Entropy turns shares into one number: H = 1.75 bits here. Spread-out traffic scores high.', diversity: 0.88, z: -0.4, locked: false },
+    { kind: 'compare', caption: 'Same math on flood traffic gives 0.62 bits. Low entropy means predictable, likely automated.', diversity: 0.31, z: -2.6, locked: false },
+    { kind: 'baseline', caption: 'The system learns normal entropy over 15 calm intervals. Live means shown beside the diagram.', diversity: 0.6, z: -1.2, locked: false },
+    { kind: 'zscore', caption: 'How far is today from normal? z = difference divided by spread, checked against the live sigma line.', diversity: 0.31, z: -2.6, locked: false },
+    { kind: 'confidence', caption: 'Count the warning lights: size, intensity, packet rate. Two or more lit plus machine-like traffic means HIGH confidence.', diversity: 0.28, z: -2.7, locked: false },
+    { kind: 'latch', caption: 'Freeze the memory of normal during attacks. Reopen only after 5 clean IF checks and 60 clean TEA checks.', diversity: 0.28, z: -2.7, locked: true }
   ];
 }
 
 /**
  * Six fixed prefilter steps following the real pipeline: count per source
  * and protocol, learn the EWMA baseline, apply the threshold, check the
- * burst rule, flag the source, correlate across protocols.
+ * burst rule, show an unambiguous extreme flood, flag the source.
+ * Single protocol throughout: no cross protocol correlation claimed.
  */
 function demoPrefilterSteps() {
   var calm = [{ x: 30, y: 70, lane: 0 }, { x: 70, y: 72, lane: 0 }, { x: 110, y: 68, lane: 0 }];
@@ -297,17 +321,18 @@ function demoPrefilterSteps() {
     { x: 150, y: 55, lane: 0 }, { x: 175, y: 40, lane: 0 }, { x: 200, y: 28, lane: 0 },
     { x: 225, y: 22, lane: 0 }, { x: 250, y: 20, lane: 0 }
   ];
-  var lane2 = [
-    { x: 190, y: 85, lane: 1 }, { x: 215, y: 78, lane: 1 },
-    { x: 240, y: 75, lane: 1 }, { x: 262, y: 73, lane: 1 }
+  var extreme = [
+    { x: 150, y: 30, lane: 0 }, { x: 170, y: 24, lane: 0 }, { x: 190, y: 20, lane: 0 },
+    { x: 210, y: 16, lane: 0 }, { x: 230, y: 14, lane: 0 }, { x: 250, y: 12, lane: 0 },
+    { x: 265, y: 10, lane: 0 }, { x: 278, y: 10, lane: 0 }
   ];
   return [
-    { caption: 'Per source IP and protocol, count packets per second. Live flagged counts shown beside the diagram.', dots: calm, lines: 0, flagged: false, multi: false },
-    { caption: 'EWMA baseline learns normal: 0.9 × 40 + 0.1 × 60 = 42.0 pps.', dots: calm, lines: 1, flagged: false, multi: false },
-    { caption: 'Threshold = max(42 × 3, 25) = 126 pps. Never below the 25 floor.', dots: calm, lines: 2, flagged: false, multi: false },
-    { caption: 'Burst rule: 40% of 126 is about 50 packets inside 0.1s or 0.5s.', dots: calm.concat(burst), lines: 2, flagged: false, multi: false },
-    { caption: 'A source crossing its line is flagged for that protocol.', dots: calm.concat(burst), lines: 2, flagged: true, multi: false },
-    { caption: 'Two or more protocols at once marks MULTI: coordinated attack.', dots: calm.concat(burst).concat(lane2), lines: 2, flagged: true, multi: true }
+    { kind: 'count', caption: 'Per source IP and protocol, count packets per second. Live flagged counts shown beside the diagram.', dots: calm, lines: 0, flagged: false },
+    { kind: 'baseline', caption: 'EWMA baseline learns normal: 0.9 × 40 + 0.1 × 60 = 42.0 pps.', dots: calm, lines: 1, flagged: false },
+    { kind: 'threshold', caption: 'Threshold = max(42 × 3, 25) = 126 pps. Never below the 25 floor.', dots: calm, lines: 2, flagged: false },
+    { kind: 'burst', caption: 'Burst rule: 40% of 126 is about 50 packets inside 0.1s or 0.5s.', dots: calm.concat(burst), lines: 2, flagged: false },
+    { kind: 'extreme', caption: 'Obvious attack: about 10,400 pps against a 126 limit, over 80 times the threshold. No borderline call needed.', dots: calm.concat(extreme), lines: 2, flagged: false, spikePps: 10400 },
+    { kind: 'flag', caption: 'A source crossing its line is flagged for that protocol.', dots: calm.concat(burst), lines: 2, flagged: true }
   ];
 }
 
@@ -362,7 +387,18 @@ function demoLiveValues(stage, d) {
         conf = typeof c.conf === 'number' ? c.conf : 0;
       }
     });
-    return { gate: gate, winner: winner, conf: conf };
+    var ifData = d.if || {};
+    var ifScores = ifData.recent_scores || [];
+    var ifBest = null;
+    ifScores.forEach(function(s) {
+      if (!ifBest || s.score > ifBest.score) ifBest = s;
+    });
+    return {
+      gate: gate, winner: winner, conf: conf,
+      ifScore: ifBest ? ifBest.score : 0,
+      ifThr: typeof ifData.threshold === 'number' ? ifData.threshold : 0.6092,
+      hasIf: ifScores.length > 0
+    };
   }
   if (stage === 'entropy') {
     var g = (d.tea && d.tea.global) || {};
@@ -408,23 +444,52 @@ function demoSvgOpen() {
   return '<svg class="expert-demo-svg" viewBox="0 0 ' + DEMO_VIEW_W + ' ' + DEMO_VIEW_H + '" role="img">';
 }
 
-function demoIfDiagram(step, live) {
+/**
+ * Closing frame: the IF to RF handoff, or the cleared end card for the
+ * normal example. No feature counts, only flow features in general.
+ */
+function demoIfHandoffHtml(scenario) {
+  if (scenario === 'B') {
+    return '<div class="expert-demo-banner expert-demo-cleared">Below threshold: flow cleared here. Random Forest never sees it.</div>';
+  }
+  return '<div class="expert-demo-handoff">'
+    + '<span class="expert-demo-stagechip expert-demo-stage-if">Isolation Forest</span>'
+    + '<svg class="expert-demo-arrow" viewBox="0 0 48 16" aria-hidden="true">'
+    + '<line x1="2" y1="8" x2="38" y2="8" class="expert-demo-arrowline"/>'
+    + '<path d="M30 2 L44 8 L30 14" class="expert-demo-arrowhead"/></svg>'
+    + '<span class="expert-demo-stagechip expert-demo-stage-rf">Random Forest</span>'
+    + '</div>'
+    + '<div class="expert-demo-banner">Anomaly confirmed. Sending flow features to Random Forest.</div>';
+}
+
+function demoIfDiagram(step, live, scenario) {
   var s = demoIfSteps()[step];
+  var sc = scenario === 'B' ? 'B' : 'A';
   var cloud = demoIfPoints();
+  if (s.handoff) return demoIfHandoffHtml(sc);
   if (s.trees) return demoIfTreesSvg();
-  if (s.forest) return demoIfForestHtml();
-  if (s.score) return demoIfScoreHtml(live || {});
+  if (s.forest) return demoIfForestHtml(sc);
+  if (s.score) return demoIfScoreHtml(live || {}, sc);
   var h = demoSvgOpen();
   cloud.normals.forEach(function(p) {
     h += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="4" class="expert-demo-dot"/>';
   });
-  h += '<circle cx="' + cloud.anomaly[0] + '" cy="' + cloud.anomaly[1] + '" r="5" class="expert-demo-anom"/>';
+  cloud.anomalies.forEach(function(a) {
+    h += '<circle cx="' + a[0] + '" cy="' + a[1] + '" r="5" class="expert-demo-anom"/>';
+    h += '<circle cx="' + a[0] + '" cy="' + a[1] + '" r="9" class="expert-demo-anomring"/>';
+  });
+  var normgg = demoIfNormalTarget();
+  h += '<circle cx="' + normgg.point[0] + '" cy="' + normgg.point[1] + '" r="9" class="expert-demo-normring"/>';
   s.cuts.forEach(function(c) {
     h += '<line x1="' + c.x1 + '" y1="' + c.y1 + '" x2="' + c.x2 + '" y2="' + c.y2 + '" class="expert-demo-cut"/>';
   });
   if (s.boxAnom) {
     h += '<rect x="' + s.boxAnom.x + '" y="' + s.boxAnom.y + '" width="' + s.boxAnom.w + '" height="' + s.boxAnom.h + '" class="expert-demo-box"/>';
     h += '<text x="' + (s.boxAnom.x + s.boxAnom.w / 2) + '" y="' + (s.boxAnom.y - 6) + '" text-anchor="middle" class="expert-demo-depthtag">depth 3</text>';
+  }
+  if (s.boxAnomB) {
+    h += '<rect x="' + s.boxAnomB.x + '" y="' + s.boxAnomB.y + '" width="' + s.boxAnomB.w + '" height="' + s.boxAnomB.h + '" class="expert-demo-box"/>';
+    h += '<text x="' + (s.boxAnomB.x + s.boxAnomB.w / 2) + '" y="' + (s.boxAnomB.y + s.boxAnomB.h + 14) + '" text-anchor="middle" class="expert-demo-depthtag">depth 2</text>';
   }
   if (s.boxNorm) {
     var norm = demoIfNormalTarget();
@@ -440,15 +505,16 @@ function demoIfDiagram(step, live) {
  * depth label, plus the ensemble average. Reuses the forest vocabulary
  * with a red anomaly vote on every taken leaf.
  */
-function demoIfForestHtml() {
-  var f = demoIfForest();
+function demoIfForestHtml(scenario) {
+  var f = demoIfForest(scenario);
+  var isB = scenario === 'B';
   var h = '<div class="expert-demo-forest">';
   f.paths.forEach(function(p) {
-    h += '<div class="expert-demo-iftree">' + demoRfTreeSvg(p.tree, 'Anomaly', true)
+    h += '<div class="expert-demo-iftree">' + demoRfTreeSvg(p.tree, isB ? 'Normal' : 'Anomaly', true, true)
       + '<div class="expert-demo-tdepth">depth ' + p.depth + '</div></div>';
   });
   h += '</div>';
-  h += '<div class="expert-demo-banner">average path ' + f.avg.toFixed(2) + ' across 8 trees</div>';
+  h += '<div class="expert-demo-banner">average path ' + f.avg.toFixed(2) + ' across 16 trees</div>';
   return h;
 }
 
@@ -456,19 +522,13 @@ function demoIfForestHtml() {
  * Worked score card: s = 2^(-E(h)/c(n)) with the forest average, the
  * c(1024) normalizer, and the live threshold gate.
  */
-function demoIfScoreHtml(live) {
-  var f = demoIfForest();
+function demoIfScoreHtml(live, scenario) {
+  var f = demoIfForest(scenario === 'B' ? 'B' : 'A');
   var cn = 13.02;
   var s = demoIfScore(f.avg, cn);
   var thr = (live && typeof live.threshold === 'number') ? live.threshold : 0.6092;
   var anom = s >= thr;
   var h = '<div class="expert-demo-formula">s(x, n) = 2<sup>(-E(h(x)) / c(n))</sup></div>'
-    + '<div class="expert-demo-calcs">'
-    + '<div class="expert-demo-calcrow"><span>E(h), average path</span><span>' + f.avg.toFixed(2) + '</span></div>'
-    + '<div class="expert-demo-calcrow"><span>c(1024), normalizer</span><span>' + cn.toFixed(2) + '</span></div>'
-    + '<div class="expert-demo-calcrow"><span>s, anomaly score</span><span>' + s.toFixed(2) + '</span></div>'
-    + '<div class="expert-demo-calcrow"><span>threshold (live)</span><span>' + thr.toFixed(4) + '</span></div>'
-    + '</div>'
     + '<div class="expert-demo-banner">' + (anom ? 'ANOMALY: score clears the threshold.' : 'NORMAL: score below the threshold.') + '</div>';
   return h;
 }
@@ -513,7 +573,7 @@ function demoTeaDiagram(step, live) {
   var s = demoTeaSteps()[step];
   live = live || {};
   var h = demoSvgOpen();
-  if (s.kind === 'inputs' || s.kind === 'entropy') {
+  if (s.kind === 'inputs' || s.kind === 'entropy' || s.kind === 'shares') {
     var shares = [['IP-A', 50], ['IP-B', 25], ['IP-C', 12.5], ['IP-D', 12.5]];
     shares.forEach(function(sh, i) {
       var w = Math.round(sh[1] / 100 * 240);
@@ -521,7 +581,22 @@ function demoTeaDiagram(step, live) {
       h += '<rect x="48" y="' + (20 + i * 34) + '" width="' + w + '" height="16" class="expert-demo-meter"/>';
       h += '<text x="' + (56 + w) + '" y="' + (33 + i * 34) + '" class="expert-demo-ztxt">' + sh[1] + '%</text>';
     });
-    h += '<text x="10" y="180" class="expert-demo-ztxt">' + (s.kind === 'entropy' ? 'H = 1.75 bits' : '200 packets, one window') + '</text>';
+    var foot = s.kind === 'entropy' ? 'H = 1.75 bits'
+      : (s.kind === 'shares' ? 'shares: 50 / 25 / 12.5 / 12.5' : '200 packets, one window');
+    h += '<text x="10" y="180" class="expert-demo-ztxt">' + foot + '</text>';
+    return h + '</svg>';
+  }
+  if (s.kind === 'compare') {
+    var normW = Math.round(1.75 / 2 * 240);
+    var floodW = Math.round(0.62 / 2 * 240);
+    h += '<text x="10" y="40" class="expert-demo-lane">normal traffic</text>';
+    h += '<rect x="10" y="50" width="260" height="16" class="expert-demo-track"/>';
+    h += '<rect x="10" y="50" width="' + normW + '" height="16" class="expert-demo-meter"/>';
+    h += '<text x="10" y="92" class="expert-demo-ztxt">H = 1.75 bits: varied, healthy</text>';
+    h += '<text x="10" y="122" class="expert-demo-lane">flood traffic</text>';
+    h += '<rect x="10" y="132" width="260" height="16" class="expert-demo-track"/>';
+    h += '<rect x="10" y="132" width="' + floodW + '" height="16" class="expert-demo-glyph-flat"/>';
+    h += '<text x="10" y="174" class="expert-demo-ztxt">H = 0.62 bits: uniform, suspect</text>';
     return h + '</svg>';
   }
   if (s.kind === 'confidence') {
@@ -568,9 +643,6 @@ function demoPrefilterDiagram(step) {
     if (s.lines >= 2 && lane.y === 50) {
       h += '<line x1="34" y1="45" x2="286" y2="45" class="expert-demo-thrline"/>';
     }
-    if (s.lines >= 2 && lane.y === 105 && s.multi) {
-      h += '<line x1="34" y1="100" x2="286" y2="100" class="expert-demo-thrline"/>';
-    }
   });
   s.dots.forEach(function(dt) {
     var y = dt.lane === 0 ? dt.y : dt.y + 55;
@@ -579,14 +651,15 @@ function demoPrefilterDiagram(step) {
   if (s.flagged) {
     h += '<text x="286" y="30" text-anchor="end" class="expert-demo-flag">FLAGGED</text>';
   }
-  if (s.multi) {
-    h += '<text x="286" y="118" text-anchor="end" class="expert-demo-flag">MULTI</text>';
+  if (s.spikePps) {
+    h += '<text x="150" y="185" text-anchor="middle" class="expert-demo-ztxt">about ' + s.spikePps.toLocaleString('en-US') + ' pps vs 126 limit</text>';
   }
   return h + '</svg>';
 }
 
-function demoRfTreeSvg(shape, vote, revealed) {
+function demoRfTreeSvg(shape, vote, revealed, small) {
   var cls = vote ? (DEMO_CLASS_KEY[vote] || 'syn') : 'none';
+  var r = small ? 3 : 4.5;
   var h = '<svg class="expert-demo-tree" viewBox="0 0 120 110" role="img">';
   shape.edges.forEach(function(e) {
     var a = shape.nodes[e[0]];
@@ -598,14 +671,49 @@ function demoRfTreeSvg(shape, vote, revealed) {
     var p = shape.nodes[k];
     var isLeaf = shape.taken[shape.taken.length - 1] === k;
     var on = revealed && shape.taken.indexOf(k) !== -1;
-    h += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="4.5" class="expert-demo-tnode' + (on ? ' on' : '') + (on && isLeaf ? ' expert-demo-votedot-' + cls : '') + '"/>';
+    h += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="' + (on && isLeaf ? r + 0.5 : r) + '" class="expert-demo-tnode' + (on ? ' on' : '') + (on && isLeaf ? ' expert-demo-votedot-' + cls : '') + '"/>';
   });
   var label = revealed ? vote.replace(' Flood', '') : '?';
   h += '<text x="60" y="104" text-anchor="middle" class="expert-demo-tlabel' + (revealed ? ' expert-demo-votetext-' + cls : '') + '">' + demoEsc(label) + '</text>';
   return h + '</svg>';
 }
 
+/**
+ * Opening frame: the IF to RF handoff. Only flows the Isolation Forest
+ * flagged ever arrive here, carrying their flow features for voting.
+ */
+function demoRfHandoffInHtml(live) {
+  var scoreTxt = live.hasIf
+    ? 'IF score ' + live.ifScore.toFixed(2) + ' at or above its ' + live.ifThr.toFixed(4) + ' bar'
+    : 'IF score above its bar';
+  return '<div class="expert-demo-handoff">'
+    + '<span class="expert-demo-stagechip expert-demo-stage-if">Isolation Forest</span>'
+    + '<svg class="expert-demo-arrow" viewBox="0 0 48 16" aria-hidden="true">'
+    + '<line x1="2" y1="8" x2="38" y2="8" class="expert-demo-arrowline"/>'
+    + '<path d="M30 2 L44 8 L30 14" class="expert-demo-arrowhead"/></svg>'
+    + '<span class="expert-demo-stagechip expert-demo-stage-rf">Random Forest</span>'
+    + '</div>'
+    + '<div class="expert-demo-banner">' + demoEsc(scoreTxt) + ': ANOMALY, flow features received.</div>';
+}
+
+/**
+ * Closing frame: the RF to Decision handoff matching pipeline node 8.
+ */
+function demoRfHandoffOutHtml(live, outcome) {
+  var m = demoRfSteps(live.winner || 'SYN Flood', outcome || 'A', DEMO_RF_COUNT);
+  return '<div class="expert-demo-handoff">'
+    + '<span class="expert-demo-stagechip expert-demo-stage-rf">Random Forest</span>'
+    + '<svg class="expert-demo-arrow" viewBox="0 0 48 16" aria-hidden="true">'
+    + '<line x1="2" y1="8" x2="38" y2="8" class="expert-demo-arrowline"/>'
+    + '<path d="M30 2 L44 8 L30 14" class="expert-demo-arrowhead"/></svg>'
+    + '<span class="expert-demo-stagechip expert-demo-stage-decision">8: Decision + Mitigation</span>'
+    + '</div>'
+    + '<div class="expert-demo-banner">' + demoEsc(m.winner) + ' at ' + m.pct + '% goes for enforcement: rate limit, block, clear, redirect, or proto_block.</div>';
+}
+
 function demoRfDiagram(step, live, outcome) {
+  if (step === 0) return demoRfHandoffInHtml(live);
+  if (step >= 6) return demoRfHandoffOutHtml(live, outcome || 'A');
   var count = DEMO_RF_COUNT;
   var m = demoRfSteps(live.winner || 'SYN Flood', outcome || 'A', count);
   var trees = demoRfTrees(count);
@@ -631,11 +739,11 @@ function demoRfDiagram(step, live, outcome) {
   return h;
 }
 
-function demoDiagramHtml(stage, step, live, outcome) {
+function demoDiagramHtml(stage, step, live, outcome, scenario) {
   if (stage === 'rf') return demoRfDiagram(step, live, outcome);
   if (stage === 'entropy') return demoTeaDiagram(step, live);
   if (stage === 'flood') return demoPrefilterDiagram(step);
-  return demoIfDiagram(step, live);
+  return demoIfDiagram(step, live, scenario);
 }
 
 /**
@@ -649,7 +757,11 @@ function demoStepCaption(stage, step, ctx) {
   if (stage === 'rf') {
     var outcome = ctx.outcome === 'B' ? 'B' : 'A';
     var total = DEMO_RF_COUNT;
-    if (step >= 5) {
+    if (step >= 6) {
+      var fm = demoRfSteps(ctx.winner || 'SYN Flood', outcome, total);
+      base = 'Class ' + fm.winner + ' at ' + fm.pct + '% goes to stage 8, Decision + Mitigation, which picks the enforcement: rate limit, block, clear, redirect, or proto_block.';
+    }
+    else if (step >= 5) {
       var m = demoRfSteps(ctx.winner || 'SYN Flood', outcome, total);
       var gate = typeof ctx.gate === 'number' ? ctx.gate : 0.7;
       var verdict = demoGateVerdict(m.pct, gate);
@@ -659,19 +771,38 @@ function demoStepCaption(stage, step, ctx) {
           ? 'At or above the gate, so the system acts.'
           : 'Below the gate, so the system waits for more data.');
     }
-    else if (step === 0) base = 'A flow the Isolation Forest flagged arrives for classification.';
-    else base = 'Trees 1 to ' + Math.min(Math.round(step / 5 * total), total) + ' of ' + total + ' have voted.';
+    else if (step === 0) base = ctx.hasIf
+      ? 'Isolation Forest scored this flow ' + Number(ctx.ifScore).toFixed(2) + ' against its ' + Number(ctx.ifThr).toFixed(4) + ' bar and flagged it. Only flagged flows reach this panel.'
+      : 'Isolation Forest flagged this flow as anomalous. Only flagged flows reach this panel.';
+    else {
+      var rm = demoRfSteps(ctx.winner || 'SYN Flood', outcome, total);
+      var shown = Math.min(Math.round(step / 5 * total), total);
+      var rt = shown > 0 ? rm.tallies[shown - 1] : { 'SYN Flood': 0, 'ICMP Flood': 0, 'UDP Flood': 0 };
+      var parts = [];
+      DEMO_CLASSES.forEach(function(c) {
+        if (rt[c] > 0) parts.push(c.replace(' Flood', '') + ' ' + rt[c]);
+      });
+      base = 'Trees 1 to ' + shown + ' of ' + total + ' have voted'
+        + (parts.length ? ': ' + parts.join(', ') + '.' : '.');
+    }
   }
   else if (stage === 'entropy') base = demoTeaSteps()[step].caption;
   else if (stage === 'flood') base = demoPrefilterSteps()[step].caption;
-  else base = demoIfSteps()[step].caption;
+  else {
+    base = demoIfSteps()[step].caption;
+    if ((ctx.scenario || 'A') === 'B') {
+      if (step === 9) base = 'Sixteen trees isolate a normal flow differently. Average path: 9.5 splits.';
+      else if (step === 10) base = 's = 2^(-9.5/13.0) = 0.60. Below its threshold: NORMAL. No handoff needed.';
+      else if (step === 11) base = 'Below threshold: flow cleared here. Random Forest never sees it.';
+    }
+  }
   return 'Step ' + (step + 1) + ' of ' + n + ': ' + base;
 }
 
 function demoFootnote(stage) {
   var base = 'Schematic example showing the idea. Values beside the diagram are live.';
   if (stage === 'rf') return base + ' Illustrative votes matching the chosen example. Our 300 trees run depth 2 to 16, average 7.6.';
-  if (stage === 'if_node') return base + ' One representative tree of 150, which all reach depth 10. Depths shown are illustrative: anomalies pop out in few splits, normal points need many.';
+  if (stage === 'if_node') return base + ' One representative tree of 150, which all reach depth 10. Two outliers isolate in 2 to 3 splits; normal points need many. Ensemble frame averages 16 trees.';
   return base;
 }
 
@@ -682,7 +813,8 @@ function demoShellHtml(stage, state, live) {
   var vals = demoLiveValues(stage, live);
   var n = DEMO_STEP_COUNT[stage] || 4;
   var outcome = (state && (state.outcome === 'A' || state.outcome === 'B')) ? state.outcome : 'A';
-  var ctx = { outcome: outcome, winner: vals.winner, gate: vals.gate };
+  var scenario = (state && state.scenario === 'B') ? 'B' : 'A';
+  var ctx = { outcome: outcome, winner: vals.winner, gate: vals.gate, scenario: scenario, hasIf: !!vals.hasIf, ifScore: vals.ifScore, ifThr: vals.ifThr };
   var dots = '';
   for (var i = 0; i < n; i++) {
     dots += '<button type="button" class="expert-demo-dotbtn' + (i === step ? ' on' : '') + '"'
@@ -702,6 +834,16 @@ function demoShellHtml(stage, state, live) {
       + (outcome === 'B' ? ' aria-pressed="true"' : '') + '>Example B: falls short</button>'
       + '</div>';
   }
+  if (stage === 'if_node') {
+    outcomeHtml = '<div class="expert-demo-outcomes" role="group" aria-label="Flow outcome example">'
+      + '<button type="button" class="expert-demo-outbtn' + (scenario === 'A' ? ' on' : '') + '"'
+      + ' data-demo-action="scenario" data-demo-stage="if_node" data-demo-scenario="A"'
+      + (scenario === 'A' ? ' aria-pressed="true"' : '') + '>Example A: anomaly</button>'
+      + '<button type="button" class="expert-demo-outbtn' + (scenario === 'B' ? ' on' : '') + '"'
+      + ' data-demo-action="scenario" data-demo-stage="if_node" data-demo-scenario="B"'
+      + (scenario === 'B' ? ' aria-pressed="true"' : '') + '>Example B: normal</button>'
+      + '</div>';
+  }
   return '<details class="expert-demo" id="expert-demo-mount" data-stage="' + stage + '">'
     + '<summary class="expert-demo-sum" id="expert-demo-sum-' + stage + '">'
     + '<span class="expert-demo-sumlabel">' + demoEsc(DEMO_SUMMARY[stage] || 'See it in action') + '</span>'
@@ -709,7 +851,7 @@ function demoShellHtml(stage, state, live) {
     + '</summary>'
     + '<div class="expert-demo-live" id="expert-demo-live-' + stage + '">' + demoLiveStripHtml(stage, vals) + '</div>'
     + outcomeHtml
-    + '<div class="expert-demo-diagram" id="expert-demo-diagram-' + stage + '">' + demoDiagramHtml(stage, step, vals, outcome) + '</div>'
+    + '<div class="expert-demo-diagram" id="expert-demo-diagram-' + stage + '">' + demoDiagramHtml(stage, step, vals, outcome, scenario) + '</div>'
     + '<div class="expert-demo-cap" id="expert-demo-cap-' + stage + '" aria-live="polite" aria-atomic="true">' + demoEsc(demoStepCaption(stage, step, ctx)) + '</div>'
     + '<div class="expert-demo-controls">'
     + '<button type="button" class="expert-demo-btn" id="expert-demo-play-' + stage + '" data-demo-action="play" data-demo-stage="' + stage + '">Play</button>'
@@ -755,7 +897,7 @@ var ExpertDemos = {
   _kept: { node: null, stage: null },
 
   stageState: function(stage) {
-    if (!this._st[stage]) this._st[stage] = { step: 0, playing: false, timer: null, outcome: null };
+    if (!this._st[stage]) this._st[stage] = { step: 0, playing: false, timer: null, outcome: null, scenario: null };
     return this._st[stage];
   },
 
@@ -765,7 +907,7 @@ var ExpertDemos = {
 
   resetStage: function(stage) {
     this.stop(stage);
-    this._st[stage] = { step: 0, playing: false, timer: null, outcome: null };
+    this._st[stage] = { step: 0, playing: false, timer: null, outcome: null, scenario: null };
   },
 
   /**
@@ -780,6 +922,23 @@ var ExpertDemos = {
     this.refresh(stage);
   },
 
+  /**
+   * Switches the IF scenario example (A anomaly, B normal). Resets to
+   * step 0; the user presses Play. Junk values are ignored.
+   */
+  setScenario: function(stage, scenario) {
+    if (scenario !== 'A' && scenario !== 'B') return;
+    var st = this.stageState(stage);
+    st.scenario = scenario;
+    st.step = 0;
+    this.refresh(stage);
+  },
+
+  demoScenario: function(stage) {
+    var st = this.stageState(stage);
+    return st.scenario === 'B' ? 'B' : 'A';
+  },
+
   demoOutcome: function(stage) {
     var st = this.stageState(stage);
     return st.outcome === 'B' ? 'B' : 'A';
@@ -792,18 +951,33 @@ var ExpertDemos = {
 
   play: function(stage) {
     var st = this.stageState(stage);
+    if (st.playing) {
+      this.pause(stage);
+      return;
+    }
     var max = demoMaxStep(stage);
     if (this.reducedMotion()) {
       st.step = max;
       this.refresh(stage);
       return;
     }
-    if (st.playing) this.stop(stage);
     if (st.step >= max) st.step = 0;
     st.playing = true;
     this.refresh(stage);
     var self = this;
     st.timer = setInterval(function() { self._tick(stage); }, DEMO_STEP_MS);
+  },
+
+  /**
+   * Pauses in place: timer cleared, step kept, Play button shows Pause
+   * state until resumed. Resume continues from the kept step.
+   */
+  pause: function(stage) {
+    var st = this.stageState(stage);
+    if (st.timer !== null && typeof clearInterval !== 'undefined') clearInterval(st.timer);
+    st.timer = null;
+    st.playing = false;
+    this.refresh(stage);
   },
 
   replay: function(stage) {
@@ -862,8 +1036,14 @@ var ExpertDemos = {
     var outcome = st.outcome === 'B' ? 'B' : 'A';
     var diagram = doc.getElementById('expert-demo-diagram-' + stage);
     var cap = doc.getElementById('expert-demo-cap-' + stage);
-    if (diagram) diagram.innerHTML = demoDiagramHtml(stage, st.step, live, outcome);
-    if (cap) cap.textContent = demoStepCaption(stage, st.step, { outcome: outcome, winner: live.winner, gate: live.gate });
+    if (diagram) diagram.innerHTML = demoDiagramHtml(stage, st.step, live, outcome, st.scenario === 'B' ? 'B' : 'A');
+    if (cap) cap.textContent = demoStepCaption(stage, st.step, { outcome: outcome, winner: live.winner, gate: live.gate, scenario: st.scenario === 'B' ? 'B' : 'A', hasIf: !!live.hasIf, ifScore: live.ifScore, ifThr: live.ifThr });
+    var playBtn = doc.getElementById('expert-demo-play-' + stage);
+    if (playBtn) {
+      playBtn.textContent = st.playing ? 'Pause' : 'Play';
+      if (st.playing) playBtn.setAttribute('aria-pressed', 'true');
+      else playBtn.removeAttribute('aria-pressed');
+    }
     var dots = mount.querySelectorAll('[data-demo-action="goto"]');
     for (var i = 0; i < dots.length; i++) {
       var on = parseInt(dots[i].getAttribute('data-demo-step'), 10) === st.step;
@@ -877,6 +1057,14 @@ var ExpertDemos = {
       if (outs[k].classList) outs[k].classList.toggle('on', active);
       if (active) outs[k].setAttribute('aria-pressed', 'true');
       else outs[k].removeAttribute('aria-pressed');
+    }
+    var scens = mount.querySelectorAll('[data-demo-action="scenario"]');
+    var scenVal = st.scenario === 'B' ? 'B' : 'A';
+    for (var q = 0; q < scens.length; q++) {
+      var sactive = scens[q].getAttribute('data-demo-scenario') === scenVal;
+      if (scens[q].classList) scens[q].classList.toggle('on', sactive);
+      if (sactive) scens[q].setAttribute('aria-pressed', 'true');
+      else scens[q].removeAttribute('aria-pressed');
     }
   },
 
@@ -951,6 +1139,7 @@ if (typeof window !== 'undefined') {
       if (action === 'play') ExpertDemos.play(stage);
       else if (action === 'replay') ExpertDemos.replay(stage);
       else if (action === 'outcome') ExpertDemos.setOutcome(stage, t.getAttribute('data-demo-outcome'));
+      else if (action === 'scenario') ExpertDemos.setScenario(stage, t.getAttribute('data-demo-scenario'));
       else if (action === 'goto') ExpertDemos.goToStep(stage, parseInt(t.getAttribute('data-demo-step'), 10));
     });
     document.addEventListener('visibilitychange', function() {
