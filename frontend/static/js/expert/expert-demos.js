@@ -697,16 +697,29 @@ function demoRfHandoffInHtml(live) {
 }
 
 /**
- * Closing frame: the RF to Decision handoff matching pipeline node 8.
+ * Closing frame: above the gate the class goes to Decision + Mitigation
+ * for enforcement; below the gate the flow waits under sinkhole
+ * observation with no enforcement. No stage numbers, only stage names.
  */
 function demoRfHandoffOutHtml(live, outcome) {
   var m = demoRfSteps(live.winner || 'SYN Flood', outcome || 'A', DEMO_RF_COUNT);
+  var verdict = demoGateVerdict(m.pct, live.gate);
+  if (verdict !== 'act') {
+    return '<div class="expert-demo-handoff">'
+      + '<span class="expert-demo-stagechip expert-demo-stage-rf">Random Forest</span>'
+      + '<svg class="expert-demo-arrow" viewBox="0 0 48 16" aria-hidden="true">'
+      + '<line x1="2" y1="8" x2="38" y2="8" class="expert-demo-arrowline"/>'
+      + '<path d="M30 2 L44 8 L30 14" class="expert-demo-arrowhead"/></svg>'
+      + '<span class="expert-demo-stagechip expert-demo-stage-sinkhole">Sinkhole</span>'
+      + '</div>'
+      + '<div class="expert-demo-banner">' + demoEsc(m.winner) + ' at ' + m.pct + '% is below the ' + Math.round(live.gate * 100) + '% gate: held in the sinkhole for observation. No enforcement until confidence returns.</div>';
+  }
   return '<div class="expert-demo-handoff">'
     + '<span class="expert-demo-stagechip expert-demo-stage-rf">Random Forest</span>'
     + '<svg class="expert-demo-arrow" viewBox="0 0 48 16" aria-hidden="true">'
     + '<line x1="2" y1="8" x2="38" y2="8" class="expert-demo-arrowline"/>'
     + '<path d="M30 2 L44 8 L30 14" class="expert-demo-arrowhead"/></svg>'
-    + '<span class="expert-demo-stagechip expert-demo-stage-decision">8: Decision + Mitigation</span>'
+    + '<span class="expert-demo-stagechip expert-demo-stage-decision">Decision + Mitigation</span>'
     + '</div>'
     + '<div class="expert-demo-banner">' + demoEsc(m.winner) + ' at ' + m.pct + '% goes for enforcement: rate limit, block, clear, redirect, or proto_block.</div>';
 }
@@ -759,7 +772,12 @@ function demoStepCaption(stage, step, ctx) {
     var total = DEMO_RF_COUNT;
     if (step >= 6) {
       var fm = demoRfSteps(ctx.winner || 'SYN Flood', outcome, total);
-      base = 'Class ' + fm.winner + ' at ' + fm.pct + '% goes to stage 8, Decision + Mitigation, which picks the enforcement: rate limit, block, clear, redirect, or proto_block.';
+      var fgate = typeof ctx.gate === 'number' ? ctx.gate : 0.7;
+      if (demoGateVerdict(fm.pct, fgate) !== 'act') {
+        base = 'Class ' + fm.winner + ' at ' + fm.pct + '% stays below the gate, so the flow waits in the sinkhole for observation. No enforcement until confidence returns.';
+      } else {
+        base = 'Class ' + fm.winner + ' at ' + fm.pct + '% goes to Decision + Mitigation, which picks the enforcement: rate limit, block, clear, redirect, or proto_block.';
+      }
     }
     else if (step >= 5) {
       var m = demoRfSteps(ctx.winner || 'SYN Flood', outcome, total);

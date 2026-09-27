@@ -27,6 +27,7 @@ function loadDrawer() {
     + ' _livePollPlan: (typeof _livePollPlan !== "undefined" ? _livePollPlan : undefined),'
     + ' _releaseTime: (typeof _releaseTime !== "undefined" ? _releaseTime : undefined),'
     + ' _applyPeakMl: (typeof _applyPeakMl !== "undefined" ? _applyPeakMl : undefined),'
+    + ' _ipDetailQuery: (typeof _ipDetailQuery !== "undefined" ? _ipDetailQuery : undefined),'
     + ' _setBadge: (typeof _setBadge !== "undefined" ? _setBadge : undefined) };',
     sandbox
   );
@@ -203,6 +204,18 @@ test('_applyPeakMl retains peak IF score and RF confidence when subsequent polls
   const res3 = applyPeak(ip, ml3);
   assert.equal(res3.if_score, 0.94);
   assert.equal(res3.confidence, 98.2);
+});
+
+test('_ipDetailQuery builds live, historical, and session queries', () => {
+  const sandbox = loadDrawer();
+  const buildQuery = vm.runInContext('globalThis.__drawerTest._ipDetailQuery', sandbox);
+  assert.equal(typeof buildQuery, 'function');
+  assert.equal(buildQuery({}), '');
+  assert.equal(buildQuery({ historical: true }), '?historical=1');
+  assert.equal(
+    buildQuery({ historical: true, sessionId: 'sess-OLD', timestamp: '2026-09-21 09:00:00' }),
+    '?historical=1&session_id=sess-OLD&timestamp=2026-09-21%2009%3A00%3A00'
+  );
 });
 
 

@@ -1284,6 +1284,7 @@ body.light .expert-hiw-btn:hover { background: #DBEAFE; border-color: #3B82F6; }
 .expert-demo-stage-if { color: var(--red); border-color: var(--red); background: var(--red-g); }
 .expert-demo-stage-rf { color: var(--blue); border-color: var(--blue); background: var(--blue-g); }
 .expert-demo-stage-decision { color: var(--amber); border-color: var(--amber); background: var(--amber-g); }
+.expert-demo-stage-sinkhole { color: var(--sub2); border-color: var(--border2); background: var(--track-bg); }
 .expert-demo-arrow { width: 48px; height: 16px; flex-shrink: 0; }
 .expert-demo-arrowline { stroke: var(--sub2); stroke-width: 2; }
 .expert-demo-arrowhead { fill: none; stroke: var(--sub2); stroke-width: 2; }

@@ -22,9 +22,24 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // Attaches delegated click and keyboard listeners to watchlist and audit log tables.
-// Opens the threat analysis drawer when selecting an incident row while ignoring direct button clicks.
+// Watchlist rows open the live mitigation drawer; audit rows open the
+// session-addressed historical drawer for the clicked event.
+function _openDrawerForRow(tr, isWatchlist) {
+  const ip = tr.dataset.ip;
+  if (!ip || ip === '--') return;
+  if (isWatchlist) {
+    window.openIpDrawer(ip);
+    return;
+  }
+  window.openIpDrawer(ip, {
+    historical: true,
+    sessionId: tr.dataset.sessionId || '',
+    timestamp: tr.dataset.timestamp || '',
+  });
+}
+
 (function _attachRowDelegation() {
-  ['log-body', 'q-body'].forEach(tbId => {
+  [['log-body', false], ['q-body', true]].forEach(([tbId, isWatchlist]) => {
     const tb = document.getElementById(tbId);
     if (!tb) return;
 
@@ -33,9 +48,7 @@ document.addEventListener('visibilitychange', () => {
       if (e.target.closest('button, a')) return;
       const tr = e.target.closest('tr[data-ip]');
       if (!tr) return;
-      const ip = tr.dataset.ip;
-      const isRelease = tr.dataset.isRelease === 'true';
-      if (ip && ip !== '--') window.openIpDrawer(ip, { historical: isRelease });
+      _openDrawerForRow(tr, isWatchlist);
     });
 
     // Enables keyboard activation using Enter or Space on focused table rows.
@@ -45,9 +58,7 @@ document.addEventListener('visibilitychange', () => {
       const tr = e.target.closest('tr[data-ip]');
       if (!tr) return;
       e.preventDefault();
-      const ip = tr.dataset.ip;
-      const isRelease = tr.dataset.isRelease === 'true';
-      if (ip && ip !== '--') window.openIpDrawer(ip, { historical: isRelease });
+      _openDrawerForRow(tr, isWatchlist);
     });
 
     // Observes dynamic DOM insertions in table bodies to ensure newly rendered rows receive keyboard focus attributes.

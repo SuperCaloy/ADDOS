@@ -108,11 +108,13 @@ async function fetchQuarantine() {
       if (_qRows.has(e.src_ip)) {
         const existing     = _qRows.get(e.src_ip);
         existing.dataset.ip = e.src_ip;
+        existing.dataset.isRelease = 'false';
         existing.innerHTML  = inner;
       } else {
         const tr      = document.createElement('tr');
         tr.className  = 'tr-clickable';
         tr.dataset.ip = e.src_ip;
+        tr.dataset.isRelease = 'false';
         tr.innerHTML  = inner;
         _qRows.set(e.src_ip, tr);
         tb.appendChild(tr);

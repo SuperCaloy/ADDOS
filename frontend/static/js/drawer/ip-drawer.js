@@ -41,6 +41,22 @@ function _applyPeakMl(ip, ml) {
 // intentionally free to leave the panel for the dashboard beside it.
 if (window.SidePanel) SidePanel.initResize('ip-drawer', 'idd-resize-handle', 'ip-drawer-width');
 
+// Drawer query context for the open IP, reused by watch refetches and
+// tab resyncs so a historical view never flips back to live.
+let _drawerQueryOpts = null;
+
+// Builds the detail endpoint query for drawer opts. Pure function, no DOM.
+function _ipDetailQuery(opts) {
+  const isHist = !!(opts && opts.historical);
+  const sessionId = opts && opts.sessionId ? String(opts.sessionId) : '';
+  if (!isHist && !sessionId) return '';
+  let query = '?historical=1';
+  if (sessionId) query += `&session_id=${encodeURIComponent(sessionId)}`;
+  const ts = opts && opts.timestamp ? String(opts.timestamp) : '';
+  if (sessionId && ts) query += `&timestamp=${encodeURIComponent(ts)}`;
+  return query;
+}
+
 /**
  * Opens the threat detail side panel for an IP address and displays its telemetry.
  * Updates headers and starts data fetching. Shell behavior lives in SidePanel.
@@ -51,6 +67,11 @@ function openIpDrawer(ip, opts) {
     _drawerPeaks.delete(ip);
   }
   _drawerCurrentIp = ip;
+  _drawerQueryOpts = {
+    historical: !!(opts && opts.historical),
+    sessionId: (opts && opts.sessionId) || '',
+    timestamp: (opts && opts.timestamp) || '',
+  };
   const ipEl = document.getElementById('idd-ip');
   const badgeEl = document.getElementById('idd-status-badge');
   if (ipEl) ipEl.textContent = ip;
@@ -70,6 +91,7 @@ function closeIpDrawer() {
   _stopLivePolling();
   _stopWatch();
   _drawerCurrentIp = null;
+  _drawerQueryOpts = null;
   if (window.SidePanel) SidePanel.close('ip-drawer');
   const tip = document.getElementById('idd-tooltip');
   if (tip) tip.style.display = 'none';
@@ -195,14 +217,16 @@ function _stopWatch() {
 }
 
 // Watches a released IP for re-offense: slow full refetch, resumes fast
-// live mode the moment the backend reports active again.
+// live mode the moment the backend reports active again. Reuses the
+// original drawer query so historical views stay on their event.
 function _startWatch(ip) {
   _stopWatch();
   _drawerWatchTimer = setInterval(async () => {
     if (_drawerCurrentIp !== ip) { _stopWatch(); return; }
     try {
       const apiUrl = window.API_URL || '';
-      const r = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}`);
+      const query = _ipDetailQuery(_drawerQueryOpts);
+      const r = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}${query}`);
       if (!r.ok || _drawerCurrentIp !== ip) return;
       const data = await r.json();
       if (data.is_live) {
@@ -214,10 +238,11 @@ function _startWatch(ip) {
 }
 
 // Resyncs once when the tab returns: background tabs throttle setInterval.
+// Reuses the stored query opts so historical views keep their event.
 document.addEventListener('visibilitychange', () => {
   const doc = typeof document !== 'undefined' ? document : null;
   if (!doc || doc.hidden || !_drawerCurrentIp || !_drawerIsLive) return;
-  _fetchIpDetail(_drawerCurrentIp);
+  _fetchIpDetail(_drawerCurrentIp, _drawerQueryOpts);
 });
 
 /**
@@ -228,37 +253,44 @@ async function _fetchIpDetail(ip, opts) {
   try {
     const apiUrl = window.API_URL || '';
     const isHist = !!(opts && opts.historical);
-    const query = isHist ? '?historical=1' : '';
+    const query = _ipDetailQuery(opts);
     const r = await fetch(apiUrl + `/api/ip_detail/${encodeURIComponent(ip)}${query}`);
     if (!r.ok) throw r;
     const data = await r.json();
     if (_drawerCurrentIp !== ip) return;
     _renderIpDetail(data);
-    if (data.is_live && !isHist) _startLivePolling(ip);
+    // Stale-flow live views use watch mode: /live has no flow telemetry
+    // for them, so polling it would only back off. Watch mode upgrades
+    // back to fast polling the moment full telemetry resumes.
+    if (data.is_live && !isHist && !data.flow_stale) _startLivePolling(ip);
     else _startWatch(ip);
   } catch (err) {
     if (_drawerCurrentIp !== ip) return;
+    const wasHist = !!(opts && opts.historical);
 
-    /* DOM fallback from quarantine table rows */
-    const qRow = typeof _qRows !== 'undefined' ? _qRows.get(ip) : null;
-    if (qRow) {
-      const cells = qRow.querySelectorAll('td');
-      const fallback = {
-        src_ip: ip, is_live: false,
-        features: { pkt_count:0, pps:0, byte_rate:0, duration_sec:0,
-                    byte_count:0, port_entropy:0 },
-        ml: { if_score: parseFloat(cells[3]?.textContent)||0,
-              is_anomaly: true,
-              attack_class: cells[2]?.textContent.trim()||'--',
-              confidence: parseFloat(cells[4]?.textContent)||0 },
-        state: { phase:'--', priority:'--', action_taken:'Quarantined',
-                 offence_count:0, reputation_score:0, ban_level:0, first_seen:null },
-        thresholds: { if_threshold:null, rf_conf_gate:null },
-        phase_history: [],
-      };
-      if (typeof showToast === 'function') showToast(`Cached data for ${ip}`);
-      _renderIpDetail(fallback);
-      return;
+    /* DOM fallback from quarantine table rows (live views only:
+       a failed historical fetch must error, not show live cache) */
+    if (!wasHist) {
+      const qRow = typeof _qRows !== 'undefined' ? _qRows.get(ip) : null;
+      if (qRow) {
+        const cells = qRow.querySelectorAll('td');
+        const fallback = {
+          src_ip: ip, is_live: false,
+          features: { pkt_count:0, pps:0, byte_rate:0, duration_sec:0,
+                      byte_count:0, port_entropy:0 },
+          ml: { if_score: parseFloat(cells[4]?.textContent)||0,
+                is_anomaly: true,
+                attack_class: cells[3]?.textContent.trim()||'--',
+                confidence: parseFloat(cells[5]?.textContent)||0 },
+          state: { phase:'--', priority:'--', action_taken:'Quarantined',
+                   offence_count:0, reputation_score:0, ban_level:0, first_seen:null },
+          thresholds: { if_threshold:null, rf_conf_gate:null },
+          phase_history: [],
+        };
+        if (typeof showToast === 'function') showToast(`Cached data for ${ip}`);
+        _renderIpDetail(fallback);
+        return;
+      }
     }
 
     const status = err && err.status;

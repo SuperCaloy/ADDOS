@@ -951,6 +951,7 @@ class StateMachine:
                 if not s.permanent or s.ttl_expires_at is not None
             ]
             for ip in to_remove:
+                self._snapshot_release(ip, "Cleared by operator")
                 self._push_command(ip, "clear")
                 writer.delete_quarantine_state(ip)
                 del self._states[ip]

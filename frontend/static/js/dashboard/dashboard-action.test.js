@@ -174,3 +174,38 @@ test('watchlist preserves peak IF score and confidence across lower polls', asyn
   assert.equal(peaks.get('10.0.0.88').conf, 95.5);
 });
 
+test('audit row key scopes to session so re-attacks get fresh rows', () => {
+  const sandbox = loadDashboardScope();
+  const base = {
+    timestamp: '2026-09-27 10:00:00',
+    src_ip: '10.0.0.5',
+    action_taken: 'Quarantined',
+    predicted_class: 'attack',
+    attack_vector: 'SYN Flood',
+    confidence: '90.0%',
+    priority: 'High',
+    event_type: 'transition',
+  };
+  const a = sandbox._buildEventRowData({ ...base, session_id: 'sess-1' });
+  const b = sandbox._buildEventRowData({ ...base, session_id: 'sess-2' });
+  const c = sandbox._buildEventRowData({ ...base, session_id: 'sess-1' });
+  assert.notEqual(a.key, b.key);
+  assert.equal(a.key, c.key);
+  assert.equal(a.sessionId, 'sess-1');
+});
+
+test('audit rows without session keep legacy ip plus event key', () => {
+  const sandbox = loadDashboardScope();
+  const row = sandbox._buildEventRowData({
+    timestamp: '2026-09-27 10:00:00',
+    src_ip: '10.0.0.5',
+    action_taken: 'Quarantined',
+    predicted_class: 'attack',
+    attack_vector: 'SYN Flood',
+    confidence: '90.0%',
+    priority: 'High',
+    event_type: 'transition',
+  });
+  assert.equal(row.key, '10.0.0.5|transition');
+});
+

@@ -72,10 +72,13 @@ function _buildEventRowData(ev) {
     <td>${renderPriority(ev.priority      || 'Low')}</td>
     <td>${renderAction(actionLabel)}</td>`;
 
-  const key = ip + '|' + (ev.event_type || 'transition');
+  const key = ip + '|' + (ev.event_type || 'transition')
+    + (ev.session_id ? '|' + ev.session_id : '');
   const isRelease = ev.event_type === 'released' || (ev.event_type === 'manual' && /release/i.test(newAction));
+  const sessionId = ev.session_id || '';
+  const timestamp = ev.timestamp || '';
 
-  return { ip, newAction, html, key, isRelease };
+  return { ip, newAction, html, key, isRelease, sessionId, timestamp };
 }
 
 // Inserts a new security event row at the top of the audit table or updates an existing row during phase escalation.
@@ -85,7 +88,7 @@ function addLogRow(ev) {
   const placeholder = tb.querySelector('[colspan]');
   if (placeholder) placeholder.parentElement.remove();
 
-  const { ip, newAction, html, key, isRelease } = _buildEventRowData(ev);
+  const { ip, newAction, html, key, isRelease, sessionId, timestamp } = _buildEventRowData(ev);
 
   if (_logRows.has(key)) {
     const existing = _logRows.get(key);
@@ -124,6 +127,8 @@ function addLogRow(ev) {
   tr.dataset.ip = ip;
   tr.dataset.eventType = ev.event_type || 'transition';
   tr.dataset.isRelease = isRelease ? 'true' : 'false';
+  tr.dataset.sessionId = sessionId;
+  tr.dataset.timestamp = timestamp;
   tr.dataset.rowKey = key;
   tr.innerHTML  = html;
   
@@ -147,7 +152,7 @@ function prependOlderRows(events) {
   });
 
   events.forEach(ev => {
-    const { ip, newAction, html, key, isRelease } = _buildEventRowData(ev);
+    const { ip, newAction, html, key, isRelease, sessionId, timestamp } = _buildEventRowData(ev);
 
     if (_logRows.has(key)) return;
 
@@ -156,6 +161,8 @@ function prependOlderRows(events) {
     tr.dataset.ip = ip;
     tr.dataset.eventType = ev.event_type || 'transition';
     tr.dataset.isRelease = isRelease ? 'true' : 'false';
+    tr.dataset.sessionId = sessionId;
+    tr.dataset.timestamp = timestamp;
     tr.dataset.rowKey = key;
     tr.innerHTML  = html;
 
