@@ -66,6 +66,7 @@ var ExpertModals = {
    * (last valid content stays visible in that case).
    */
   syncWithSelection: function(stageKey) {
+    if (window.ExpertDemos) window.ExpertDemos.stopAll();
     if (!stageKey || stageKey === this._currentStage) return;
     if (!this.isOpen()) return;
     if (!this.hasDetail(stageKey)) return;
@@ -89,6 +90,7 @@ var ExpertModals = {
     var s = (window.ExpertStages && window.ExpertStages.data) ? window.ExpertStages.data[stageKey] : null;
     if (!s) return;
 
+    if (window.ExpertDemos) window.ExpertDemos.stopAll();
     this._currentStage = stageKey;
     this._renderHead(stageKey);
     this._renderBody(stageKey, body);
@@ -102,6 +104,7 @@ var ExpertModals = {
    * Clears the polling timer reference. Visibility is handled by SidePanel.
    */
   close: function() {
+    if (window.ExpertDemos) window.ExpertDemos.stopAll();
     if (window.SidePanel) SidePanel.close('expert-side-panel');
     if (this._pollTimer) { clearInterval(this._pollTimer); this._pollTimer = null; }
     this._currentStage = null;
@@ -114,10 +117,12 @@ var ExpertModals = {
   _renderBody: function(key, el) {
     if (!el) return;
     var d = window._lastExpertData || {};
+    if (window.ExpertDemos) window.ExpertDemos.detachDemo(el);
     if (key === 'flood') this._renderPrefilter(d, el);
     else if (key === 'entropy') this._renderTEA(d, el);
     else if (key === 'if_node') this._renderIF(d, el);
     else if (key === 'rf') this._renderRF(d, el);
+    if (window.ExpertDemos) window.ExpertDemos.restoreDemo(el, key, d);
   },
 
   /**
@@ -175,6 +180,7 @@ var ExpertModals = {
 
     el.innerHTML =
       '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">The first guard. It watches how many packets each source IP is sending, for each protocol (SYN, ICMP, UDP). It learns what is normal for each source over time using a moving average. If a source suddenly sends way more than usual, or if a huge burst arrives in a fraction of a second, that source gets flagged. If the same source is flagged on two or more protocols at the same time, it is likely a coordinated attack.</div></div>' +
+      '<div class="expert-demo-slot" id="expert-demo-slot"></div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Session Summary</div>' +
         '<div style="display:flex;gap:12px;flex-wrap:wrap">' +
           '<span style="padding:6px 14px;border-radius:8px;font-size:16px;font-weight:700;background:rgba(245,158,11,0.15);color:var(--amber)">Spikes: ' + spikeCount + '</span>' +
@@ -245,6 +251,7 @@ var ExpertModals = {
 
     el.innerHTML =
       '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Measures how varied and diverse the traffic is. Normal traffic has many different source IPs, destination ports, and packet sizes. A flood is the opposite: repetitive, uniform, and predictable. When diversity drops below normal, it raises an alarm. During an attack, it freezes its memory of what normal looks like.</div></div>' +
+      '<div class="expert-demo-slot" id="expert-demo-slot"></div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Diversity Tracks</div>' +
         this._teaTrack('Size Diversity', szZ, szPct, thrPct, varClass, szBase) +
         this._teaTrack('Packet Intensity', intZ, intPct, thrPct, varClass, intBase) +
@@ -340,6 +347,7 @@ var ExpertModals = {
 
     el.innerHTML =
       '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Looks at every flow (a conversation between two IPs).It randomly cuts the data into pieces. Normal flows need many cuts to separate. Anomalous flows stand out quickly with fewer cuts. The fewer cuts needed, the more suspicious the flow.</div></div>' +
+      '<div class="expert-demo-slot" id="expert-demo-slot"></div>' +
 
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Current Score</div>' +
         '<div style="display:flex;align-items:baseline;gap:16px;margin-bottom:10px">' +
@@ -430,6 +438,7 @@ var ExpertModals = {
 
     el.innerHTML =
       '<div class="expert-modal-section"><div class="expert-modal-section-title">What it does</div><div class="expert-modal-desc">Takes suspicious flows from the previous step and figures out what kind of attack it is. Many small decision trees each look at different features and vote on the attack type. The final answer is whichever type got the most votes.</div></div>' +
+      '<div class="expert-demo-slot" id="expert-demo-slot"></div>' +
       '<div class="expert-modal-section"><div class="expert-modal-section-title">Vote Breakdown</div>' +
         '<div class="expert-modal-gauge-track" style="height:24px;display:flex;overflow:hidden;border-radius:8px">' + barHtml + '</div>' +
         '<div style="display:flex;gap:14px;margin-top:10px;flex-wrap:wrap">' + legendHtml + '</div>' +
