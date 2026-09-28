@@ -483,9 +483,20 @@ def _chown_to_invoking_user(path: Path) -> None:
         print(f"BENCHMARK: ownership fixup warning: {e}")
 
 
+def _read_ml_enabled_default():
+    # Lazy backend import keeps this module importable standalone.
+    # Returns None when the backend config is unavailable.
+    try:
+        from backend.config import ML_ENABLED
+        return bool(ML_ENABLED)
+    except Exception:
+        return None
+
+
 def _save_session_artifacts(base_dir, start_iso: str, end_iso: str,
                             attack_mode: str, stats: dict, db_src,
-                            backend_api: str, calibration=None):
+                            backend_api: str, calibration=None,
+                            ml_enabled=None):
     # Save one session folder: DB copy, report PDF, sidecar JSON.
     # Never fatal: each step warns and continues.
     date_str = (start_iso or "")[:10] or "unknown-date"
@@ -493,10 +504,13 @@ def _save_session_artifacts(base_dir, start_iso: str, end_iso: str,
     try:
         if calibration is None:
             calibration = _SUMMARY.get("calibration_status", "unknown")
+        if ml_enabled is None:
+            ml_enabled = _read_ml_enabled_default()
         record = {
             "bounds": {"start": start_iso, "end": end_iso},
             "attack_mode": attack_mode,
             "calibration_status": calibration,
+            "ml_enabled": ml_enabled,
             "stats": stats,
         }
         try:

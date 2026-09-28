@@ -183,6 +183,22 @@ def _metric_table(data: list, col_widths: list) -> Table:
     return tbl
 
 
+def _fmt_pct(value) -> str:
+    # None means a zero denominator (no predictions exist): N/A, never 0% or 100%.
+    if value is None:
+        return "N/A"
+    return f"{value:.2f}%"
+
+
+def _ml_na_note(styles):
+    # Single centered note replacing ML tables when ML is disabled for the run.
+    return Paragraph("Not applicable, ML disabled for this run",
+                     ParagraphStyle("mlna", parent=styles["Normal"],
+                                    fontSize=9, fontName="Helvetica-Oblique",
+                                    textColor=C_GRAY, alignment=1,
+                                    spaceBefore=2, spaceAfter=2))
+
+
 def _build_pdf_cover_and_summary(story: list, styles, start_str: str, end_str: str,
                                  deduped: list[dict], total_threats: int,
                                  manual_release: int, manual_block: int,
@@ -204,7 +220,8 @@ def _build_pdf_cover_and_summary(story: list, styles, start_str: str, end_str: s
     meta_data = [
         ["Report Period", _fmt_period(start_str, end_str)],
         ["Generated At",  gen_ts],
-        ["Classification", "ML: Isolation Forest + Random Forest"],
+        ["Classification", "ML: Isolation Forest + Random Forest"
+         if ML_ENABLED else "ML: disabled for this run"],
     ]
     meta_tbl = Table(meta_data, colWidths=[5*cm, 11*cm])
     meta_tbl.setStyle(TableStyle([
@@ -238,7 +255,6 @@ def _build_pdf_cover_and_summary(story: list, styles, start_str: str, end_str: s
     malicious_pkts  = pkt_row.get("malicious_dropped") or 0
 
     if_m    = writer.get_if_metrics(start_str, end_str)
-    fp_rate = if_m.get("fpr", 0)
 
     story += _section_header("1.  Executive Summary", styles)
 
@@ -255,11 +271,11 @@ def _build_pdf_cover_and_summary(story: list, styles, start_str: str, end_str: s
         ["", ""],
         ["ML Metrics",  "Value"],
         ["False Positives",         str(fp_count)],
-        ["FP Rate",                 f"{fp_rate:.2f}%"],
-        ["IF Precision",            f"{if_m.get('precision',0):.2f}%"],
-        ["IF Recall",               f"{if_m.get('recall',0):.2f}%"],
-        ["IF F1-Score",             f"{if_m.get('f1',0):.2f}%"],
-        ["IF Accuracy",             f"{if_m.get('accuracy',0):.2f}%"],
+        ["FP Rate",                 _fmt_pct(if_m.get("fpr"))],
+        ["IF Precision",            _fmt_pct(if_m.get("precision"))],
+        ["IF Recall",               _fmt_pct(if_m.get("recall"))],
+        ["IF F1-Score",             _fmt_pct(if_m.get("f1"))],
+        ["IF Accuracy",             _fmt_pct(if_m.get("accuracy"))],
         ["", ""],
         ["", ""],
     ]
@@ -367,201 +383,213 @@ def _build_pdf_benchmarks(story: list, styles, start_str: str, end_str: str) -> 
                        fontSize=10, fontName="Helvetica-Bold",
                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
 
-    if_data = [
-        ["Metric", "Value", "Description"],
-        ["Precision",                f"{if_m.get('precision',0):.2f}%",  "Share of flagged anomalies that were genuine attacks"],
-        ["Recall (TPR)",             f"{if_m.get('recall',0):.2f}%",     "Share of actual attacks successfully flagged"],
-        ["F1-Score",                 f"{if_m.get('f1',0):.2f}%",         "Balanced measure combining Precision and Recall"],
-        ["Accuracy",                 f"{if_m.get('accuracy',0):.2f}%",   "Overall proportion of correct anomaly decisions"],
-        ["False Positive Rate (FPR)",f"{if_m.get('fpr',0):.2f}%",        "Normal traffic incorrectly flagged as an attack"],
-        ["False Negative Rate (FNR)",f"{if_m.get('fnr',0):.2f}%",        "Actual attacks that went undetected"],
-        ["True Positive Rate (TPR)", f"{if_m.get('tpr',0):.2f}%",        "Same measure as Recall, attacks correctly flagged"],
-        ["True Negative Rate (TNR)", f"{if_m.get('tnr',0):.2f}%",        "Normal traffic correctly identified as safe"],
-    ]
-    story.append(_bench_table(if_data))
-    story.append(Spacer(1, 0.3*cm))
+    if not ML_ENABLED:
+        story.append(_ml_na_note(styles))
+        story.append(Spacer(1, 0.3*cm))
+    else:
+        if_data = [
+            ["Metric", "Value", "Description"],
+            ["Precision",                _fmt_pct(if_m.get("precision")),  "Share of flagged anomalies that were genuine attacks"],
+            ["Recall (TPR)",             _fmt_pct(if_m.get("recall")),     "Share of actual attacks successfully flagged"],
+            ["F1-Score",                 _fmt_pct(if_m.get("f1")),         "Balanced measure combining Precision and Recall"],
+            ["Accuracy",                 _fmt_pct(if_m.get("accuracy")),   "Overall proportion of correct anomaly decisions"],
+            ["False Positive Rate (FPR)",_fmt_pct(if_m.get("fpr")),        "Normal traffic incorrectly flagged as an attack"],
+            ["False Negative Rate (FNR)",_fmt_pct(if_m.get("fnr")),        "Actual attacks that went undetected"],
+            ["True Positive Rate (TPR)", _fmt_pct(if_m.get("tpr")),        "Same measure as Recall, attacks correctly flagged"],
+            ["True Negative Rate (TNR)", _fmt_pct(if_m.get("tnr")),        "Normal traffic correctly identified as safe"],
+        ]
+        story.append(_bench_table(if_data))
+        story.append(Spacer(1, 0.3*cm))
 
-    _tp = if_m.get('tp', 0); _fp = if_m.get('fp', 0)
-    _tn = if_m.get('tn', 0); _fn = if_m.get('fn', 0)
-    _lbl_if = ParagraphStyle("cml", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
+        _tp = if_m.get('tp', 0); _fp = if_m.get('fp', 0)
+        _tn = if_m.get('tn', 0); _fn = if_m.get('fn', 0)
+        _lbl_if = ParagraphStyle("cml", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
 
-    def _if_cell(label, val, color):
-        return Paragraph(f"{label}\n{val}", ParagraphStyle("ifc", parent=styles["Normal"],
-            fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=color))
+        def _if_cell(label, val, color):
+            return Paragraph(f"{label}\n{val}", ParagraphStyle("ifc", parent=styles["Normal"],
+                fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=color))
 
-    if_cm_data = [
-        ["", Paragraph("Predicted: Attack", _lbl_if), Paragraph("Predicted: Normal", _lbl_if)],
-        [Paragraph("Actual: Attack", _lbl_if), _if_cell("TP", _tp, C_GREEN), _if_cell("FN", _fn, C_RED)],
-        [Paragraph("Actual: Normal", _lbl_if), _if_cell("FP", _fp, C_RED),  _if_cell("TN", _tn, C_GREEN)],
-    ]
-    if_cm_tbl = Table(if_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm])
-    if_cm_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
-        ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
-        ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
-        ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
-        ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
-        ("TOPPADDING",    (0,0),(-1,-1), 8),
-        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
-        ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
-        ("ALIGN",   (0,0),(-1,-1), "CENTER"),
-    ]))
-    if_cm_wrap = Table([[if_cm_tbl]], colWidths=[17.0*cm])
-    if_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    story.append(if_cm_wrap)
-    story.append(Spacer(1, 0.4*cm))
+        if_cm_data = [
+            ["", Paragraph("Predicted: Attack", _lbl_if), Paragraph("Predicted: Normal", _lbl_if)],
+            [Paragraph("Actual: Attack", _lbl_if), _if_cell("TP", _tp, C_GREEN), _if_cell("FN", _fn, C_RED)],
+            [Paragraph("Actual: Normal", _lbl_if), _if_cell("FP", _fp, C_RED),  _if_cell("TN", _tn, C_GREEN)],
+        ]
+        if_cm_tbl = Table(if_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm])
+        if_cm_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
+            ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
+            ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
+            ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
+            ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
+            ("TOPPADDING",    (0,0),(-1,-1), 8),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+            ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
+            ("ALIGN",   (0,0),(-1,-1), "CENTER"),
+        ]))
+        if_cm_wrap = Table([[if_cm_tbl]], colWidths=[17.0*cm])
+        if_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+        story.append(if_cm_wrap)
+        story.append(Spacer(1, 0.4*cm))
 
     story.append(Paragraph("2b.  Random Forest: Attack Classification",
         ParagraphStyle("sub2", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
                        textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
 
-    rf_o    = rf_m.get("overall",   {})
-    rf_conf = rf_m.get("confusion", {})
+    if not ML_ENABLED:
+        story.append(_ml_na_note(styles))
+        story.append(Spacer(1, 0.3*cm))
+    else:
+        rf_o    = rf_m.get("overall",   {})
+        rf_conf = rf_m.get("confusion", {})
 
-    rf_data = [
-        ["Metric", "Value", "Description"],
-        ["Precision",  f"{rf_o.get('precision',0):.2f}%", "Share of flagged anomalies that were genuine attacks"],
-        ["Recall (TPR)",  f"{rf_o.get('recall',0):.2f}%", "Share of actual attacks successfully flagged"],
-        ["F1-Score",   f"{rf_o.get('f1',0):.2f}%",        "Balanced measure combining Precision and Recall"],
-        ["Accuracy",   f"{rf_o.get('accuracy',0):.2f}%",  "Overall proportion of correct anomaly decisions"],
-        ["False Positive Rate (FPR)", f"{rf_o.get('fpr',0):.2f}%", "Normal traffic incorrectly flagged as an attack"],
-        ["False Negative Rate (FNR)", f"{rf_o.get('fnr',0):.2f}%", "Actual attacks that went undetected"],
-        ["True Positive Rate (TPR)",  f"{rf_o.get('tpr',0):.2f}%", "Same measure as Recall, attacks correctly flagged"],
-        ["True Negative Rate (TNR)",  f"{rf_o.get('tnr',0):.2f}%", "Normal traffic correctly identified as safe"],
-    ]
-    rf_tbl = Table(rf_data, colWidths=[5.5*cm, 2.5*cm, 9.0*cm], repeatRows=1)
-    rf_tbl.setStyle(TableStyle([
-        ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
-        ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
-        ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
-        ("BACKGROUND",    (0, 0), (-1, 0),  C_BLUE),
-        ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
-        ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
-        ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
-        ("TOPPADDING",    (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
-        ("ALIGN",         (1, 1), (1, -1),  "CENTER"),
-        ("FONTNAME",      (1, 1), (1, -1),  "Helvetica-Bold"),
-        ("TEXTCOLOR",     (1, 1), (1, -1),  C_BLUE),
-    ]))
-    story.append(rf_tbl)
-    story.append(Spacer(1, 0.3*cm))
+        rf_data = [
+            ["Metric", "Value", "Description"],
+            ["Precision",  _fmt_pct(rf_o.get("precision")), "Share of flagged anomalies that were genuine attacks"],
+            ["Recall (TPR)",  _fmt_pct(rf_o.get("recall")), "Share of actual attacks successfully flagged"],
+            ["F1-Score",   _fmt_pct(rf_o.get("f1")),        "Balanced measure combining Precision and Recall"],
+            ["Accuracy",   _fmt_pct(rf_o.get("accuracy")),  "Overall proportion of correct anomaly decisions"],
+            ["False Positive Rate (FPR)", _fmt_pct(rf_o.get("fpr")), "Normal traffic incorrectly flagged as an attack"],
+            ["False Negative Rate (FNR)", _fmt_pct(rf_o.get("fnr")), "Actual attacks that went undetected"],
+            ["True Positive Rate (TPR)",  _fmt_pct(rf_o.get("tpr")), "Same measure as Recall, attacks correctly flagged"],
+            ["True Negative Rate (TNR)",  _fmt_pct(rf_o.get("tnr")), "Normal traffic correctly identified as safe"],
+        ]
+        rf_tbl = Table(rf_data, colWidths=[5.5*cm, 2.5*cm, 9.0*cm], repeatRows=1)
+        rf_tbl.setStyle(TableStyle([
+            ("FONTNAME",      (0, 0), (-1, 0),  "Helvetica-Bold"),
+            ("FONTSIZE",      (0, 0), (-1, -1), 8.5),
+            ("FONTNAME",      (0, 1), (-1, -1), "Helvetica"),
+            ("BACKGROUND",    (0, 0), (-1, 0),  C_BLUE),
+            ("TEXTCOLOR",     (0, 0), (-1, 0),  C_WHITE),
+            ("ROWBACKGROUNDS",(0, 1), (-1, -1), [C_ROW_A, C_ROW_B]),
+            ("GRID",          (0, 0), (-1, -1), 0.4, C_BORDER),
+            ("TOPPADDING",    (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("VALIGN",        (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN",         (1, 1), (1, -1),  "CENTER"),
+            ("FONTNAME",      (1, 1), (1, -1),  "Helvetica-Bold"),
+            ("TEXTCOLOR",     (1, 1), (1, -1),  C_BLUE),
+        ]))
+        story.append(rf_tbl)
+        story.append(Spacer(1, 0.3*cm))
 
-    _lbl = ParagraphStyle("rfl", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
+        _lbl = ParagraphStyle("rfl", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
 
-    def _cm_cell(val, is_diag):
-        c = C_GREEN if is_diag else C_RED
-        return Paragraph(str(val), ParagraphStyle("rfc", parent=styles["Normal"],
-            fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=c))
+        def _cm_cell(val, is_diag):
+            c = C_GREEN if is_diag else C_RED
+            return Paragraph(str(val), ParagraphStyle("rfc", parent=styles["Normal"],
+                fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=c))
 
-    rf_cm_data = [
-        ["", Paragraph("Predicted: SYN", _lbl), Paragraph("Predicted: ICMP", _lbl), Paragraph("Predicted: UDP", _lbl)],
-        [Paragraph("Act: SYN",  _lbl),
-         _cm_cell(rf_conf.get("syn_as_syn",   0), True),
-         _cm_cell(rf_conf.get("syn_as_icmp",  0), False),
-         _cm_cell(rf_conf.get("syn_as_udp",   0), False)],
-        [Paragraph("Act: ICMP", _lbl),
-         _cm_cell(rf_conf.get("icmp_as_syn",  0), False),
-         _cm_cell(rf_conf.get("icmp_as_icmp", 0), True),
-         _cm_cell(rf_conf.get("icmp_as_udp",  0), False)],
-        [Paragraph("Act: UDP",  _lbl),
-         _cm_cell(rf_conf.get("udp_as_syn",   0), False),
-         _cm_cell(rf_conf.get("udp_as_icmp",  0), False),
-         _cm_cell(rf_conf.get("udp_as_udp",   0), True)],
-    ]
-    rf_cm_tbl = Table(rf_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm, 4.5*cm])
-    rf_cm_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
-        ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
-        ("BACKGROUND", (3,3),(3,3), colors.HexColor("#e6fff5")),
-        ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (3,1),(3,1), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (3,2),(3,2), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (1,3),(1,3), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (2,3),(2,3), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
-        ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
-        ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
-        ("TOPPADDING",    (0,0),(-1,-1), 8),
-        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
-        ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
-        ("ALIGN",   (0,0),(-1,-1), "CENTER"),
-    ]))
-    rf_cm_wrap = Table([[rf_cm_tbl]], colWidths=[17.0*cm])
-    rf_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    story.append(rf_cm_wrap)
-    story.append(Spacer(1, 0.4*cm))
+        rf_cm_data = [
+            ["", Paragraph("Predicted: SYN", _lbl), Paragraph("Predicted: ICMP", _lbl), Paragraph("Predicted: UDP", _lbl)],
+            [Paragraph("Act: SYN",  _lbl),
+             _cm_cell(rf_conf.get("syn_as_syn",   0), True),
+             _cm_cell(rf_conf.get("syn_as_icmp",  0), False),
+             _cm_cell(rf_conf.get("syn_as_udp",   0), False)],
+            [Paragraph("Act: ICMP", _lbl),
+             _cm_cell(rf_conf.get("icmp_as_syn",  0), False),
+             _cm_cell(rf_conf.get("icmp_as_icmp", 0), True),
+             _cm_cell(rf_conf.get("icmp_as_udp",  0), False)],
+            [Paragraph("Act: UDP",  _lbl),
+             _cm_cell(rf_conf.get("udp_as_syn",   0), False),
+             _cm_cell(rf_conf.get("udp_as_icmp",  0), False),
+             _cm_cell(rf_conf.get("udp_as_udp",   0), True)],
+        ]
+        rf_cm_tbl = Table(rf_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm, 4.5*cm])
+        rf_cm_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
+            ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
+            ("BACKGROUND", (3,3),(3,3), colors.HexColor("#e6fff5")),
+            ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (3,1),(3,1), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (3,2),(3,2), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (1,3),(1,3), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (2,3),(2,3), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
+            ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
+            ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
+            ("TOPPADDING",    (0,0),(-1,-1), 8),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+            ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
+            ("ALIGN",   (0,0),(-1,-1), "CENTER"),
+        ]))
+        rf_cm_wrap = Table([[rf_cm_tbl]], colWidths=[17.0*cm])
+        rf_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+        story.append(rf_cm_wrap)
+        story.append(Spacer(1, 0.4*cm))
 
     story.append(Paragraph("2c.  Hybrid Cascaded",
         ParagraphStyle("sub3a", parent=styles["Normal"],
                        fontSize=10, fontName="Helvetica-Bold",
                         textColor=C_DARK, spaceBefore=6, spaceAfter=4)))
 
-    hyb = (casc_m or {}).get("hybrid", {})
-    hyb_exact = (casc_m or {}).get("hybrid_exact", {})
-    hyb_valid = (casc_m or {}).get("hybrid_valid", True)
-    if not hyb_valid:
-        story.append(Paragraph(
-            "Unverified: rf_fn exceeds if_tp, so Hybrid TP is floored at 0. "
-            f"Raw counts: if_tp={(casc_m or {}).get('if_tp', 0)}, "
-            f"rf_fn={(casc_m or {}).get('rf_fn', 0)}, "
-            f"rf_fn_uncertain={(casc_m or {}).get('rf_fn_uncertain', 0)}, "
-            f"rf_err_misclass={(casc_m or {}).get('rf_err_misclass', 0)}. "
-            "Detection flavor counts a wrong attack type as detected; "
-            f"exact flavor TP={hyb_exact.get('tp', 0)} also subtracts misclassifications.",
-            ParagraphStyle("hybunv", parent=styles["Normal"],
-                           fontSize=8.5, textColor=C_RED, spaceBefore=2, spaceAfter=4)))
+    if not ML_ENABLED:
+        story.append(_ml_na_note(styles))
+        story.append(Spacer(1, 0.3*cm))
+    else:
+        hyb = (casc_m or {}).get("hybrid", {})
+        hyb_exact = (casc_m or {}).get("hybrid_exact", {})
+        hyb_valid = (casc_m or {}).get("hybrid_valid", True)
+        if not hyb_valid:
+            story.append(Paragraph(
+                "Unverified: rf_fn exceeds if_tp, so Hybrid TP is floored at 0. "
+                f"Raw counts: if_tp={(casc_m or {}).get('if_tp', 0)}, "
+                f"rf_fn={(casc_m or {}).get('rf_fn', 0)}, "
+                f"rf_fn_uncertain={(casc_m or {}).get('rf_fn_uncertain', 0)}, "
+                f"rf_err_misclass={(casc_m or {}).get('rf_err_misclass', 0)}. "
+                "Detection flavor counts a wrong attack type as detected; "
+                f"exact flavor TP={hyb_exact.get('tp', 0)} also subtracts misclassifications.",
+                ParagraphStyle("hybunv", parent=styles["Normal"],
+                               fontSize=8.5, textColor=C_RED, spaceBefore=2, spaceAfter=4)))
 
-    casc_data = [
-        ["Metric", "Value", "Description"],
-        ["Precision",  f"{hyb.get('precision',0):.2f}%", "Share of flagged anomalies that were genuine attacks"],
-        ["Recall (TPR)",  f"{hyb.get('recall',0):.2f}%", "Share of actual attacks successfully flagged"],
-        ["F1-Score",   f"{hyb.get('f1',0):.2f}%",        "Balanced measure combining Precision and Recall"],
-        ["Accuracy",   f"{hyb.get('accuracy',0):.2f}%",  "Overall proportion of correct anomaly decisions"],
-        ["False Positive Rate (FPR)", f"{hyb.get('fpr',0):.2f}%", "Normal traffic incorrectly flagged as an attack"],
-        ["False Negative Rate (FNR)", f"{hyb.get('fnr',0):.2f}%", "Actual attacks that went undetected"],
-        ["True Positive Rate (TPR)",  f"{hyb.get('tpr',0):.2f}%", "Same measure as Recall, attacks correctly flagged"],
-        ["True Negative Rate (TNR)",  f"{hyb.get('tnr',0):.2f}%", "Normal traffic correctly identified as safe"],
-    ]
-    story.append(_bench_table(casc_data))
-    story.append(Spacer(1, 0.3*cm))
+        casc_data = [
+            ["Metric", "Value", "Description"],
+            ["Precision",  _fmt_pct(hyb.get("precision")), "Share of flagged anomalies that were genuine attacks"],
+            ["Recall (TPR)",  _fmt_pct(hyb.get("recall")), "Share of actual attacks successfully flagged"],
+            ["F1-Score",   _fmt_pct(hyb.get("f1")),        "Balanced measure combining Precision and Recall"],
+            ["Accuracy",   _fmt_pct(hyb.get("accuracy")),  "Overall proportion of correct anomaly decisions"],
+            ["False Positive Rate (FPR)", _fmt_pct(hyb.get("fpr")), "Normal traffic incorrectly flagged as an attack"],
+            ["False Negative Rate (FNR)", _fmt_pct(hyb.get("fnr")), "Actual attacks that went undetected"],
+            ["True Positive Rate (TPR)",  _fmt_pct(hyb.get("tpr")), "Same measure as Recall, attacks correctly flagged"],
+            ["True Negative Rate (TNR)",  _fmt_pct(hyb.get("tnr")), "Normal traffic correctly identified as safe"],
+        ]
+        story.append(_bench_table(casc_data))
+        story.append(Spacer(1, 0.3*cm))
 
-    _htp = hyb.get('tp', 0); _hfp = hyb.get('fp', 0)
-    _htn = hyb.get('tn', 0); _hfn = hyb.get('fn', 0)
-    _lbl_hyb = ParagraphStyle("cmh", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
+        _htp = hyb.get('tp', 0); _hfp = hyb.get('fp', 0)
+        _htn = hyb.get('tn', 0); _hfn = hyb.get('fn', 0)
+        _lbl_hyb = ParagraphStyle("cmh", parent=styles["Normal"], fontSize=7.5, alignment=1, textColor=C_GRAY)
 
-    def _hyb_cell(label, val, color):
-        return Paragraph(f"{label}\n{val}", ParagraphStyle("hybc", parent=styles["Normal"],
-            fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=color))
+        def _hyb_cell(label, val, color):
+            return Paragraph(f"{label}\n{val}", ParagraphStyle("hybc", parent=styles["Normal"],
+                fontSize=13, fontName="Helvetica-Bold", alignment=1, textColor=color))
 
-    hyb_cm_data = [
-        ["", Paragraph("Predicted: Attack", _lbl_hyb), Paragraph("Predicted: Normal", _lbl_hyb)],
-        [Paragraph("Actual: Attack", _lbl_hyb), _hyb_cell("TP", _htp, C_GREEN), _hyb_cell("FN", _hfn, C_RED)],
-        [Paragraph("Actual: Normal", _lbl_hyb), _hyb_cell("FP", _hfp, C_RED),  _hyb_cell("TN", _htn, C_GREEN)],
-    ]
-    hyb_cm_tbl = Table(hyb_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm])
-    hyb_cm_tbl.setStyle(TableStyle([
-        ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
-        ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
-        ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
-        ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
-        ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
-        ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
-        ("TOPPADDING",    (0,0),(-1,-1), 8),
-        ("BOTTOMPADDING", (0,0),(-1,-1), 8),
-        ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
-        ("ALIGN",   (0,0),(-1,-1), "CENTER"),
-    ]))
-    hyb_cm_wrap = Table([[hyb_cm_tbl]], colWidths=[17.0*cm])
-    hyb_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
-    story.append(hyb_cm_wrap)
-    story.append(Spacer(1, 0.4*cm))
+        hyb_cm_data = [
+            ["", Paragraph("Predicted: Attack", _lbl_hyb), Paragraph("Predicted: Normal", _lbl_hyb)],
+            [Paragraph("Actual: Attack", _lbl_hyb), _hyb_cell("TP", _htp, C_GREEN), _hyb_cell("FN", _hfn, C_RED)],
+            [Paragraph("Actual: Normal", _lbl_hyb), _hyb_cell("FP", _hfp, C_RED),  _hyb_cell("TN", _htn, C_GREEN)],
+        ]
+        hyb_cm_tbl = Table(hyb_cm_data, colWidths=[3.5*cm, 4.5*cm, 4.5*cm])
+        hyb_cm_tbl.setStyle(TableStyle([
+            ("BACKGROUND", (1,1),(1,1), colors.HexColor("#e6fff5")),
+            ("BACKGROUND", (2,2),(2,2), colors.HexColor("#e6fff5")),
+            ("BACKGROUND", (2,1),(2,1), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (1,2),(1,2), colors.HexColor("#fff0f3")),
+            ("BACKGROUND", (0,0),(0,-1), C_LGRAY),
+            ("BACKGROUND", (1,0),(-1,0), C_LGRAY),
+            ("GRID",       (0,0),(-1,-1), 0.5, C_BORDER),
+            ("TOPPADDING",    (0,0),(-1,-1), 8),
+            ("BOTTOMPADDING", (0,0),(-1,-1), 8),
+            ("VALIGN",  (0,0),(-1,-1), "MIDDLE"),
+            ("ALIGN",   (0,0),(-1,-1), "CENTER"),
+        ]))
+        hyb_cm_wrap = Table([[hyb_cm_tbl]], colWidths=[17.0*cm])
+        hyb_cm_wrap.setStyle(TableStyle([("ALIGN",(0,0),(-1,-1),"CENTER")]))
+        story.append(hyb_cm_wrap)
+        story.append(Spacer(1, 0.4*cm))
 
     story.append(Paragraph("2d.  Response Latency",
         ParagraphStyle("sub3b", parent=styles["Normal"],

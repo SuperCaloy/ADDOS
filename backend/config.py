@@ -77,7 +77,7 @@ SVC_EMA_FALLBACK_MS         = 40.0
 
 HOTPATH_QUIET = False
 SIMULATION_MODE = True
-ML_ENABLED = True
+ML_ENABLED = False
 INFERENCE_SUBPROCESS_ENABLED = False
 
 # -- Flood pre-filter -------------------------------------------------------

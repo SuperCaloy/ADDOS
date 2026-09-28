@@ -727,7 +727,19 @@ def get_history_dates() -> list[str]:
         return []
 
 
+def _is_empty_matrix(tp, fp, tn, fn) -> bool:
+    # No predictions exist (ML disabled or no scored flows): percentages
+    # over zero denominators would fabricate results, so callers get N/A.
+    return tp == 0 and fp == 0 and tn == 0 and fn == 0
+
+
 def _calc_metrics(tp, fp, tn, fn) -> dict:
+    if _is_empty_matrix(tp, fp, tn, fn):
+        return {
+            "tp": int(tp), "fp": int(fp), "tn": int(tn), "fn": int(fn),
+            "precision": None, "recall": None, "f1": None, "accuracy": None,
+            "fpr": None, "fnr": None, "tpr": None, "tnr": None,
+        }
     precision = tp / max(tp + fp, 1)
     recall    = tp / max(tp + fn, 1)
     f1        = 2 * precision * recall / max(precision + recall, 1e-9)
@@ -782,6 +794,8 @@ def get_if_metrics(start: str, end: str) -> dict:
 def _calc_overall_from_confusion(cm: dict) -> dict:
     correct = cm["syn_as_syn"] + cm["icmp_as_icmp"] + cm["udp_as_udp"]
     total   = sum(cm.values())
+    if total == 0:
+        return {"precision": None, "recall": None, "f1": None, "accuracy": None}
     acc     = correct / max(total, 1)
 
     return {

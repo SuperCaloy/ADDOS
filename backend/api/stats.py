@@ -94,13 +94,14 @@ def stats():
             SELECT SUM(if_fp) as fp, SUM(if_tn) as tn
             FROM traffic_summary
         """)
-        fpr = 0.0
+        fpr = None
         if fp_rows and fp_rows[0]:
             _fp = float(fp_rows[0].get("fp") or 0)
             _tn = float(fp_rows[0].get("tn") or 0)
-            fpr = round((_fp / max(_fp + _tn, 1)) * 100, 2)
+            # No scored flows: null, never a fabricated 0.0%.
+            fpr = round((_fp / (_fp + _tn)) * 100, 2) if (_fp + _tn) else None
     except Exception:
-        fpr = 0.0
+        fpr = None
 
     return jsonify({
         # Summary cards (in-memory, real-time)

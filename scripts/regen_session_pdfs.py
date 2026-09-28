@@ -1,6 +1,8 @@
 # Regenerate per session report PDFs from frozen session DB copies.
 # Read only on evidence: each frozen benchmark.db is copied to a temp file,
 # the temp copy is migrated and queried, originals are never written.
+# ML rendering follows the sidecar ml_enabled flag (legacy sidecars read as
+# ML on); DDOS_REGEN_ML=on|off overrides it for every session.
 # Usage: python3 scripts/regen_session_pdfs.py [SYN|UDP|ICMP|Mixed] [session_dir...]
 import json
 import os
@@ -32,9 +34,25 @@ def _rows_for_window(start_iso: str, end_iso: str) -> list:
     return rows
 
 
+def _ml_mode_for_session(sidecar: dict) -> bool:
+    # Env override wins (DDOS_REGEN_ML=on|off), then the sidecar ml_enabled
+    # flag, then True: legacy sidecars predate the flag and all carried ML.
+    override = (os.environ.get("DDOS_REGEN_ML") or "").strip().lower()
+    if override == "on":
+        return True
+    if override == "off":
+        return False
+    val = sidecar.get("ml_enabled")
+    if isinstance(val, bool):
+        return val
+    return True
+
+
 def regen_session(session_dir: str) -> str:
     with open(os.path.join(session_dir, "session.json")) as fh:
         sidecar = json.load(fh)
+    ml_mode = _ml_mode_for_session(sidecar)
+    report_mod.ML_ENABLED = ml_mode
     bounds = sidecar.get("bounds", {})
     start_iso, end_iso = bounds["start"], bounds["end"]
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
