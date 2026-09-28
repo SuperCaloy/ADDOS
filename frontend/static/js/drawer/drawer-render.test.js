@@ -28,6 +28,7 @@ function loadDrawer() {
     + ' _releaseTime: (typeof _releaseTime !== "undefined" ? _releaseTime : undefined),'
     + ' _applyPeakMl: (typeof _applyPeakMl !== "undefined" ? _applyPeakMl : undefined),'
     + ' _ipDetailQuery: (typeof _ipDetailQuery !== "undefined" ? _ipDetailQuery : undefined),'
+    + ' _actionWithDuration: (typeof _actionWithDuration !== "undefined" ? _actionWithDuration : undefined),'
     + ' _setBadge: (typeof _setBadge !== "undefined" ? _setBadge : undefined) };',
     sandbox
   );
@@ -206,6 +207,16 @@ test('_applyPeakMl retains peak IF score and RF confidence when subsequent polls
   assert.equal(res3.confidence, 98.2);
 });
 
+test('_actionWithDuration labels Time Ban with decided minutes', () => {
+  const sandbox = loadDrawer();
+  const fn = vm.runInContext('globalThis.__drawerTest._actionWithDuration', sandbox);
+  assert.equal(fn('Time Ban', { ttl_remaining_sec: 235, time_in_phase_sec: 65 }), 'Time Ban (5m)');
+  assert.equal(fn('Time Ban', { ttl_remaining_sec: 20, time_in_phase_sec: 10 }), 'Time Ban (30s)');
+  assert.equal(fn('Blackhole', { ttl_remaining_sec: 3600, time_in_phase_sec: 0 }), 'Blackhole');
+  assert.equal(fn('Time Ban', {}), 'Time Ban');
+  assert.equal(fn('Time Ban (1m)', { ttl_remaining_sec: 50, time_in_phase_sec: 10 }), 'Time Ban (1m)');
+});
+
 test('_ipDetailQuery builds live, historical, and session queries', () => {
   const sandbox = loadDrawer();
   const buildQuery = vm.runInContext('globalThis.__drawerTest._ipDetailQuery', sandbox);
@@ -216,6 +227,151 @@ test('_ipDetailQuery builds live, historical, and session queries', () => {
     buildQuery({ historical: true, sessionId: 'sess-OLD', timestamp: '2026-09-21 09:00:00' }),
     '?historical=1&session_id=sess-OLD&timestamp=2026-09-21%2009%3A00%3A00'
   );
+});
+
+function stubFrozenHarness(sandbox) {
+  sandbox.document.getElementById = () => ({
+    innerHTML: '',
+    textContent: '',
+    style: {},
+  });
+  vm.runInContext(
+    'globalThis.__sigArgs = null;'
+    + 'globalThis.__mlArgs = null;'
+    + 'globalThis.__pipeArgs = null;'
+    + 'globalThis.__histArgs = null;'
+    + 'globalThis.__expArgs = null;'
+    + 'globalThis.__badgeArgs = null;'
+    + '_renderFeatureSignals = (...a) => { globalThis.__sigArgs = a; };'
+    + '_renderMlBars = (...a) => { globalThis.__mlArgs = a; };'
+    + '_renderPipeline = (...a) => { globalThis.__pipeArgs = a; };'
+    + '_renderHistoryPills = (...a) => { globalThis.__histArgs = a; };'
+    + '_renderExpertTrace = (...a) => { globalThis.__expArgs = a; };'
+    + '_setBadge = (...a) => { globalThis.__badgeArgs = a; };',
+    sandbox
+  );
+}
+
+function frozenPayloads() {
+  const openPayload = {
+    src_ip: '10.0.0.99',
+    is_live: true,
+    snapshot_at: '2026-09-21 09:00:00',
+    features: { pkt_count: 950000, pps: 22600, byte_rate: 33800, byte_count: 17825792, duration_sec: 198, port_entropy: 1.0 },
+    ml: { if_score: 0.89, confidence: 95.5, attack_class: 'UDP Flood', is_anomaly: true },
+    state: { phase: 'Quarantined', action_taken: 'Quarantined', offence_count: 1, reputation_score: 0.1 },
+    thresholds: { if_threshold: 0.6, rf_conf_gate: 0.7 },
+    deviations: null,
+  };
+  const tickPayload = {
+    src_ip: '10.0.0.99',
+    is_live: true,
+    features: { pkt_count: 12, pps: 10, byte_rate: 100, byte_count: 500, duration_sec: 1, port_entropy: 0.1 },
+    ml: { if_score: 0.2, confidence: 30.0, attack_class: 'UDP Flood', is_anomaly: true },
+    state: { phase: 'Quarantined', action_taken: 'Quarantined', offence_count: 1, reputation_score: 0.1 },
+    thresholds: { if_threshold: 0.6, rf_conf_gate: 0.7 },
+    deviations: null,
+  };
+  return { openPayload, tickPayload };
+}
+
+test('live tick keeps pinned features but refreshes pipeline', () => {
+  const sandbox = loadDrawer();
+  stubFrozenHarness(sandbox);
+  const { openPayload, tickPayload } = frozenPayloads();
+  vm.runInContext(`_renderIpDetail(${JSON.stringify(openPayload)})`, sandbox);
+  vm.runInContext(
+    'globalThis.__sigArgs = null; globalThis.__pipeArgs = null;',
+    sandbox
+  );
+  vm.runInContext(`_updateLiveSection(${JSON.stringify(tickPayload)})`, sandbox);
+  const signalsCalled = vm.runInContext('globalThis.__sigArgs !== null', sandbox);
+  const pipelineCalled = vm.runInContext('globalThis.__pipeArgs !== null', sandbox);
+  assert.equal(signalsCalled, false);
+  assert.equal(pipelineCalled, true);
+});
+
+test('live tick leaves ML bars and expert trace frozen but refreshes pills', () => {
+  const sandbox = loadDrawer();
+  stubFrozenHarness(sandbox);
+  const { openPayload, tickPayload } = frozenPayloads();
+  vm.runInContext(`_renderIpDetail(${JSON.stringify(openPayload)})`, sandbox);
+  vm.runInContext(
+    'globalThis.__mlArgs = null; globalThis.__expArgs = null;'
+    + 'globalThis.__histArgs = null; globalThis.__badgeArgs = null;',
+    sandbox
+  );
+  vm.runInContext(`_updateLiveSection(${JSON.stringify(tickPayload)})`, sandbox);
+  assert.equal(vm.runInContext('globalThis.__mlArgs !== null', sandbox), false);
+  assert.equal(vm.runInContext('globalThis.__expArgs !== null', sandbox), false);
+  assert.equal(vm.runInContext('globalThis.__histArgs !== null', sandbox), true);
+  assert.equal(vm.runInContext('globalThis.__badgeArgs !== null', sandbox), true);
+});
+
+test('open pins snapshot_at from backend into last render', () => {
+  const sandbox = loadDrawer();
+  stubFrozenHarness(sandbox);
+  const { openPayload, tickPayload } = frozenPayloads();
+  vm.runInContext(`_renderIpDetail(${JSON.stringify(openPayload)})`, sandbox);
+  const pinned = vm.runInContext('_drawerLastRender && _drawerLastRender.snapshot_at', sandbox);
+  assert.ok(pinned);
+  assert.ok(String(pinned).includes('2026-09-21 09:00:00'));
+  vm.runInContext(`_updateLiveSection(${JSON.stringify(tickPayload)})`, sandbox);
+  const afterTick = vm.runInContext('_drawerLastRender && _drawerLastRender.f && _drawerLastRender.f.pkt_count', sandbox);
+  assert.equal(afterTick, 950000);
+});
+
+test('badge shows Snapshot as of for frozen sections', () => {
+  const sandbox = loadDrawer();
+  const capture = {};
+  const makeEl = id => ({
+    get innerHTML() { return capture[id] || ''; },
+    set innerHTML(v) { capture[id] = v; },
+    textContent: '',
+    style: {},
+  });
+  sandbox.document.getElementById = id => makeEl(id);
+  const { openPayload } = frozenPayloads();
+  vm.runInContext(`_renderIpDetail(${JSON.stringify(openPayload)})`, sandbox);
+  const html = capture['idd-status-badge'] || '';
+  assert.ok(html.includes('Snapshot as of'));
+  assert.ok(html.includes('09:00:00'));
+  assert.ok(!html.includes('updated'));
+});
+
+test('flow stale payload goes to watch, never live polling', async () => {
+  const sandbox = loadDrawer();
+  sandbox.document.getElementById = () => ({
+    innerHTML: '',
+    textContent: '',
+    style: {},
+  });
+  const stalePayload = {
+    src_ip: '10.0.0.77',
+    is_live: true,
+    flow_stale: true,
+    features: { pkt_count: 0, pps: 0 },
+    ml: {},
+    state: {},
+    thresholds: {},
+  };
+  vm.runInContext(
+    'globalThis.__liveCalled = false;'
+    + 'globalThis.__watchCalled = false;'
+    + '_renderIpDetail = () => {};'
+    + '_startLivePolling = () => { globalThis.__liveCalled = true; };'
+    + '_startWatch = () => { globalThis.__watchCalled = true; };'
+    + '_drawerCurrentIp = "10.0.0.77";'
+    + '_drawerQueryOpts = null;',
+    sandbox
+  );
+  sandbox.fetch = async () => ({
+    ok: true,
+    json: async () => stalePayload,
+  });
+  await vm.runInContext('_fetchIpDetail("10.0.0.77", {})', sandbox);
+  assert.equal(vm.runInContext('globalThis.__watchCalled', sandbox), true);
+  assert.equal(vm.runInContext('globalThis.__liveCalled', sandbox), false);
 });
 
 

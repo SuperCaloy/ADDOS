@@ -257,6 +257,13 @@ class StateMachine:
                         permanent      = permanent,
                         ttl_expires_at = ttl_expires_at,
                     )
+                    # Priority is not persisted: recompute it from the
+                    # restored scores so a Critical blackhole does not
+                    # come back as Low. Reputation survives in the DB.
+                    state.priority = behavioral.assign_priority(
+                        state.if_score, state.confidence, src_ip,
+                        attack_class=state.attack_vector,
+                    )
                     self._states[src_ip] = state
                     # Phase 2 is a full block; restoring as rate_limit would downgrade Time Bans to throttles (BFA-P2). Unscored HOLD rows stay throttled by design.
                     _action_map = {1: "rate_limit", 2: "block", 3: "block"}

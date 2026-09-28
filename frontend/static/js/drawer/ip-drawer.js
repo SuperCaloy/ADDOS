@@ -183,7 +183,9 @@ function _startLivePolling(ip) {
       _drawerMisses = 0;
       _scheduleLiveTick(ip, tick, 2000);
       _updateLiveSection(data);
-      _setBadge(true, { updated: _nowTime(), stale: !!(data.ml && data.ml.stale) });
+      const pinnedRawTick = (_drawerLastRender && _drawerLastRender.snapshot_at) || data.snapshot_at || '';
+      const pinnedDisplayTick = _releaseTime(pinnedRawTick) || _nowTime();
+      _setBadge(true, { snapshotAt: pinnedDisplayTick, stale: !!(data.ml && data.ml.stale) });
     } catch (_) {
       _drawerMisses += 1;
       _scheduleLiveTick(ip, tick, _livePollPlan(_drawerMisses, false).intervalMs);
@@ -322,14 +324,23 @@ function _setBadge(isLive, extra) {
     el.style.alignItems = 'center';
     el.style.gap = '6px';
   }
-  const stamp = extra && extra.updated
+  const stamp = extra && extra.updated && !(extra && extra.snapshotAt)
     ? `<span style="display:inline-flex;align-items:center;gap:5px;
          background:rgba(148,153,183,.1);border:1px solid rgba(148,153,183,.25);
          border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;
          font-family:var(--mono,monospace);color:var(--text,#e2e8f0);letter-spacing:.06em">
-         <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--sub,#9499b7);flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-         <span>updated ${extra.updated}</span>
-       </span>`
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--sub,#9499b7);flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>updated ${extra.updated}</span>
+        </span>`
+    : '';
+  const snapshotPill = extra && extra.snapshotAt
+    ? `<span style="display:inline-flex;align-items:center;gap:5px;
+         background:rgba(148,153,183,.1);border:1px solid rgba(148,153,183,.25);
+         border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;
+         font-family:var(--mono,monospace);color:var(--text,#e2e8f0);letter-spacing:.06em">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--sub,#9499b7);flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <span>Snapshot as of ${extra.snapshotAt}</span>
+        </span>`
     : '';
   const stalePill = extra && extra.stale
     ? `<span style="display:inline-flex;align-items:center;
@@ -348,7 +359,7 @@ function _setBadge(isLive, extra) {
         <span style="width:5px;height:5px;border-radius:50%;background:var(--green,#00d68f);
              animation:idd-pulse 1.4s ease-in-out infinite;display:inline-block"></span>
         LIVE
-      </span>${stalePill}${stamp}`;
+      </span>${stalePill}${snapshotPill}${stamp}`;
   } else {
     const released = extra && extra.releasedAt
       ? `<span style="display:inline-flex;align-items:center;gap:5px;
@@ -365,24 +376,23 @@ function _setBadge(isLive, extra) {
            border-radius:5px;padding:3px 8px;font-size:11px;font-weight:700;
            font-family:var(--mono,monospace);color:var(--sub,#9499b7);letter-spacing:.08em">
         HISTORICAL
-      </span>${released}`;
+      </span>${snapshotPill}${released}`;
   }
 }
 
 /**
- * Updates dynamic telemetry and pipeline components during live polling updates.
- * Avoids full container re-rendering by patching only high-frequency UI components.
+ * Updates live enforcement state during polling. Feature grids, ML bars,
+ * expert trace, and Top signal stay pinned to the open snapshot. Only
+ * pipeline, history pills, and the snapshot badge refresh here.
  */
 function _updateLiveSection(data) {
-  const f = data.features || {};
   const ml = data.ml || {};
   const st = data.state || {};
-  const ip = data.src_ip || _drawerCurrentIp;
-  if (ip) _applyPeakMl(ip, ml);
-  _renderFeatureSignals(f, ml.attack_class, data.deviations);
-  _renderMlBars(ml, data.thresholds || {});
+  const pinnedRaw = (_drawerLastRender && _drawerLastRender.snapshot_at) || data.snapshot_at || '';
+  const pinnedDisplay = _releaseTime(pinnedRaw) || _nowTime();
   _renderHistoryPills(st);
   _renderPipeline(data, ml, st, ml.is_anomaly);
+  _setBadge(true, { snapshotAt: pinnedDisplay, stale: !!(ml && ml.stale) });
 }
 
 /**
@@ -396,13 +406,24 @@ function _renderIpDetail(d) {
   const th = d.thresholds || {};
   const ip = d.src_ip || _drawerCurrentIp;
   if (ip) _applyPeakMl(ip, ml);
-  _drawerLastRender = { d, ml, st, f, th };
+  const rawSnapshot = d.snapshot_at || '';
+  const displayTime = rawSnapshot ? (_releaseTime(rawSnapshot) || _nowTime()) : _nowTime();
+  const pinnedSnapshot = rawSnapshot || displayTime;
+  _drawerLastRender = { d, ml, st, f, th, snapshot_at: pinnedSnapshot };
 
-  _setBadge(!!d.is_live, {
-    updated: _nowTime(),
-    stale: !!(ml && ml.stale),
-    releasedAt: _releaseTime(d.snapshot_at),
-  });
+  const isHistSession = !!(_drawerQueryOpts && _drawerQueryOpts.sessionId);
+  let badgeExtra;
+  if (d.is_live) {
+    badgeExtra = { snapshotAt: displayTime, stale: !!(ml && ml.stale) };
+  } else if (isHistSession) {
+    badgeExtra = { snapshotAt: displayTime };
+  } else {
+    badgeExtra = {
+      stale: !!(ml && ml.stale),
+      releasedAt: _releaseTime(d.snapshot_at),
+    };
+  }
+  _setBadge(!!d.is_live, badgeExtra);
 
   /* Verdict banner */
   const isAnomaly = ml.is_anomaly;
@@ -578,6 +599,24 @@ function _actionColor(a) {
 }
 
 /**
+ * Appends the decided ban duration to a live Time Ban action, e.g.
+ * "Time Ban" + 300s TTL => "Time Ban (5m)". Mirrors the audit log labels.
+ * Reconstructs the total from remaining + elapsed, the same TTL the switch
+ * enforces. Returns the action unchanged when it is not a ban or timing
+ * is unavailable (e.g. historical snapshots predate these fields).
+ */
+function _actionWithDuration(action, st) {
+  if (!/^time\s*ban/i.test(action || '')) return action;
+  const ttl = st && st.ttl_remaining_sec != null ? Number(st.ttl_remaining_sec) : null;
+  const tip = st && st.time_in_phase_sec != null ? Number(st.time_in_phase_sec) : null;
+  if (ttl == null || tip == null || Number.isNaN(ttl) || Number.isNaN(tip)) return action;
+  const total = Math.max(0, ttl + tip);
+  const dur = total >= 60 ? `${Math.max(1, Math.round(total / 60))}m` : `${Math.round(total)}s`;
+  const base = String(action).replace(/\s*\(.*?\)\s*$/, '');
+  return `${base} (${dur})`;
+}
+
+/**
  * Splits a backend action string like "Time Ban (19m 43s)" into its action
  * name and trailing countdown, so the time always renders in full.
  */
@@ -607,7 +646,7 @@ function _renderPipeline(d, ml, st, isAnomaly) {
   let step4 = null;
   if (d.is_live) {
     step4 = {
-      label: st.action_taken || '--',
+      label: _actionWithDuration(st.action_taken || '--', st),
       sub: st.phase || 'Active',
       color: _actionColor(st.action_taken || ''),
       ts: '',
@@ -702,7 +741,8 @@ function _renderHistoryPills(st) {
   pills.push(['Reputation', rep.toFixed(2), 'var(--purple,#a855f7)']);
 
   if (st.action_taken && st.action_taken !== '--') {
-    pills.push(['Action', st.action_taken, _actionColor(st.action_taken)]);
+    const actionLabel = _actionWithDuration(st.action_taken, st);
+    pills.push(['Action', actionLabel, _actionColor(actionLabel)]);
   }
 
   const tsFirst = fmtTs(st.first_seen);

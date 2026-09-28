@@ -196,14 +196,50 @@ def _build_active_state_features(src_ip: str, state) -> dict:
     # Live mitigation status for an active IP whose flow telemetry is stale
     # (blocked IPs stop sending traffic). Endpoint-layer fallback only, so
     # _build_live_features keeps returning None for stale flows.
+    # Features come from the latest detection_features row so cards show
+    # last-observed values instead of zeros. DB errors fall back to zeros.
     peak_if = max(float(state.if_score or 0.0), float(state.peak_if_score or 0.0))
     peak_conf = max(float(state.confidence or 0.0), float(state.peak_confidence or 0.0))
     tea_verdict, tea_samples, tea_pps_trend, tea_entropy = _read_tea_profile(src_ip)
+    try:
+        feat_rows = query("""
+            SELECT packet_count, byte_count, packet_count_per_second,
+                   byte_count_per_second, flow_duration_sec, flags,
+                   bytes_per_packet, flow_count_per_src,
+                   tp_src, tp_dst, ip_proto
+            FROM detection_features
+            WHERE src_ip = ?
+            ORDER BY timestamp DESC LIMIT 1
+        """, (src_ip,))
+    except Exception:
+        feat_rows = []
+    feat = feat_rows[0] if feat_rows else {}
+    derived = _calc_derived_features(feat)
+    features = _empty_features()
+    if feat:
+        features.update({
+            "pkt_count": feat.get("packet_count", 0) or 0,
+            "byte_count": feat.get("byte_count", 0) or 0,
+            "pps": feat.get("packet_count_per_second", 0) or 0,
+            "byte_rate": feat.get("byte_count_per_second", 0) or 0,
+            "duration_sec": feat.get("flow_duration_sec", 0) or 0,
+            "bytes_per_packet": derived["bytes_per_packet"],
+            "port_entropy": derived["port_entropy"],
+            "pkt_size_uniformity": derived["pkt_size_uniformity"],
+            "flow_count_per_src": feat.get("flow_count_per_src", 0) or 0,
+            "tp_src": derived["tp_src"],
+            "tp_dst": derived["tp_dst"],
+            "ip_proto": feat.get("ip_proto", 0) or 0,
+            "pkt_byte_rate_ratio": derived["pkt_byte_rate_ratio"],
+            "flow_intensity": derived["flow_intensity"],
+            "bytes_per_duration": derived["bytes_per_duration"],
+            "flow_src_intensity": derived["flow_src_intensity"],
+        })
     return {
         "src_ip": src_ip,
         "is_live": True,
         "flow_stale": True,
-        "features": _empty_features(),
+        "features": features,
         "ml": {
             "if_score":     peak_if,
             "is_anomaly":   True,
@@ -228,6 +264,7 @@ def _build_active_state_features(src_ip: str, state) -> dict:
             "rf_conf_gate": loader.rf_conf_gate,
         },
         "phase_history": _session_phase_history(src_ip, getattr(state, "session_id", None)),
+        **_signal_blocks(feat),
         "tea_ip_profile": {
             "verdict": tea_verdict,
             "samples": tea_samples,
@@ -326,15 +363,33 @@ def _build_session_features(src_ip: str, session_id: str, timestamp: str | None 
     attack_class = target.get("attack_vector") or "--"
     conf_pct = round(conf_raw * 100, 1) if conf_raw <= 1.0 else round(conf_raw, 1)
 
-    feat_rows = query("""
-        SELECT packet_count, byte_count, packet_count_per_second,
-               byte_count_per_second, flow_duration_sec, flags,
-               bytes_per_packet, flow_count_per_src,
-               tp_src, tp_dst, ip_proto
-        FROM detection_features
-        WHERE src_ip = ?
-        ORDER BY timestamp DESC LIMIT 1
-    """, (src_ip,))
+    feat_rows = []
+    target_ts = (target.get("timestamp") or "").strip()
+    if target_ts:
+        try:
+            import datetime as _dt
+            _dt.datetime.fromisoformat(target_ts)
+            feat_rows = query("""
+                SELECT packet_count, byte_count, packet_count_per_second,
+                       byte_count_per_second, flow_duration_sec, flags,
+                       bytes_per_packet, flow_count_per_src,
+                       tp_src, tp_dst, ip_proto
+                FROM detection_features
+                WHERE src_ip = ?
+                ORDER BY ABS(strftime('%s', timestamp) - strftime('%s', ?)) ASC LIMIT 1
+            """, (src_ip, target_ts))
+        except ValueError:
+            feat_rows = []
+    if not feat_rows:
+        feat_rows = query("""
+            SELECT packet_count, byte_count, packet_count_per_second,
+                   byte_count_per_second, flow_duration_sec, flags,
+                   bytes_per_packet, flow_count_per_src,
+                   tp_src, tp_dst, ip_proto
+            FROM detection_features
+            WHERE src_ip = ?
+            ORDER BY timestamp DESC LIMIT 1
+        """, (src_ip,))
     feat = feat_rows[0] if feat_rows else {}
     derived = _calc_derived_features(feat)
 
@@ -347,9 +402,7 @@ def _build_session_features(src_ip: str, session_id: str, timestamp: str | None 
     """, (src_ip,))
     h = hist[0] if hist else {}
 
-    event_type = target.get("event_type") or ""
     action = target.get("action_taken") or "--"
-    is_terminal = event_type == "released" or "releas" in action.lower()
     tea_verdict, tea_samples, tea_pps_trend, tea_entropy = _read_tea_profile(src_ip)
 
     return {
@@ -357,7 +410,7 @@ def _build_session_features(src_ip: str, session_id: str, timestamp: str | None 
         "is_live": False,
         "session_id": target.get("session_id") or session_id,
         "event_timestamp": target.get("timestamp"),
-        "snapshot_at": target.get("timestamp") if is_terminal else None,
+        "snapshot_at": target.get("timestamp"),
         "features": {
             "pkt_count": feat.get("packet_count", 0) or 0,
             "byte_count": feat.get("byte_count", 0) or 0,
@@ -519,6 +572,16 @@ def _build_live_features(src_ip: str, state=None) -> dict | None:
             "offence_count": behavioral.get_offence_count(src_ip),
             "first_seen": state.first_seen if state else None,
             "last_seen": None,
+            # Ban timing for duration labels (e.g. Time Ban (5m)).
+            # Reconstructed from the same TTL the switch enforces.
+            "ttl_remaining_sec": (
+                max(0, int(state.ttl_expires_at - _time.monotonic()))
+                if state is not None and state.ttl_expires_at is not None
+                else None
+            ),
+            "time_in_phase_sec": (
+                int(state.time_in_phase_sec()) if state is not None else None
+            ),
         },
         "thresholds": {
             "if_threshold": loader.if_threshold,
