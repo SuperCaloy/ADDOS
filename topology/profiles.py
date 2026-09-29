@@ -115,13 +115,12 @@ _DEFAULT_DURATIONS = {
     "active": (45, 45),
 }
 
-# Demo-only unknown-attack table. ICMPsmall targets wire avg ~58B.
-# Counterfactual probe on RECORDED live 10.0.0.25 vectors: --data 0-16
-# flips every IF-anomalous flow to Uncertain (median conf 0.585), while
-# --data 52 scored confident ICMP Flood 0.9+ live. Re-check live before
-# changing this number again.
+# Demo-only unknown-attack table. ICMPts is an ICMP Timestamp request
+# flood (type 13, not echo): same ip_proto the model knows, but a message
+# behavior RF never trained on. Small payload keeps size geometry in the
+# Uncertain band. Re-check live before changing this row again.
 _UNKNOWN_FLAGS = {
-    "ICMPsmall": "--icmp --flood --data 16",
+    "ICMPts": "--icmp --icmptype 13 --flood --data 16",
 }
 
 

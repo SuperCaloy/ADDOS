@@ -1119,7 +1119,7 @@ def _unknown_demo_worker(num: int, stop_event: threading.Event,
     _notify_attack_stop(ip)
 
 
-def start_unknown_demo_attack(host: str = "h25", kind: str = "ICMPsmall") -> None:
+def start_unknown_demo_attack(host: str = "h25", kind: str = "ICMPts") -> None:
     # Panel sinkhole demo: single attacker floods with an unknown-protocol
     # signature. Validation runs before any net or thread use.
     if not isinstance(host, str) or not host.startswith("h"):
