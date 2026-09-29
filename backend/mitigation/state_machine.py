@@ -364,6 +364,11 @@ class StateMachine:
             if state and state.permanent and state.ttl_expires_at is None:
                 return state.action_taken
 
+            # Sinkholed IPs are already under observation: feed live scores
+            # via update_observation/update_pps, never open a second home.
+            if self._deception and self._deception.is_sinkholes(src_ip):
+                return "Sinkhole"
+
             if state is None:
                 # Check behavioral DB history for priority and prior offenses
                 _prio          = behavioral.assign_priority(
@@ -624,6 +629,14 @@ class StateMachine:
     def _advance_to_sinkhole(self, state: IpState) -> None:
         # Quarantine could not resolve this IP within the observation window.
         # Escalate to sinkhole rather than fully blocking on weak evidence.
+        # Clears SSE dedup so the phase-change event reaches the audit log.
+        try:
+            from backend.pipeline.decision_engine import _sse_dedup, _sse_lock
+            with _sse_lock:
+                _sse_dedup.pop(state.src_ip, None)
+        except Exception:
+            pass
+
         src_ip = state.src_ip
         state.transition_reason = "Unresolved after quarantine - escalated to sinkhole"
         self._states.pop(src_ip, None)
@@ -645,6 +658,13 @@ class StateMachine:
         )
         log.info("Sinkhole (post-quarantine): %s  vector=%s  conf=%.1f%%",
                  src_ip, state.attack_vector, state.confidence * 100)
+        from backend.pipeline.decision_engine import _push_sse_event
+        _push_sse_event(_build_sse_event(
+            src_ip=src_ip, attack_vector=state.attack_vector,
+            confidence=state.confidence, priority=state.priority,
+            action_taken="Sinkhole", event_type="transition",
+            session_id=state.session_id,
+        ), force=True)
 
     def _handle_ban_expiry(self, src_ip: str, state: IpState) -> None:
         recent_pps = getattr(state, "recent_pps", None)
@@ -830,9 +850,12 @@ class StateMachine:
     def on_reoffence(self, src_ip: str, if_score: float,
                      attack_class: str, confidence: float,
                      prev_ban_level: int, prev_offence_count: int,
-                     recent_pps: float = 0.0) -> None:
+                     recent_pps: float = 0.0) -> Optional[str]:
         # Previously banned IP detected again.
         # Routes to blackhole if the weighted offense score meets the threshold, else escalates the ban level.
+        # A sinkholed IP is already under observation: never open a second home.
+        if self._deception and self._deception.is_sinkholes(src_ip):
+            return "Sinkhole"
         with self._lock:
             _prio       = behavioral.assign_priority(
                 if_score, confidence, src_ip,

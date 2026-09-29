@@ -48,6 +48,8 @@ try:
         _HOST_SLOTS,
         post_idle_slots as _post_idle_slots,
         _DEFAULT_DURATIONS,
+        _UNKNOWN_FLAGS,
+        unknown_hping_cmd as _unknown_hping_cmd,
     )
     from topology.ryu_utils import send_ryu_command as _send_ryu_command
 except (ImportError, ModuleNotFoundError):
@@ -72,6 +74,8 @@ except (ImportError, ModuleNotFoundError):
         _HOST_SLOTS,
         post_idle_slots as _post_idle_slots,
         _DEFAULT_DURATIONS,
+        _UNKNOWN_FLAGS,
+        unknown_hping_cmd as _unknown_hping_cmd,
     )
     from ryu_utils import send_ryu_command as _send_ryu_command
 
@@ -1080,6 +1084,82 @@ def _attacker_cycle_worker_randomized(num: int, stop_event: threading.Event,
     _notify_attack_stop(ip)
 
 
+# Continuous flood for the panel sinkhole demo, built only from the
+# unknown-flags table so Mode A variants stay untouched.
+def _unknown_demo_worker(num: int, stop_event: threading.Event,
+                         kind: str, delay: float = 0.0) -> None:
+    h = net.get(f"h{num}")
+    ip = h.IP()
+
+    waited = 0.0
+    while waited < delay:
+        if stop_event.is_set():
+            return
+        time.sleep(0.1)
+        waited += 0.1
+
+    cmd = _unknown_hping_cmd(kind, SERVER_IP)
+
+    _notify_attack_start(ip, "UNKNOWN")
+    _active_attackers.add(ip)
+
+    while not stop_event.is_set():
+        try:
+            for _ in range(_flood_spawn_count(kind)):
+                _nsrun(h, cmd)
+            while not stop_event.is_set():
+                time.sleep(1)
+                if _hping_state(h) is False:
+                    break
+        except Exception as e:
+            info(f"    h{num}: worker error ({e}), retrying\n")
+            time.sleep(2.0)
+
+    _nsrun(h, "pkill -9 -x hping3 2>/dev/null; true", wait=True)
+    _notify_attack_stop(ip)
+
+
+def start_unknown_demo_attack(host: str = "h25", kind: str = "ICMPsmall") -> None:
+    # Panel sinkhole demo: single attacker floods with an unknown-protocol
+    # signature. Validation runs before any net or thread use.
+    if not isinstance(host, str) or not host.startswith("h"):
+        raise ValueError(f"unknown demo host: {host}")
+    try:
+        num = int(host[1:])
+    except (ValueError, IndexError):
+        raise ValueError(f"unknown demo host: {host}")
+    if num not in _ATTACKER_POOL:
+        raise ValueError(f"unknown demo host: {host}")
+    if kind not in _UNKNOWN_FLAGS:
+        raise ValueError(f"unknown demo kind: {kind}")
+    global _mixed_stop_event, _campaign_threads
+    _stop_active_workers()
+    _mixed_stop_event.clear()
+    info("\n" + "=" * 55 + "\n")
+    info(f"  [UNKNOWN DEMO]  {host}  {kind}  "
+         f"{_display_flags(_UNKNOWN_FLAGS[kind])}\n")
+    info("=" * 55 + "\n")
+    h = net.get(host)
+    t = threading.Thread(
+        target=_unknown_demo_worker, args=(num, _mixed_stop_event, kind),
+        name=f"attacker-{host}", daemon=True,
+    )
+    _campaign_threads.append(t)
+    t.start()
+    info(f"  {host} ({h.IP()})  {_display_flags(_UNKNOWN_FLAGS[kind])}\n")
+    time.sleep(0.1)
+    _start_attack_watchdog([num], _mixed_stop_event)
+    info("=" * 55 + "\n")
+    info("  Stop: py stop_all_attacks()\n")
+    info("=" * 55 + "\n\n")
+
+
+def run_sinkhole() -> None:
+    # Panel shortcut: fixed demo on h25 with default kind, no parameters.
+    # Calibration work uses start_unknown_demo_attack directly.
+    start_unknown_demo_attack()
+
+
 
 # === STRESS TEST (rand-source) ===
 
@@ -1739,17 +1819,6 @@ def _print_banner(edge_switches: list) -> None:
     info("\n" + "=" * 75 + "\n")
     info("  COMMANDS\n")
     info("  " + "-" * 65 + "\n")
-    info("  -- BURST (finite) --------------------------------------------\n")
-    info("  py launch_syn_flood()                  # 10k-50k pkts random per call, h16\n")
-    info("  py launch_icmp_flood()                 # 10k-50k pkts random per call, h23\n")
-    info("  py launch_udp_flood()                  # 10k-50k pkts random per call, h20\n\n")
-    info("  -- SUSTAINED (unlimited) -------------------------------------\n")
-    info("  py launch_syn_flood_sustained()        # h16\n")
-    info("  py launch_icmp_flood_sustained()       # h23\n")
-    info("  py launch_udp_flood_sustained()        # h20\n\n")
-    info("  -- ALL ATTACKERS ---------------------------------------------\n")
-    info("  py launch_attack()                     # all 10, randomized types\n")
-    info("  py launch_attack(sustained=False)      # all 10, burst\n\n")
     info("  -- CAMPAIGNS -------------------------------------------------\n")
     info("  py start_syn_flood_campaign()          # all SYN attackers\n")
     info("  py start_icmp_flood_campaign()         # all ICMP attackers\n")
@@ -1765,11 +1834,7 @@ def _print_banner(edge_switches: list) -> None:
     info("  -- OTHER -----------------------------------------------------\n")
     info("  py flash_crowd()                       # 30s spike to server\n")
     info("  py flash_crowd(duration=60)            # custom duration\n")
-    info("  py check_traffic()                     # live host status\n")
-    info("  py verify_attacks()                    # attacker detection fallback check\n")
-    info("  py reset_flow_epochs()                 # fresh flow counters\n")
-    info("  py watch_pipeline()                    # live ML scores\n")
-    info("  py start_baseline_traffic()            # restart baseline\n")
+    info("  py run_sinkhole()                      # h25 unknown-attack sinkhole demo\n")
     info("=" * 75 + "\n\n")
 
 

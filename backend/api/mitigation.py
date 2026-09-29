@@ -17,14 +17,22 @@ def quarantine_list():
     # Returns combined list of currently quarantined and sinkholed IP addresses.
     # Combines state machine active mitigations and deceptive honeypot redirections.
     rows = state_machine.get_active_list()
+    seen = {r["src_ip"] for r in rows}
     for e in deception.get_active_list():
+        if e["src_ip"] in seen:
+            # One IP, one home: the state machine copy wins so the list
+            # matches the drawer, which also reads the state machine first.
+            continue
         rows.append({
             "src_ip":            e["src_ip"],
             "phase":             e["phase"],
+            "phase_label":       e["phase_label"],
             "attack_vector":     e["attack_vector"],
             "if_score":          e["if_score"],
             "confidence":        e["confidence"],
             "time_in_phase_sec": e.get("elapsed_sec", 0),
+            "ttl_remaining_sec": e.get("remaining_sec", 0),
+            "recent_pps":        e.get("recent_pps", 0.0),
             "priority":          "Low",
         })
     return jsonify(rows)

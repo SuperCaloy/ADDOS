@@ -81,3 +81,6 @@ tmp/
 .claude
 session.json
 *.docx
+tests/
+test/
+scripts/

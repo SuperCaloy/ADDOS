@@ -90,7 +90,9 @@ async function fetchQuarantine() {
       const ttlRemaining = ` <span style="color:var(--amber,#ffb300);font-size:11px;font-family:var(--mono)">[${Math.floor(ttlSec/60)}m ${ttlSec%60}s]</span>`;
 
       const priBadge = renderPriority(e.priority);
-      const phaseDisplay = e.phase_label || e.phase || '--';
+      // Phase 0 (sinkhole) is falsy in JS, so a bare `||` chain renders it
+      // as '--'. Handle it explicitly; the backend always sends phase_label.
+      const phaseDisplay = e.phase_label || (e.phase === 0 ? 'Sinkhole' : (e.phase || '--'));
 
       const inner = `
         <td class="ip">${e.src_ip || '--'}</td>

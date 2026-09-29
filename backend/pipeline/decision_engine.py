@@ -19,10 +19,22 @@ def _build_tea_result(flow_stats: dict) -> dict:
     }
 
 
-# MIXED_POLICY: MIXED ground truth is excluded from RF scoring. A MIXED flow
-# is not counted as FN and it does not get its own confusion row. This pins
-# the current exclude behavior explicitly instead of leaving it implicit.
+# MIXED_POLICY: MIXED and UNKNOWN ground truth is excluded from RF scoring.
+# An excluded flow is not counted as FN and it does not get its own
+# confusion row. This pins the current exclude behavior explicitly instead
+# of leaving it implicit. UNKNOWN is a demo-only label RF never predicts;
+# counting stays with mitigation_events Sinkhole rows.
 MIXED_POLICY = "exclude"
+
+# RF_EXCLUDED_GT_LABELS: topology-only ground truth labels excluded from RF
+# scoring. Expected None yields all-zero RF counters.
+RF_EXCLUDED_GT_LABELS = frozenset({"MIXED", "UNKNOWN"})
+
+
+def _resolve_rf_expected(label):
+    if label in RF_EXCLUDED_GT_LABELS:
+        return None
+    return label
 
 
 def _compute_rf_confusion(expected_class: str, attack_class: str) -> dict:
@@ -574,10 +586,10 @@ def on_result(src_ip: str, if_score, is_anomaly,
                 prev_ban   = int(prior[0].get("ban_level", 0) or 0)
                 prev_occ   = int(prior[0].get("offence_count", 0) or 0)
                 if prev_ban > 0:
-                    state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_occ,
+                    _reoff_action = state_machine.on_reoffence(src_ip, if_score, attack_class, confidence, prev_ban, prev_occ,
                                                recent_pps=_recent_pps)
                     _post_state = state_machine.get_state(src_ip)
-                    action_taken = _post_state.action_taken if _post_state else "Quarantined"
+                    action_taken = _post_state.action_taken if _post_state else (_reoff_action or "Quarantined")
                 else:
                     action_taken = state_machine.on_detection(src_ip, if_score, attack_class, confidence,
                                                               recent_pps=_recent_pps)
@@ -633,17 +645,16 @@ def on_result(src_ip: str, if_score, is_anomaly,
     # RF ground truth - use live topology-reported attack type
     from backend.api.stats import get_active_attacks as _get_gt
     _gt = _get_gt()
-    _expected_class = _gt.get(src_ip)  # "SYN", "ICMP", "UDP" or None
-    # MIXED is a topology-only label RF's 3-class model does not predict;
-    # scoring it as FN/FP would corrupt the confusion matrix, so it is excluded.
-    if _expected_class == "MIXED":
-        _expected_class = None
+    _expected_class = _resolve_rf_expected(_gt.get(src_ip))  # "SYN", "ICMP", "UDP" or None
+    # MIXED and UNKNOWN are topology-only labels RF's 3-class model does not
+    # predict; scoring them as FN/FP would corrupt the confusion matrix,
+    # so they are excluded.
 
     # Map RF attack_class to short type
     _class_map = {"SYN Flood": "SYN", "ICMP Flood": "ICMP", "UDP Flood": "UDP"}
     _predicted = _class_map.get(attack_class)
     _rf = _compute_rf_confusion(_expected_class, attack_class)
-    # Split counters only, never routing. MIXED was already excluded above.
+    # Split counters only, never routing. MIXED and UNKNOWN were already excluded above.
     _metrics = _score_rf_for_metrics(_expected_class, _predicted, _is_legit)
     _was_mixed = (_gt.get(src_ip) == "MIXED")
 

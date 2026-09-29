@@ -115,3 +115,19 @@ _DEFAULT_DURATIONS = {
     "idle": (8, 20),
     "active": (45, 45),
 }
+
+# Demo-only unknown-attack table. ICMPsmall targets wire avg ~58B.
+# Counterfactual probe on RECORDED live 10.0.0.25 vectors: --data 0-16
+# flips every IF-anomalous flow to Uncertain (median conf 0.585), while
+# --data 52 scored confident ICMP Flood 0.9+ live. Re-check live before
+# changing this number again.
+_UNKNOWN_FLAGS = {
+    "ICMPsmall": "--icmp --flood --data 16",
+}
+
+
+def unknown_hping_cmd(kind: str, target: str) -> str:
+    flags = _UNKNOWN_FLAGS.get(kind)
+    if flags is None:
+        raise ValueError(f"unknown demo kind: {kind}")
+    return f"hping3 {flags} {target} > /dev/null 2>&1"
