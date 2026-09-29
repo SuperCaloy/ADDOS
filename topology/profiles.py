@@ -6,7 +6,7 @@ SINKHOLE_IP = "10.0.0.27"
 
 def attack_pkt_count(atype: str) -> int:
     # Dynamic per-call draw so each host gets a different burst length.
-    return random.randint(30000, 50000)
+    return random.randint(50000 , 70000)
 
 
 _attack_pkt_count = attack_pkt_count
@@ -54,8 +54,7 @@ _ATTACK_TYPE_PORTS = {
 }
 
 def flood_spawn_count(atype: str) -> int:
-    # atype is kept so existing callers do not change.
-    return 2
+    return 1
 
 
 _flood_spawn_count = flood_spawn_count

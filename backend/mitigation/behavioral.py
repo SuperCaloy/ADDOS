@@ -10,6 +10,10 @@ log = logging.getLogger(__name__)
 # Weighted offense score triggering direct blackhole (half-life decay, 24h). 5 rapid attacks accumulate to 10.0.
 BLACKHOLE_OFFENSE_THRESHOLD = 10.0
 
+# Decay score at or above this skips Quarantine for an immediate Time Ban.
+# Mid-ladder value: about 3 fresh high-confidence offenses.
+REPUTATION_FASTLANE_THRESHOLD = 5.0
+
 # Attack vector severity weights (higher = more severe)
 VECTOR_SEVERITY = {
     "SYN Flood":  1.0,
@@ -96,6 +100,18 @@ def should_blackhole(src_ip: str, current_ban_level: int) -> bool:
                  src_ip, offense_score, BLACKHOLE_OFFENSE_THRESHOLD)
         return True
     return False
+
+
+def should_fastlane(src_ip: str, attack_vector: str, confidence: float) -> bool:
+    # Returns True if a known offender should skip Quarantine for an immediate Time Ban.
+    # Uncertain low-confidence detections stay on the careful path so weak
+    # current evidence never instant-bans on history alone. At or above the
+    # blackhole cap returns False; that path is owned by should_blackhole.
+    from backend.mitigation.traffic_filter import SINKHOLE_CONFIDENCE_THRESHOLD
+    if attack_vector == "Uncertain" and confidence < SINKHOLE_CONFIDENCE_THRESHOLD:
+        return False
+    score = get_decay_score(src_ip)
+    return REPUTATION_FASTLANE_THRESHOLD <= score < BLACKHOLE_OFFENSE_THRESHOLD
 
 
 def assign_priority(if_score: float, confidence: float, src_ip: str = "",

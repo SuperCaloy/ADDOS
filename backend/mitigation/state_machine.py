@@ -100,6 +100,15 @@ CONFIDENCE_LOCK_THRESHOLD = 0.80
 # Per-poll decay applied to a stale if_score peak; real attacks re-pin the peak each poll.
 IF_SCORE_DECAY = 0.95
 
+# Drop-counter liveness for silent bans: deltas arrive about once per second
+# per IP from flow-stats polls. Fresh data is trusted as-is; stale data
+# decays geometrically so a stopped attacker converges to clean release
+# within one extra ban round instead of looping forever on frozen highs.
+# Grace scales with prior volume: heavier floods need longer silence before
+# the gate calls them stopped.
+DROP_LIVENESS_FRESH_S = 5.0
+DROP_LIVENESS_DECAY = 0.8
+
 PHASE_LABELS = {
     1: "Quarantined",
     2: "Time Ban",
@@ -128,6 +137,10 @@ class IpState:
     sinkhole_flags:     int   = 0
     # Recent packets-per-second; used to avoid escalating an attacker that has stopped.
     recent_pps:         float = 0.0
+    # Drop-counter liveness for silent bans: per-second pps derived from the
+    # switch p100 rule's packet_count deltas (no worker results while silent).
+    drop_pps:           float = 0.0
+    drop_updated_at:    Optional[float] = None
     # Last transition reason, for audit and visualization.
     transition_reason:  str   = ""
     session_id:         str   = field(default_factory=lambda: uuid.uuid4().hex[:12])
@@ -350,6 +363,45 @@ class StateMachine:
                 recent_pps=recent_pps,
             )
 
+    def update_drop_liveness(self, src_ip: str, delta: int) -> None:
+        # Feeds per-IP switch drop-counter deltas into the ban record so the
+        # reban gate keeps a live still-flooding signal while Time Ban stays
+        # silent to the worker. Converts delta to pps over elapsed time since
+        # the previous delta (polls run about once per second). Best effort:
+        # unknown or inactive IPs are ignored, never created.
+        try:
+            count = int(delta)
+        except (TypeError, ValueError):
+            return
+        if count <= 0:
+            return
+        now = time.monotonic()
+        with self._lock:
+            state = self._states.get(src_ip)
+            if state is None or state.phase not in (2, 3):
+                return
+            prev = state.drop_updated_at
+            elapsed = (now - prev) if prev is not None else 1.0
+            elapsed = max(0.5, min(elapsed, 5.0))
+            pps = count / elapsed
+            state.drop_pps = pps
+            state.drop_updated_at = now
+            if state.phase == 2:
+                state.recent_pps = pps
+
+    def _effective_ban_pps(self, state: "IpState") -> Optional[float]:
+        # Returns the still-flooding signal for the reban gate. Fresh drop
+        # data wins; stale data decays geometrically so stopped attackers
+        # fall below the gate instead of rebanning forever on frozen highs.
+        # None means no drop data ever arrived: caller falls back to
+        # recent_pps (pre-silence behavior).
+        if state.drop_updated_at is None:
+            return None
+        stale = time.monotonic() - state.drop_updated_at
+        if stale <= DROP_LIVENESS_FRESH_S:
+            return state.drop_pps
+        return state.drop_pps * (DROP_LIVENESS_DECAY ** (stale - DROP_LIVENESS_FRESH_S))
+
     def on_detection(self, src_ip: str, if_score: float,
                      attack_class: str, confidence: float,
                      recent_pps: float = 0.0) -> str:
@@ -402,8 +454,11 @@ class StateMachine:
                     pass
 
                 else:
-                    if _prio == "High":
+                    if _prio == "High" or behavioral.should_fastlane(
+                        src_ip, attack_class, confidence
+                    ):
                         # High priority: skip observation, apply immediate Time Ban.
+                        # Known offenders at decay >= 5.0 take the same fast lane.
                         # Duration follows the reputation ladder; ban_lvl stays as audit counter.
                         ban_lvl  = min(1, MAX_BAN_LEVEL)
                         ban_secs = get_ban_duration_for_score(behavioral.get_decay_score(src_ip))
@@ -424,16 +479,19 @@ class StateMachine:
                         self._states[src_ip] = state
                         _ban_action, _ban_ttl = resolve_ban_action(ban_secs)
                         self._push_command(src_ip, _ban_action, ttl=_ban_ttl)
-                        log.info("High Priority -> Immediate Time Ban: %s  conf=%.1f%%  "
-                                 "vector=%s  duration=%ds",
-                                 src_ip, confidence * 100, attack_class, ban_secs)
+                        _fastlane = _prio != "High"
+                        log.info("Immediate Time Ban: %s  conf=%.1f%%  "
+                                 "vector=%s  duration=%ds  reason=%s",
+                                 src_ip, confidence * 100, attack_class, ban_secs,
+                                 "reputation fast-lane" if _fastlane else "high priority detection")
                         self._persist(state)
                         writer.log_mitigation_event(_build_mitigation_event(
                             src_ip=src_ip, attack_vector=attack_class,
                             confidence=confidence, priority=_prio,
                             action_taken=f"Time Ban ({ban_secs // 60}m)" if ban_secs >= 60 else f"Time Ban ({ban_secs}s)",
                             if_score=if_score, phase="Time Ban",
-                            event_type="transition", reason="high priority detection",
+                            event_type="transition",
+                            reason="reputation fast-lane" if _fastlane else "high priority detection",
                         ))
                     else:
                         # Low priority: Phase 1 observation (quarantine).
@@ -667,7 +725,8 @@ class StateMachine:
         ), force=True)
 
     def _handle_ban_expiry(self, src_ip: str, state: IpState) -> None:
-        recent_pps = getattr(state, "recent_pps", None)
+        live_pps = self._effective_ban_pps(state)
+        recent_pps = live_pps if live_pps is not None else getattr(state, "recent_pps", None)
         from backend.models import loader
         thr = loader.if_threshold if loader._loaded else 0.6004
         score_near = (state.if_score >= thr * 0.8) if state.if_score else False
@@ -901,6 +960,39 @@ class StateMachine:
                 log.info("Re-offence -> Blackhole (max ban level): %s  offences=%d",
                          src_ip, state.offence_count)
             else:
+                if behavioral.should_fastlane(src_ip, attack_class, confidence):
+                    ban_secs = get_ban_duration_for_score(
+                        behavioral.get_decay_score(src_ip))
+                    state = IpState(
+                        src_ip        = src_ip,
+                        phase         = 2,
+                        attack_vector = attack_class,
+                        if_score      = if_score,
+                        confidence    = confidence,
+                        priority      = _prio,
+                        action_taken  = "Time Ban",
+                        ban_level     = new_ban_lvl,
+                        offence_count = prev_offence_count + 1,
+                        permanent     = True,
+                        ttl_expires_at= time.monotonic() + ban_secs,
+                        recent_pps    = recent_pps,
+                    )
+                    self._states[src_ip] = state
+                    _ban_action, _ban_ttl = resolve_ban_action(ban_secs)
+                    self._push_command(src_ip, _ban_action, ttl=_ban_ttl)
+                    log.info("Re-offence -> Time Ban (reputation fast-lane): %s  duration=%ds",
+                             src_ip, ban_secs)
+                    self._persist(state)
+                    writer.log_mitigation_event(_build_mitigation_event(
+                        src_ip=src_ip,
+                        attack_vector=attack_class,
+                        confidence=confidence,
+                        priority=_prio,
+                        action_taken="Time Ban",
+                        if_score=if_score,
+                        phase="Time Ban - Re-offence fast-lane",
+                    ))
+                    return "Time Ban"
                 # Escalate to next ban level via Phase 1 observation first.
                 state = IpState(
                     src_ip        = src_ip,

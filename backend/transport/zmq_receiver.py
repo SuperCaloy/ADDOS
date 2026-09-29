@@ -139,12 +139,18 @@ def _handle_packet_in(msg: dict) -> None:
 def _handle_dropped_delta(msg: dict) -> None:
     # Records physical packet drops reported by OpenFlow switches into decision engine.
     # Updates aggregate drop counters for system observability and reporting.
+    # Also feeds per-IP liveness into the state machine so silent Time Bans
+    # keep a live still-flooding signal for the reban gate. Best effort only.
     src_ip = msg.get("src_ip", "")
     delta = int(msg.get("delta", 0))
     if src_ip and delta > 0:
         try:
             from backend.pipeline.decision_engine import record_dropped_packets
             record_dropped_packets(src_ip, delta)
+        except Exception:
+            pass
+        try:
+            state_machine.update_drop_liveness(src_ip, delta)
         except Exception:
             pass
 
@@ -214,16 +220,26 @@ def _handle_flow_stats(msg: dict) -> None:
 
     # Tiered banned-IP handling (reduce GIL waste)
     _ip_phase = 0
+    _ip_action = ""
     try:
         from backend.mitigation.state_machine import state_machine as _sm
         _ip_state = _sm.get_state(src_ip)
         if _ip_state is not None:
             _ip_phase = _ip_state.phase
+            _ip_action = _ip_state.action_taken or ""
     except Exception:
         pass
 
     if _ip_phase == 3:
         # Blackhole: traffic dropped at switch; skip submission
+        return
+
+    if _ip_phase == 2 and _ip_action == "Time Ban":
+        # Time Ban: full switch drop like Blackhole; skip submission so
+        # attacker drop-telemetry cannot crowd normal traffic in the queue.
+        # Unscored holds (action_taken "Holding (unscored...") still submit
+        # below so they can be scored. Liveness for the reban gate comes
+        # from per-IP drop-counter deltas, not worker results.
         return
 
     if _ip_phase == 2:
